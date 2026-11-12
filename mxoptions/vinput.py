@@ -65,6 +65,64 @@ class _Wheel:
         return out
 
 
+class Holds:
+    """Who holds which key. The mouse and the keyboard each hold keys through the one virtual keyboard, and may
+    hold the same one (both a Ctrl shortcut): ``emit(name, down)`` sends a key down when the first holder presses
+    it and up only when the last one lets go. A holder is any string ("mouse", "keyboard")."""
+
+    def __init__(self, emit):
+        self._emit = emit
+        self._held = {}  # name -> {owner: how many presses of that owner hold it}
+
+    def press(self, names, owner):
+        for name in names:
+            holders = self._held.get(name)
+            if not holders:
+                self._emit(name, True)
+                holders = self._held[name] = {}
+            holders[owner] = holders.get(owner, 0) + 1
+
+    def release(self, names, owner):
+        for name in reversed(list(names)):
+            holders = self._held.get(name)
+            if not holders or owner not in holders:
+                continue  # never pressed by this owner: someone else's hold stays
+            holders[owner] -= 1
+            if not holders[owner]:
+                del holders[owner]
+            if not holders:
+                del self._held[name]
+                self._emit(name, False)
+
+    def tap(self, names, wait=0.012):
+        """Press and release at once. A key someone holds already is left as it is: neither down nor up."""
+        names = [name for name in names if name not in self._held]
+        for name in names:
+            self._emit(name, True)
+        if names and wait:
+            time.sleep(wait)
+        for name in reversed(names):
+            self._emit(name, False)
+
+    def release_all(self, owner=None):
+        """Let go of what ``owner`` holds; with None, of everything (closing down)."""
+        for name in reversed(list(self._held)):
+            holders = self._held[name]
+            if owner is None:
+                holders.clear()
+            else:
+                holders.pop(owner, None)
+            if not holders:
+                del self._held[name]
+                try:
+                    self._emit(name, False)
+                except OSError:
+                    pass
+
+    def held(self):
+        return set(self._held)
+
+
 def _backend():
     if sys.platform == "win32":
         from . import vinput_windows as backend

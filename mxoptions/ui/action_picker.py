@@ -90,6 +90,10 @@ class ActionList(QWidget):
         self._sections = []  # (category label, [(row, extra widget shown under it or None)])
         self._rows = {}  # preset id -> row
         self._current = None
+        # Offered for a key of an app profile only: what the key does in every app (picked as None)
+        self.inherit_row = self._row(_("As in all apps"), "edit-undo")
+        self.inherit_row.clicked.connect(lambda: self.picked.emit(None))
+        self.inherit_row.hide()
         for category, title in actions.CATEGORIES:
             presets = [p for p in actions.PRESETS if p.category == category and p.id not in exclude and p.available]
             if not presets:
@@ -209,7 +213,9 @@ class ActionList(QWidget):
         for button in self._group.buttons():
             button.setChecked(False)
         self._group.setExclusive(True)
-        if preset and preset.id in self._rows:
+        if action is None and not self.inherit_row.isHidden():
+            self.inherit_row.setChecked(True)
+        elif preset and preset.id in self._rows:
             self._rows[preset.id].setChecked(True)
         elif kind == "keys":
             self.keys_row.setChecked(True)
@@ -253,7 +259,8 @@ class ActionPicker(QFrame):
 
     changed = Signal(object)
 
-    def __init__(self, allow_button_actions=True, parent=None):
+    def __init__(self, allow_button_actions=True, exclude=None, parent=None):
+        """``exclude``: catalogue ids not to offer (what a keyboard key cannot do)."""
         super().__init__(parent)
         self.setObjectName("picker")
         self.setFixedWidth(int(320 * ui_scale()))
@@ -320,7 +327,7 @@ class ActionPicker(QFrame):
         block.addWidget(shapes)
         layout.addWidget(self.gesture_block)
 
-        self.list = ActionList(exclude=frozenset() if allow_button_actions else actions.BUTTON_ONLY)
+        self.list = ActionList(exclude=(frozenset() if allow_button_actions else actions.BUTTON_ONLY) | frozenset(exclude or ()))
         self.list.picked.connect(self._picked)
         layout.addWidget(self.list, 1)
         self.stack.addWidget(main)
@@ -426,7 +433,9 @@ class ActionPicker(QFrame):
         self.fixed_text.setText(text)
         self.stack.setCurrentIndex(2)
 
-    def edit(self, title, action, subtitle=""):
+    def edit(self, title, action, subtitle="", inherit=False):
+        """``inherit``: offer "As in all apps" too, picked as None (``action`` None: it is the one chosen)."""
+        self.list.inherit_row.setVisible(inherit)
         self._action = copy.deepcopy(action)
         self.title.setText(title)
         self.about.set_text(subtitle)
@@ -435,7 +444,7 @@ class ActionPicker(QFrame):
 
     def _refresh(self):
         action = self._action or {}
-        self.list.set_current(action)
+        self.list.set_current(self._action)
         is_gestures = action.get("type") == "gestures"
         self.gesture_block.setVisible(is_gestures)
         if is_gestures:
@@ -451,6 +460,11 @@ class ActionPicker(QFrame):
                 value.setText(actions.describe(drawn[shape]) if shape in drawn else _("No action"))
 
     def _picked(self, action):
+        if action is None:  # "As in all apps"
+            self._action = None
+            self._refresh()
+            self.changed.emit(None)
+            return
         if action.get("type") == "gestures":
             if (self._action or {}).get("type") == "gestures":
                 return

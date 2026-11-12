@@ -1,0 +1,1361 @@
+"""The keyboard next to the mouse: found on the receiver or a node of its own, its keys diverted and given
+back safely, its actions kept apart from the mouse's. The engine runs on the test's thread with real
+transports on FakePorts; the devices are synthetic (tests/support.py)."""
+
+import copy
+import hashlib
+import json
+import logging
+import os
+import queue
+import shutil
+import stat
+import struct
+import tempfile
+import threading
+import time
+import unittest
+from unittest import mock
+
+from tests.support import Actions, Clock, FakeDevice, FakeInput, FakePort, Recorder
+from mxoptions import actions, config, device, engine, hidpp, keyboard
+
+# Synthetic controls: (cid, tid, getCidInfo flags). 0x30 = reprogrammable and divertable, 0x32 also on the F-row,
+# 0x10 reprogrammable only. 0x00D1 and 0x0034 are the Easy-Switch 1 and Fn ids the program keeps away from.
+CONTROLS = [(0x00D1, 0x00D1, 0x30), (0x0034, 0x0034, 0x30), (0x0F01, 0x0F01, 0x30), (0x0F02, 0x0F02, 0x32),
+            (0x0F03, 0x0F03, 0x10), (0x0F04, 0x0F04, 0x30), (0x0053, 0x0053, 0x30)]
+COPY = actions.keys("LEFTCTRL", "C")
+CTRL = actions.keys("LEFTCTRL")
+UNIT_A, UNIT_B = b"\x5e\x01\x5e\x02", b"\x5e\x03\x5e\x04"
+MODEL = b"\x0a\x0b\x0c\x0d\x0e\x0f"
+PATH, OTHER_PATH = "/dev/synthetic0", "/dev/synthetic1"
+
+
+def identity(unit, model=MODEL):
+    return hashlib.sha256(b"mxoptions keyboard\0" + model + unit).hexdigest()[:16]
+
+
+def keyboard_device(unit=UNIT_A, **kwargs):
+    return FakeDevice(controls=CONTROLS, unit=unit, model=MODEL, **kwargs)
+
+
+def mouse_device():
+    return FakeDevice("Synthetic mouse", kind=device.KIND_MOUSE, controls=[(0x0053, 0x0053, 0x30)])
+
+
+class Rig:
+    """An engine on the test's thread with one or two synthetic nodes; ``settle()`` runs what the engine's
+    thread would until the looking and the keyboard's task are over."""
+
+    def __init__(self, test, slots, keys=None, journal=None, rivals=(), receiver=True, nodes=None):
+        self.test = test
+        folder = tempfile.mkdtemp()
+        test.addCleanup(shutil.rmtree, folder, True)
+        self.journal = os.path.join(folder, "keyboard-diverted.json")
+        if journal is not None:
+            with open(self.journal, "w") as f:
+                f.write(journal if isinstance(journal, str) else json.dumps(journal))
+        patches = [mock.patch.object(keyboard, "JOURNAL", self.journal),
+                   mock.patch.object(engine.environment, "rivals", lambda: list(self.rivals))]
+        self.rivals = list(rivals)
+        self.ports = {PATH: FakePort(slots, receiver=receiver)}
+        self.nodes = nodes if nodes is not None else [(PATH, receiver)]
+        patches += [mock.patch.object(hidpp, "find_hidpp_nodes", lambda: list(self.nodes)),
+                    mock.patch.object(hidpp.hid, "Port", lambda path, *_args, **_kwargs: self.ports[path])]
+        for patcher in patches:
+            patcher.start()
+            test.addCleanup(patcher.stop)
+        cfg = copy.deepcopy(config.DEFAULTS)
+        cfg["keyboard"]["keys"] = copy.deepcopy(keys or {})
+        self.listener = Recorder()
+        self.engine = made = engine.Engine(cfg, self.listener)
+        made.vinput = self.input = FakeInput()
+        made.executor = self.mouse_actions = Actions()
+        made._rivals = list(rivals)
+        made._next_rivals = float("inf")
+        self.states = []
+        made._publish = lambda: self.states.append(made.keyboard.state())
+        made.keyboard.start()
+        test.addCleanup(self.stop)
+
+    @property
+    def port(self):
+        return self.ports[PATH]
+
+    @property
+    def kb(self):
+        return self.engine.keyboard
+
+    def transport(self, path=PATH):
+        return self.engine._transports[path]
+
+    def stop(self):
+        if self.kb._thread.is_alive():
+            self.kb._cancel.set()
+            self.kb._called_off.set()
+            self.kb._jobs.put(None)
+            self.kb._thread.join(2.0)
+        for transport in list(self.engine._transports.values()):
+            transport.close()
+
+    def settle(self, timeout=8.0):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            try:
+                item = self.engine._queue.get(timeout=0.05)
+            except queue.Empty:
+                if self.kb._task is None and not any(what == "pending" for states in self.kb._slots.values()
+                                                     for what in states.values()):
+                    return
+                continue
+            self.engine._handle(item)
+        raise AssertionError("the looking or the keyboard's task never ended")
+
+    def start(self):
+        """As the engine starts: look for the mouse, and the keyboard with it."""
+        self.engine._scan()
+        self.settle()
+        return self
+
+    def note(self, devidx, dev, feature, data, path=PATH):
+        """The device on ``devidx`` reports something (handled at once)."""
+        self.ports[path].notify(bytes([0x11, devidx, dev.index(feature), 0x00]) + bytes(data).ljust(16, b"\0"))
+        item = self.engine._queue.get(timeout=2.0)
+        self.engine._handle(item)
+
+    def keys_down(self, devidx, dev, *cids, path=PATH):
+        self.note(devidx, dev, device.REPROG_CONTROLS_V4, struct.pack("!HHHH", *(list(cids) + [0, 0, 0, 0])[:4]), path)
+
+    def link(self, devidx, linked, path=PATH):
+        self.ports[path].notify(bytes([0x10, devidx, 0x41, 0x04, 0x00 if linked else 0x40, 0, 0]))
+        self.engine._handle(self.engine._queue.get(timeout=2.0))
+
+    def saved(self):
+        try:
+            with open(self.journal) as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return None
+
+    def state(self):
+        return self.kb.state()
+
+    def key(self, cid):
+        return next(key for key in self.state()["keys"] if key["cid"] == cid)
+
+
+def diverts(dev):
+    """The keys a device was told to divert (setCidReporting with the divert bit) and to give back."""
+    return [(cid, bool(flags & 0x01)) for cid, flags in dev.sets]
+
+
+class Finding(unittest.TestCase):
+    def test_a_keyboard_before_the_mouse_is_taken_from_what_was_loaded(self):
+        kb, mouse = keyboard_device(), mouse_device()
+        rig = Rig(self, {1: kb, 2: mouse}).start()
+        self.assertIs(rig.engine.mouse.devidx, 2)
+        self.assertEqual(rig.kb.device.devidx, 1)
+        self.assertEqual(len(rig.port.sent(1, kb.index(device.FEATURE_SET), 0)), 1)  # loaded once only
+
+    def test_a_keyboard_after_the_mouse_is_found_without_a_word_from_the_receiver(self):
+        rig = Rig(self, {1: mouse_device(), 2: keyboard_device()}).start()
+        self.assertEqual((rig.engine.mouse.devidx, rig.kb.device.devidx), (1, 2))
+        self.assertTrue(rig.state()["connected"])
+        self.assertEqual(rig.state()["battery"], (80, device.BATTERY_DISCHARGING))
+        self.assertEqual(len(rig.state()["hosts"]), 3)
+
+    def test_other_devices_are_never_taken_for_a_keyboard(self):
+        rig = Rig(self, {1: mouse_device(), 2: FakeDevice("Synthetic numpad", kind=2),
+                         3: FakeDevice("Synthetic presenter", kind=6), 4: FakeDevice("Synthetic mouse 2", kind=device.KIND_MOUSE)})
+        rig.start()
+        self.assertIsNone(rig.kb.device)
+        self.assertIsNone(rig.state())
+
+    def test_nothing_is_asked_again_once_every_slot_is_known(self):
+        rig = Rig(self, {2: mouse_device()}).start()
+        sent = len(rig.port.written)
+        with Clock(time.monotonic()) as clock:
+            for _ in range(600):
+                clock.now += 1.0
+                rig.engine._tick()
+        self.assertEqual(len(rig.port.written), sent)
+        rig.port.devices[3] = keyboard_device()
+        rig.link(3, True)  # one slot, and only that one, is asked
+        rig.settle()
+        self.assertEqual({packet[1] for packet in rig.port.written[sent:]}, {3})
+        self.assertEqual(rig.kb.device.devidx, 3)
+
+    def test_a_keyboard_on_a_node_of_its_own_turns_up_while_the_mouse_is_in_use(self):
+        rig = Rig(self, {2: mouse_device()}).start()
+        with Clock(time.monotonic()) as clock:
+            for _ in range(30):
+                clock.now += 1.0
+                rig.engine._tick()
+        self.assertEqual(list(rig.engine._transports), [PATH])  # the same nodes: not a request anywhere
+        kb = keyboard_device()
+        rig.ports[OTHER_PATH] = FakePort({0xFF: kb}, receiver=False)
+        rig.nodes.append((OTHER_PATH, False))
+        with Clock(time.monotonic() + 3600) as clock:
+            rig.engine._tick()
+        rig.settle()
+        self.assertEqual(rig.kb.device.devidx, 0xFF)
+        self.assertIs(rig.kb.transport, rig.transport(OTHER_PATH))
+
+    def test_a_sleeping_slot_is_asked_again_later(self):
+        kb = keyboard_device()
+        kb.silent = True
+        rig = Rig(self, {1: mouse_device(), 2: kb}).start()
+        self.assertEqual(rig.kb._slots[rig.transport()][2], "asleep")
+        kb.silent = False
+        rig.kb._next_look = 0.0
+        rig.engine._tick()
+        rig.settle()
+        self.assertEqual(rig.kb.device.devidx, 2)
+
+    def test_a_look_that_runs_out_of_time_is_taken_up_again(self):
+        kb = keyboard_device()
+        kb.delay = 0.03
+        with mock.patch.object(keyboard, "PROBE_BUDGET", 0.3):
+            rig = Rig(self, {1: mouse_device(), 2: kb}).start()
+        self.assertIsNone(rig.kb.device)
+        self.assertNotIn(2, rig.kb._slots[rig.transport()])  # not reached: unknown, asked at the next round
+        kb.delay = 0.0
+        rig.kb._next_look = 0.0
+        rig.engine._tick()
+        rig.settle()
+        self.assertEqual(rig.kb.device.devidx, 2)
+
+    def test_what_a_look_found_counts_for_nothing_once_its_transport_is_gone(self):
+        kb = keyboard_device()
+        kb.delay = 0.02
+        rig = Rig(self, {1: mouse_device(), 2: kb})
+        rig.engine._scan()
+        transport = rig.transport()
+        rig.engine._drop_transport(transport)
+        rig.settle()
+        self.assertIsNone(rig.kb.device)
+        self.assertEqual(rig.kb._slots, {})
+
+    def test_what_a_look_found_counts_for_nothing_once_the_receiver_says_the_slot_changed(self):
+        kb = keyboard_device()
+        kb.delay = 0.01
+        rig = Rig(self, {1: mouse_device(), 2: kb})
+        rig.engine._scan()
+        generation = rig.kb._generation
+        rig.link(2, True)
+        self.assertEqual(rig.kb._generation, generation + 1)
+        rig.settle()
+        self.assertEqual(rig.kb.device.devidx, 2)
+        info = kb.index(device.DEVICE_INFO)
+        self.assertLessEqual(len(rig.port.sent(2, info, 0)), 2)  # the earlier look may have got that far
+
+    def test_stopping_ends_the_look_at_once(self):
+        kb = keyboard_device()
+        kb.silent = True
+        with mock.patch.object(keyboard, "PROBE_TIMEOUT_SHARED", 0.5):
+            rig = Rig(self, {1: mouse_device(), 2: kb})
+            rig.engine._scan()
+            time.sleep(0.1)
+            start = time.monotonic()
+            rig.kb.shutdown()
+        self.assertFalse(rig.kb._thread.is_alive())
+        self.assertLess(time.monotonic() - start, keyboard.PROBE_TIMEOUT_OWN + 0.5)
+        sent = len(rig.port.written)
+        time.sleep(0.3)
+        self.assertEqual(len(rig.port.written), sent)
+
+
+def flow_link(unit):
+    return hashlib.sha256(b"mxoptions keyboard flow\0" + identity(unit).encode("ascii")).hexdigest()[:16]
+
+
+class FlowRecord(unittest.TestCase):
+    """What Flow is told of the keyboard (mouse follows keyboard): its link, and how it went."""
+
+    def setUp(self):
+        self.kb = keyboard_device()
+        self.rig = Rig(self, {1: self.kb, 2: mouse_device()}, keys={"0x0f04": {"type": "host", "host": 1}}).start()
+
+    def told(self):
+        return [payload[1] for kind, payload in self.rig.listener.events if kind == "flow" and payload[0] == "keyboard"]
+
+    def test_the_link_is_made_from_the_identity_and_kept_once_it_is_gone(self):
+        rig = self.rig
+        self.assertEqual(rig.kb.link, flow_link(UNIT_A))
+        self.assertNotEqual(rig.kb.link, identity(UNIT_A))
+        self.assertEqual(self.told(), [{"link": flow_link(UNIT_A), "here": True, "drop": None}])
+        before = time.monotonic()
+        rig.link(1, False)
+        self.assertEqual(rig.kb.link, flow_link(UNIT_A))
+        when, sent = rig.kb.last_drop
+        self.assertTrue(before <= when <= time.monotonic())
+        self.assertFalse(sent)
+        self.assertEqual(self.told()[-1], {"link": flow_link(UNIT_A), "here": False, "drop": (when, False)})
+        rig.link(1, True)
+        rig.settle()
+        self.assertIsNone(rig.kb.last_drop)  # back: its going counts no more
+        self.assertEqual(self.told()[-1], {"link": flow_link(UNIT_A), "here": True, "drop": None})
+
+    def test_the_link_is_never_in_the_state(self):
+        rig = self.rig
+        for _ in range(2):
+            shown = json.dumps(rig.state())
+            self.assertNotIn(flow_link(UNIT_A), shown)
+            self.assertNotIn(identity(UNIT_A), shown)
+            rig.link(1, False)
+
+    def test_a_keyboard_sent_away_by_a_key_is_said_to_be(self):
+        rig = self.rig
+        rig.keys_down(1, self.kb, 0x0f04)
+        rig.keys_down(1, self.kb)
+        rig.settle()
+        self.assertEqual(self.kb.switched, [1])
+        rig.link(1, False)
+        self.assertTrue(rig.kb.last_drop[1])
+
+    def test_one_that_goes_while_the_switch_is_on_its_way_was_sent_too(self):
+        rig, out, answer = self.rig, threading.Event(), threading.Event()
+        self.addCleanup(answer.set)
+        with mock.patch.object(device.Mouse, "change_host", lambda _dev, _host: (out.set(), answer.wait(2.0))):
+            rig.keys_down(1, self.kb, 0x0f04)
+            while not out.is_set():  # the keys are given back first; then the request is out, its answer held back
+                try:
+                    rig.engine._handle(rig.engine._queue.get(timeout=0.05))
+                except queue.Empty:
+                    pass
+            rig.link(1, False)  # and the keyboard goes before it is back
+        self.assertTrue(rig.kb.last_drop[1])
+
+    def test_a_delayed_switch_keeps_its_grace_after_the_answer(self):
+        rig = self.rig
+        with Clock(time.monotonic()) as clock:
+            def delayed_reply(_dev, _host):
+                clock.now += 4.0
+            with mock.patch.object(device.Mouse, "change_host", delayed_reply):
+                rig.keys_down(1, self.kb, 0x0f04)
+                rig.keys_down(1, self.kb)
+                rig.settle()
+            clock.now += 2.0
+            self.assertGreater(rig.kb._leaving, clock.now)
+            rig.link(1, False)
+            self.assertTrue(rig.kb.last_drop[1])
+
+    def test_a_pending_switch_stays_owned_past_the_grace_period(self):
+        rig, out, answer = self.rig, threading.Event(), threading.Event()
+        self.addCleanup(answer.set)
+        with Clock(time.monotonic()) as clock:
+            with mock.patch.object(device.Mouse, "change_host", lambda _dev, _host: (out.set(), answer.wait(2.0))):
+                rig.keys_down(1, self.kb, 0x0f04)
+                for _attempt in range(80):
+                    if out.is_set():
+                        break
+                    try:
+                        rig.engine._handle(rig.engine._queue.get(timeout=0.05))
+                    except queue.Empty:
+                        pass
+                self.assertTrue(out.is_set())
+                clock.now += keyboard.SWITCH_GRACE + 1.0
+                rig.link(1, False)
+                answer.set()
+                self.assertTrue(rig.kb.last_drop[1])
+
+    def test_a_switch_with_no_answer_may_still_have_sent_the_keyboard(self):
+        rig = self.rig
+        with mock.patch.object(device.Mouse, "change_host", side_effect=hidpp.HidppTimeout("synthetic")):
+            rig.keys_down(1, self.kb, 0x0f04)
+            rig.keys_down(1, self.kb)
+            rig.settle()
+        rig.link(1, False)
+        self.assertTrue(rig.kb.last_drop[1])
+
+    def test_a_switch_that_failed_or_is_long_past_does_not_count(self):
+        rig = self.rig
+        with mock.patch.object(device.Mouse, "change_host", side_effect=hidpp.HidppError("synthetic")):
+            rig.keys_down(1, self.kb, 0x0f04)
+            rig.keys_down(1, self.kb)
+            rig.settle()
+        rig.link(1, False)
+        self.assertFalse(rig.kb.last_drop[1])
+        rig.link(1, True)
+        rig.settle()
+        rig.keys_down(1, self.kb, 0x0f04)
+        rig.keys_down(1, self.kb)
+        rig.settle()
+        rig.kb._sent_at -= keyboard.SWITCH_GRACE + 0.1  # it stayed after all, and goes much later by itself
+        rig.link(1, False)
+        self.assertFalse(rig.kb.last_drop[1])
+
+    def test_another_unit_takes_the_place_of_the_link(self):
+        rig = self.rig
+        rig.link(1, False)
+        rig.port.devices[1] = keyboard_device(UNIT_B)
+        rig.link(1, True)
+        rig.settle()
+        self.assertEqual((rig.kb.link, rig.kb.last_drop), (flow_link(UNIT_B), None))
+        self.assertNotEqual(flow_link(UNIT_A), flow_link(UNIT_B))
+
+    def test_a_keyboard_that_does_not_say_which_one_it_is_has_none(self):
+        rig = Rig(self, {1: mouse_device(), 2: keyboard_device(unit=bytes(4))}).start()
+        self.assertIsNone(rig.kb.link)
+        rig.link(2, False)
+        self.assertIsNone(rig.kb.last_drop)
+        self.assertEqual([payload[1]["link"] for kind, payload in rig.listener.events if kind == "flow"], [None, None])
+
+
+class Routing(unittest.TestCase):
+    def setUp(self):
+        self.kb, self.mouse = keyboard_device(), mouse_device()
+        self.rig = Rig(self, {1: self.kb, 2: self.mouse}, keys={"0x0053": COPY, "0x0f01": CTRL, "0x0f04": {"type": "host", "host": 1}})
+        self.rig.engine.cfg["buttons"]["back"] = actions.keys("LEFTSHIFT")
+        self.rig.start()
+
+    def test_the_same_control_on_both_runs_only_its_own_action(self):
+        rig = self.rig
+        rig.keys_down(1, self.kb, 0x0053)
+        self.assertEqual(rig.input.sent, [("KEY_LEFTCTRL", True), ("KEY_C", True)])
+        self.assertEqual(rig.mouse_actions.ran, [])
+        told = [kind for kind, payload in rig.listener.events if (kind, payload[0]) != ("flow", "keyboard")]  # found: for Flow
+        self.assertEqual(told, [])  # keys never count as mouse buttons
+        rig.note(2, self.mouse, device.REPROG_CONTROLS_V4, struct.pack("!HHHH", 0x0053, 0, 0, 0))
+        self.assertEqual(rig.mouse_actions.ran, [actions.keys("LEFTSHIFT")])
+        self.assertEqual(len(rig.input.sent), 2)
+
+    def test_the_mouse_starting_over_keeps_the_keyboard_s_keys_down(self):
+        rig = self.rig
+        rig.engine.executor = actions.Executor(rig.input, rig.engine._device_action)
+        rig.keys_down(1, self.kb, 0x0f01)
+        rig.engine._reset_input_state()
+        self.assertEqual(rig.input.sent, [("KEY_LEFTCTRL", True)])
+        rig.keys_down(1, self.kb)
+        self.assertEqual(rig.input.sent[-1], ("KEY_LEFTCTRL", False))
+
+    def test_the_keyboard_going_away_lets_go_of_its_keys_only(self):
+        rig = self.rig
+        rig.engine.executor = actions.Executor(rig.input, rig.engine._device_action)
+        rig.engine.executor.press(actions.keys("LEFTSHIFT"))
+        rig.keys_down(1, self.kb, 0x0f01)
+        rig.link(1, False)
+        self.assertIsNone(rig.kb.device)
+        self.assertEqual(rig.input._holds.held(), {"KEY_LEFTSHIFT"})
+        self.assertTrue(rig.engine.online)  # the mouse is not touched
+        self.assertFalse(rig.state()["connected"])
+        self.assertTrue(rig.state()["known"])
+
+    def test_easy_switch_from_a_key_moves_the_keyboard_not_the_mouse(self):
+        rig = self.rig
+        start = len(rig.port.written)
+        rig.keys_down(1, self.kb, 0x0f04)
+        rig.settle()
+        self.assertEqual(self.kb.switched, [1])
+        packets = rig.port.written[start:]
+        give_back = [i for i, p in enumerate(packets) if p[1] == 1 and p[2] == self.kb.index(device.REPROG_CONTROLS_V4) and p[3] >> 4 == 3]
+        switch = next(i for i, p in enumerate(packets) if p[1] == 1 and p[2] == self.kb.index(device.CHANGE_HOST) and p[3] >> 4 == 1)
+        self.assertTrue(give_back and max(give_back) < switch)  # every key back to normal first
+        self.assertEqual(rig.saved()["keyboards"], {})
+        self.assertFalse(any(p[1] == 2 for p in packets))
+        rig.link(1, False)
+        rig.link(1, True)  # back again: diverted again
+        rig.settle()
+        self.assertEqual(rig.saved()["keyboards"], {identity(UNIT_A): ["0x0053", "0x0f01", "0x0f04"]})
+
+    def test_the_keyboard_stays_while_a_key_cannot_be_given_back(self):
+        rig = self.rig
+        for failing in (4, None):  # refused; no answer at all
+            with self.subTest(failing=failing):
+                self.kb.failing[(device.REPROG_CONTROLS_V4, 3)] = failing
+                rig.keys_down(1, self.kb, 0x0f04)
+                rig.keys_down(1, self.kb)
+                rig.settle()
+                self.assertEqual(self.kb.switched, [])  # not sent off with keys this program changed
+                self.assertEqual(rig.saved()["keyboards"], {identity(UNIT_A): ["0x0053", "0x0f01", "0x0f04"]})
+                self.assertEqual(rig.state()["failed"], "switch")
+                self.assertEqual([k["id"] for k in rig.state()["keys"] if k["active"]], ["0x0053", "0x0f01", "0x0f04"])
+                del self.kb.failing[(device.REPROG_CONTROLS_V4, 3)]  # it stays, its keys as set
+        rig.keys_down(1, self.kb, 0x0f04)  # now it goes
+        rig.settle()
+        self.assertEqual(self.kb.switched, [1])
+        self.assertIsNone(rig.state()["failed"])
+
+    def test_a_switch_that_fails_leaves_the_keys_as_they_were(self):
+        rig = self.rig
+        with mock.patch.object(device.Mouse, "change_host", side_effect=hidpp.HidppError("synthetic")):
+            rig.keys_down(1, self.kb, 0x0f04)
+            rig.settle()
+        self.assertEqual(rig.state()["failed"], "switch")
+        self.assertEqual(rig.saved()["keyboards"], {identity(UNIT_A): ["0x0053", "0x0f01", "0x0f04"]})
+        self.assertTrue(rig.key(0x0F01)["active"])
+        self.assertEqual(diverts(self.kb)[-1], (0x0F04, True))  # given back, then taken again
+
+    def test_a_keyboard_that_does_not_go_has_its_keys_taken_again(self):
+        rig = self.rig
+        rig.keys_down(1, self.kb, 0x0f04)
+        rig.settle()
+        self.assertEqual((self.kb.switched, rig.saved()["keyboards"]), ([1], {}))
+        self.assertFalse(rig.key(0x0F01)["active"])
+        self.assertLessEqual(rig.kb._next_recovery, time.monotonic() + keyboard.SWITCH_GRACE)
+        sets = len(self.kb.sets)
+        new = copy.deepcopy(rig.engine.cfg)
+        new["keyboard"]["keys"]["0x0f02"] = CTRL
+        rig.engine._apply_config(new)  # on its way: nothing taken again yet
+        rig.settle()
+        self.assertEqual(len(self.kb.sets), sets)
+        rig.kb.tick(rig.kb._next_recovery)  # still here: no word from the receiver that it went
+        rig.settle()
+        self.assertTrue(rig.key(0x0F01)["active"])
+        self.assertEqual(rig.saved()["keyboards"], {identity(UNIT_A): ["0x0053", "0x0f01", "0x0f02", "0x0f04"]})
+
+    def test_a_key_held_while_its_action_changes_lets_go_at_once(self):
+        rig = self.rig
+        rig.keys_down(1, self.kb, 0x0f01)
+        old = copy.deepcopy(rig.engine.cfg)
+        new = copy.deepcopy(old)
+        new["keyboard"]["keys"]["0x0f01"] = actions.keys("LEFTALT")
+        rig.engine._apply_config(new)
+        self.assertEqual(rig.input.sent[-1], ("KEY_LEFTCTRL", False))
+        rig.keys_down(1, self.kb)
+        self.assertEqual(rig.input.sent[-1], ("KEY_LEFTCTRL", False))
+        self.assertNotIn("KEY_LEFTALT", [name for name, _down in rig.input.sent])
+
+
+NATIVE, NONE = {"type": "default"}, {"type": "none"}
+PASTE = actions.keys("LEFTCTRL", "V")
+
+
+def profile(app, keys):
+    return {"app": app, "name": app.title(), "keys": keys}
+
+
+def front(rig, app):
+    """``app`` comes to the front and stays there: the engine takes it up once it has been there long enough."""
+    rig.engine.set_front(app)
+    rig.engine._handle(rig.engine._queue.get(timeout=1.0))
+    rig.engine._take_front(float("inf"))
+    rig.settle()
+
+
+def macro(*names, wait=0, repeat=False):
+    steps = [{"do": "keys", "keys": [name]} for name in names]
+    if wait:
+        steps.insert(1, {"do": "delay", "ms": wait})
+    return {"type": "macro", "repeat": repeat, "steps": steps}
+
+
+class Profiles(unittest.TestCase):
+    """App profiles (config "keyboard.profiles"): the keys of the app in front over those for all apps."""
+
+    def rig(self, keys, profiles):
+        self.kb = keyboard_device()
+        rig = Rig(self, {1: self.kb, 2: mouse_device()}, keys=keys)
+        rig.engine.cfg["keyboard"]["profiles"] = copy.deepcopy(profiles)
+        return rig.start()
+
+    def taps(self, rig):
+        tapped = []
+        rig.input.tap = lambda names: tapped.append(names[0])
+        return tapped
+
+    def wait_for(self, tapped, name, timeout=3.0):
+        end = time.monotonic() + timeout
+        while name not in tapped and time.monotonic() < end:
+            time.sleep(0.01)
+        self.assertIn(name, tapped)
+
+    def test_what_a_key_does_in_an_app(self):
+        settings = {"keys": {"0x0f01": COPY, "0x0f02": CTRL, "0x0f03": NONE},
+                    "profiles": [profile("editor", {"0x0f01": NATIVE, "0x0f04": PASTE, "0x0f02": NONE}),
+                                 profile("editor", {"0x0f05": COPY}), profile("game", {})]}
+        self.assertEqual(keyboard.effective_keys(settings, None), settings["keys"])  # no app known: as for all apps
+        self.assertEqual(keyboard.effective_keys(settings, "browser"), settings["keys"])  # no profile
+        self.assertEqual(keyboard.effective_keys(settings, "game"), settings["keys"])  # a profile that changes nothing
+        self.assertEqual(keyboard.effective_keys(settings, "editor"),  # the first profile of the app counts
+                         {"0x0f02": NONE, "0x0f03": NONE, "0x0f04": PASTE})
+        self.assertEqual(keyboard.effective_keys({"keys": {"0x0f01": COPY}}, "editor"), {"0x0f01": COPY})  # older settings
+
+    def test_default_in_an_app_gives_the_key_back_and_it_is_taken_again_elsewhere(self):
+        written, real = [], keyboard.write_journal
+        with mock.patch.object(keyboard, "write_journal", lambda entries, path=None: (written.append(
+                (copy.deepcopy(entries), list(self.kb.sets) if hasattr(self, "kb") else [])), real(entries, path))):
+            rig = self.rig({"0x0f01": COPY, "0x0f02": CTRL}, [profile("editor", {"0x0f01": NATIVE, "0x0f04": PASTE})])
+            self.assertEqual(rig.saved()["keyboards"], {identity(UNIT_A): ["0x0f01", "0x0f02"]})
+            sets = len(self.kb.sets)
+            front(rig, "editor")
+            self.assertEqual(sorted(diverts(self.kb)[sets:]), [(0x0F01, False), (0x0F04, True)])
+            self.assertEqual(rig.saved()["keyboards"], {identity(UNIT_A): ["0x0f02", "0x0f04"]})
+            self.assertFalse(rig.key(0x0F01)["active"])
+            rig.keys_down(1, self.kb, 0x0f04)
+            rig.keys_down(1, self.kb)
+            self.assertEqual(rig.input.sent, [("KEY_LEFTCTRL", True), ("KEY_V", True), ("KEY_V", False), ("KEY_LEFTCTRL", False)])
+            sets, mark = len(self.kb.sets), len(written)
+            front(rig, "browser")
+        self.assertEqual(sorted(diverts(self.kb)[sets:]), [(0x0F01, True), (0x0F04, False)])
+        self.assertEqual(rig.saved()["keyboards"], {identity(UNIT_A): ["0x0f01", "0x0f02"]})
+        so_far = next(so_far for entries, so_far in written[mark:] if "0x0f01" in entries.get(identity(UNIT_A), []))
+        self.assertNotIn((0x0F01, True), [(cid, bool(flags & 1)) for cid, flags in so_far[sets:]])  # written down first
+        rig.keys_down(1, self.kb, 0x0f01)
+        self.assertEqual(rig.input.sent[-2:], [("KEY_LEFTCTRL", True), ("KEY_C", True)])
+
+    def test_none_in_an_app_keeps_the_key_and_sends_nothing(self):
+        rig = self.rig({"0x0f02": CTRL}, [profile("game", {"0x0f02": NONE, "0x0f01": NONE})])
+        sets = len(self.kb.sets)
+        front(rig, "game")
+        self.assertEqual(diverts(self.kb)[sets:], [(0x0F01, True)])  # taken, never given back
+        self.assertTrue(rig.key(0x0F02)["active"] and rig.key(0x0F01)["active"])
+        rig.keys_down(1, self.kb, 0x0f01, 0x0f02)
+        rig.keys_down(1, self.kb)
+        self.assertEqual(rig.input.sent, [])
+
+    def test_a_held_key_that_stays_the_same_is_kept_and_one_that_changes_lets_go(self):
+        rig = self.rig({"0x0f01": COPY, "0x0f02": CTRL}, [profile("editor", {"0x0f01": PASTE})])
+        rig.keys_down(1, self.kb, 0x0f01, 0x0f02)
+        front(rig, "editor")
+        self.assertEqual(rig.input.sent[-1], ("KEY_C", False))
+        self.assertEqual(rig.input._holds.held(), {"KEY_LEFTCTRL"})  # still held by the other key
+        rig.keys_down(1, self.kb, 0x0f02)  # the changed key comes up: nothing
+        self.assertEqual(rig.input._holds.held(), {"KEY_LEFTCTRL"})
+        self.assertNotIn("KEY_V", [name for name, _down in rig.input.sent])
+        rig.keys_down(1, self.kb)
+        self.assertEqual(rig.input._holds.held(), set())
+
+    def test_the_macros_of_a_changed_key_stop_those_of_the_others_go_on(self):
+        rig = self.rig({"0x0f01": macro("KEY_A", "KEY_B", wait=1500), "0x0f02": macro("KEY_M", "KEY_N")},
+                       [profile("editor", {"0x0f01": NATIVE})])
+        tapped = self.taps(rig)
+        rig.keys_down(1, self.kb, 0x0f01)
+        rig.keys_down(1, self.kb)          # let go: a macro that does not repeat plays to its end
+        self.wait_for(tapped, "KEY_A")
+        rig.keys_down(1, self.kb, 0x0f02)  # queued behind it
+        rig.keys_down(1, self.kb)
+        rig.keys_down(1, self.kb, 0x0f01)  # and the changed key's again
+        rig.keys_down(1, self.kb)
+        time.sleep(0.1)  # in its wait now
+        start = time.monotonic()
+        front(rig, "editor")
+        self.wait_for(tapped, "KEY_N")
+        self.assertLess(time.monotonic() - start, 1.2)  # its wait was cut short
+        time.sleep(0.2)
+        self.assertEqual(tapped, ["KEY_A", "KEY_M", "KEY_N"])
+
+    def test_the_macro_of_a_key_that_stays_the_same_plays_on(self):
+        rig = self.rig({"0x0f01": macro("KEY_A"), "0x0f02": macro("KEY_M", "KEY_N", wait=300)},
+                       [profile("editor", {"0x0f01": PASTE})])
+        tapped = self.taps(rig)
+        rig.keys_down(1, self.kb, 0x0f02)
+        rig.keys_down(1, self.kb, 0x0f02, 0x0f01)  # queued behind it
+        self.wait_for(tapped, "KEY_M")
+        front(rig, "editor")
+        self.wait_for(tapped, "KEY_N")
+        time.sleep(0.2)
+        self.assertEqual(tapped, ["KEY_M", "KEY_N"])
+
+    def test_a_repeating_macro_of_a_changed_key_stops_and_its_command_runs_on(self):
+        repeating = {"type": "macro", "repeat": True, "steps": [{"do": "command", "command": "sleep 60"},
+                                                                {"do": "keys", "keys": ["KEY_R"]}, {"do": "delay", "ms": 50}]}
+        rig = self.rig({"0x0f01": repeating}, [profile("editor", {"0x0f01": NATIVE})])
+        tapped = self.taps(rig)
+        with mock.patch.object(actions.subprocess, "Popen") as popen:
+            rig.keys_down(1, self.kb, 0x0f01)  # held: it repeats
+            self.wait_for(tapped, "KEY_R")
+            front(rig, "editor")
+            time.sleep(0.2)
+            count = len(tapped)
+            time.sleep(0.3)
+        self.assertEqual(len(tapped), count)
+        self.assertFalse(popen.return_value.kill.called or popen.return_value.terminate.called)
+
+    def test_only_the_last_app_counts_and_the_same_keys_ask_the_keyboard_nothing(self):
+        rig = self.rig({"0x0f01": COPY}, [profile("editor", {"0x0f01": NATIVE}), profile("viewer", {"0x0f02": NONE})])
+        sets, written = len(self.kb.sets), len(rig.port.written)
+        for app in ("editor", "viewer", "editor", "browser"):
+            rig.engine.set_front(app)
+            rig.engine._handle(rig.engine._queue.get(timeout=1.0))
+            self.assertLessEqual(rig.engine._idle_timeout(), engine.FRONT_DELAY)
+            rig.engine._take_front(rig.engine._front[1] - 0.01)  # not yet
+            self.assertIsNone(rig.kb._front)
+        rig.engine._take_front(float("inf"))
+        rig.settle()
+        self.assertEqual(rig.kb._front, "browser")
+        self.assertEqual(len(self.kb.sets), sets)  # as for all apps: nothing to change
+        self.assertEqual([p for p in rig.port.written[written:] if p[1] == 1], [])  # not even a read
+        front(rig, None)  # no app known
+        self.assertIsNone(rig.kb._front)
+        self.assertEqual(len(self.kb.sets), sets)
+        for bad in ("Editor", "a\x00b", "x" * 129, "", 3, ["editor"]):  # never one the settings could name
+            front(rig, bad)
+            self.assertIsNone(rig.kb._front)
+
+    def test_settings_for_another_app_change_nothing_here(self):
+        rig = self.rig({"0x0f01": COPY}, [profile("editor", {"0x0f01": NATIVE})])
+        rig.keys_down(1, self.kb, 0x0f01)
+        sets = len(self.kb.sets)
+        new = copy.deepcopy(rig.engine.cfg)
+        new["keyboard"]["profiles"][0]["keys"]["0x0f02"] = PASTE
+        new["keyboard"]["profiles"].append(profile("viewer", {"0x0f01": PASTE}))
+        rig.engine._apply_config(new)
+        rig.settle()
+        self.assertEqual(len(self.kb.sets), sets)
+        self.assertEqual(rig.input._holds.held(), {"KEY_LEFTCTRL", "KEY_C"})  # still held
+        new = copy.deepcopy(rig.engine.cfg)
+        new["keyboard"]["profiles"][0]["app"] = "browser"  # its own profile now changes it: let go
+        new["keyboard"]["profiles"][0]["keys"]["0x0f01"] = PASTE
+        rig.engine._apply_config(new)
+        front(rig, "browser")
+        self.assertEqual(rig.input._holds.held(), set())
+
+    def test_which_app_is_in_front_is_never_told(self):
+        rig = self.rig({"0x0f01": COPY}, [profile("secretapp", {"0x0f01": NATIVE})])
+        with self.assertLogs("mxoptions", logging.DEBUG) as logs:
+            front(rig, "secretapp")
+            rig.keys_down(1, self.kb, 0x0f02)
+            front(rig, "otherapp")
+            logging.getLogger("mxoptions").debug("marker")
+        self.assertFalse([line for line in logs.output if "secretapp" in line or "otherapp" in line])
+        told = json.dumps([rig.kb.state(), rig.states, [payload for _kind, payload in rig.listener.events]], default=str)
+        self.assertNotIn("secretapp", told)
+        self.assertNotIn("otherapp", told)
+
+
+class Diverting(unittest.TestCase):
+    def test_nothing_is_diverted_without_settings(self):
+        kb = keyboard_device()
+        rig = Rig(self, {1: mouse_device(), 2: kb}).start()
+        self.assertEqual(kb.sets, [])
+        self.assertIsNone(rig.saved())
+
+    def test_only_keys_the_keyboard_lets_go_of_are_diverted(self):
+        kb = keyboard_device()
+        rig = Rig(self, {1: mouse_device(), 2: kb}, keys={name: COPY for name in ("0x00d1", "0x0034", "0x0f02", "0x0f03", "0x0f99")})
+        rig.start()
+        self.assertEqual(diverts(kb), [(0x0F02, True)])  # an F-row key may be; Easy-Switch, Fn, the fixed key may not
+        self.assertTrue(all(flags & 0x1C == 0 for _cid, flags in kb.sets))  # never persistent, never raw
+        self.assertEqual(rig.key(0x00D1)["native_reason"], "protected")
+        self.assertTrue(rig.key(0x0F02)["active"])
+        self.assertNotIn(0x0F03, [key["cid"] for key in rig.state()["keys"]])
+        rig.kb.shutdown()
+        self.assertEqual(diverts(kb), [(0x0F02, True), (0x0F02, False)])
+        self.assertEqual(rig.saved()["keyboards"], {})
+
+    def test_a_key_given_an_action_that_cannot_run_is_never_diverted(self):
+        kb = keyboard_device()
+        bad = {"0x0f01": {"type": "keys", "keys": ["KEY_NOT_REAL"]}, "0x0f02": {"type": "macro", "steps": [{"do": "delay", "ms": "x"}]}}
+        rig = Rig(self, {1: mouse_device(), 2: kb}, keys=bad).start()  # not through config.clean: as it reaches the engine
+        self.assertEqual(kb.sets, [])
+        self.assertIsNone(rig.saved())
+        rig.keys_down(2, kb, 0x0f01, 0x0f02)
+        self.assertEqual(rig.input.sent, [])
+
+    def test_the_journal_comes_first(self):
+        kb = keyboard_device()
+        written = []
+        real = keyboard.write_journal
+        with mock.patch.object(keyboard, "write_journal", lambda entries, path=None: (written.append(
+                (copy.deepcopy(entries), list(kb.sets))), real(entries, path))):
+            Rig(self, {1: mouse_device(), 2: kb}, keys={"0x0f01": COPY}).start()
+        self.assertEqual(written[0], ({identity(UNIT_A): ["0x0f01"]}, []))  # written before the keyboard was told
+        self.assertEqual(diverts(kb), [(0x0F01, True)])
+
+    def test_resetting_gives_every_key_back(self):
+        kb = keyboard_device()
+        rig = Rig(self, {1: mouse_device(), 2: kb}, keys={"0x0f01": COPY, "0x0f02": CTRL}).start()
+        new = copy.deepcopy(rig.engine.cfg)
+        new["keyboard"] = {"keys": {}}
+        rig.engine._apply_config(new)
+        rig.settle()
+        self.assertEqual(sorted(diverts(kb)[2:]), [(0x0F01, False), (0x0F02, False)])
+        self.assertEqual(rig.saved()["keyboards"], {})
+        self.assertFalse(any(key["active"] for key in rig.state()["keys"]))
+
+    def test_on_exit_the_mouse_is_restored_first_then_the_keyboard_then_the_transports_close(self):
+        kb, mouse = keyboard_device(), mouse_device()
+        rig = Rig(self, {1: kb, 2: mouse}, keys={"0x0f01": COPY}).start()
+        rig.engine.executor = actions.Executor(rig.input, rig.engine._device_action)
+        rig.engine.cfg["buttons"]["back"] = COPY
+        rig.engine._apply(["buttons"])
+        start = len(rig.port.written)
+        transport = rig.transport()
+        rig.engine._shutdown()
+        order = [p[1] for p in rig.port.written[start:] if p[3] >> 4 == 3 and p[2] == 3]
+        self.assertEqual(order[0], 2)
+        self.assertEqual(order[-1], 1)
+        self.assertEqual(diverts(kb)[-1], (0x0F01, False))
+        self.assertTrue(transport.closed)
+        self.assertEqual(rig.saved()["keyboards"], {})
+
+
+class Responsiveness(unittest.TestCase):
+    """The keyboard slow to answer while the mouse is used: on the mouse's receiver, and on a node of its own."""
+
+    def rig(self, separate):
+        kb, mouse = keyboard_device(), mouse_device()
+        if separate:
+            rig = Rig(self, {2: mouse}, keys={"0x0f01": COPY})
+            rig.ports[OTHER_PATH] = FakePort({0xFF: kb}, receiver=False)
+            rig.nodes.append((OTHER_PATH, False))
+            rig.start()
+            rig.kb._next_nodes = 0.0
+            rig.engine._tick()
+            rig.settle()
+            port, devidx = rig.ports[OTHER_PATH], 0xFF
+        else:
+            rig = Rig(self, {1: kb, 2: mouse}, keys={"0x0f01": COPY}).start()
+            port, devidx = rig.port, 1
+        rig.engine.cfg["buttons"]["back"] = actions.keys("LEFTSHIFT")
+        self.assertTrue(rig.key(0x0F01)["active"])
+        return rig, kb, mouse, port, devidx
+
+    def mouse_heard(self, rig, mouse):
+        """The mouse's back button, handled as the engine's thread would; how long that took."""
+        rig.mouse_actions.ran.clear()
+        start = time.monotonic()
+        rig.note(2, mouse, device.REPROG_CONTROLS_V4, struct.pack("!HHHH", 0x0053, 0, 0, 0))
+        took = time.monotonic() - start
+        self.assertEqual(rig.mouse_actions.ran, [actions.keys("LEFTSHIFT")])
+        rig.note(2, mouse, device.REPROG_CONTROLS_V4, bytes(8))
+        return took
+
+    def test_the_mouse_is_heard_while_the_keyboard_is_slow_to_answer(self):
+        for separate in (False, True):
+            with self.subTest(separate=separate):
+                rig, kb, mouse, _port, devidx = self.rig(separate)
+                # each answer later than the mouse waits behind one (PROBE_TIMEOUT_SHARED), yet in time
+                kb.delays = dict.fromkeys((device.REPROG_CONTROLS_V4, device.UNIFIED_BATTERY, device.CHANGE_HOST), 0.2)
+                steps = {
+                    "setter": lambda: rig.engine._apply_config(dict(copy.deepcopy(rig.engine.cfg), keyboard={"keys": {
+                        "0x0f01": COPY, "0x0f02": CTRL}})),
+                    "getter": lambda: (rig.kb._reporting.pop(0x0F01), rig.kb.tick(rig.kb._next_recovery)),
+                    "status": lambda: (rig.link(devidx, False) if not separate else rig.kb._again(True),
+                                       rig.link(devidx, True) if not separate else None),
+                }
+                rig.kb._next_recovery = 0.0
+                for name, step in steps.items():
+                    start = time.monotonic()
+                    step()
+                    self.assertLess(time.monotonic() - start, 0.1, name)  # handed to the keyboard's thread
+                    time.sleep(0.05)
+                    busy = rig.kb._asked is not None or any(
+                        what == "pending" for states in rig.kb._slots.values() for what in states.values())
+                    self.assertTrue(busy, name)  # the keyboard is still being waited for ...
+                    self.assertLess(self.mouse_heard(rig, mouse), 0.1, name)  # ... and the mouse is heard meanwhile
+                    rig.settle()
+                    rig.kb._next_recovery = 0.0
+                self.assertTrue(rig.key(0x0F02)["active"])
+                self.assertTrue(rig.key(0x0F01)["active"])
+                rig.stop()
+
+    def test_the_engine_s_thread_never_waits_on_the_keyboard(self):
+        """Every request to the keyboard goes from the keyboard's thread, but those on exit, which are bounded."""
+        for separate in (False, True):
+            with self.subTest(separate=separate):
+                rig, kb, _mouse, port, devidx = self.rig(separate)
+                before = len(port.written)  # the mouse is looked for on the engine's thread, as ever
+                new = copy.deepcopy(rig.engine.cfg)
+                new["keyboard"]["keys"] = {"0x0f01": COPY, "0x0f02": CTRL, "0x0f04": {"type": "host", "host": 1}}
+                rig.engine._apply_config(new)  # diverting
+                rig.settle()
+                rig.kb._reporting.clear()
+                rig.kb.tick(rig.kb._next_recovery if rig.kb._next_recovery < float("inf") else 0.0)  # reading again
+                rig.kb.configure()
+                rig.settle()
+                rig.keys_down(devidx, kb, 0x0f04, path=OTHER_PATH if separate else PATH)  # giving back, Easy-Switch
+                rig.settle()
+                self.assertEqual(kb.switched, [1])
+                sent = [writer for packet, writer in zip(port.written[before:], port.writers[before:]) if packet[1] == devidx]
+                self.assertEqual(set(sent), {"keyboard"})
+                self.assertGreaterEqual(len(sent), 9)  # read, diverted, given back, switched
+                rig.stop()
+
+    def test_on_exit_a_silent_keyboard_is_given_up_on_in_time(self):
+        rig, kb, _mouse, _port, _devidx = self.rig(False)
+        kb.silent = True
+        start = time.monotonic()
+        rig.kb.shutdown()
+        self.assertLess(time.monotonic() - start, keyboard.SHUTDOWN_BUDGET + keyboard.PROBE_TIMEOUT_OWN + 0.5)
+        self.assertEqual(rig.saved()["keyboards"], {identity(UNIT_A): ["0x0f01"]})  # kept for the next start
+
+
+class CalledOff(unittest.TestCase):
+    """A request of a task that was dropped before it went never goes: not to the keyboard, not to another unit
+    on its slot. One that went already is not known to be undone, and is read back."""
+
+    def held(self):
+        """``keyboard._call`` that holds the first setCidReporting back until ``release`` is set."""
+        entered, release, real = threading.Event(), threading.Event(), keyboard._call
+
+        def call(dev, request):
+            if request[0] is keyboard._set_reporting and not entered.is_set():
+                entered.set()
+                self.assertTrue(release.wait(5.0))
+            return real(dev, request)
+        self.addCleanup(release.set)
+        return mock.patch.object(keyboard, "_call", call), entered, release
+
+    def drain(self, rig):
+        """Answers the keyboard's thread still has for the engine's (dropped: they no longer count)."""
+        time.sleep(0.4)
+        while not rig.engine._queue.empty():
+            rig.engine._handle(rig.engine._queue.get())
+
+    def divert(self, rig):
+        new = copy.deepcopy(rig.engine.cfg)
+        new["keyboard"]["keys"] = {"0x0f01": COPY}
+        rig.engine._apply_config(new)
+
+    def replaced(self, rig):
+        """The keyboard goes, another unit of the same model comes on its slot; it is found and set up as itself."""
+        rig.link(1, False)
+        self.assertIsNone(rig.kb.device)
+        unit_b = rig.port.devices[1] = keyboard_device(UNIT_B)
+        return unit_b, len(rig.port.written)
+
+    def found_again(self, rig, unit_b, sent):
+        self.drain(rig)
+        self.assertEqual(unit_b.sets, [])  # nothing of the old keyboard's task reached it
+        self.assertEqual([packet for packet in rig.port.written[sent:] if packet[1] == 1], [])  # not even a read
+        self.assertEqual(rig.saved()["keyboards"], {identity(UNIT_A): ["0x0f01"]})  # whether it went: asked when back
+        rig.link(1, True)
+        rig.settle()
+        self.assertEqual(diverts(unit_b), [(0x0F01, True)])  # its own task works
+        self.assertTrue(rig.key(0x0F01)["active"])
+        self.assertEqual(rig.saved()["keyboards"], {identity(UNIT_A): ["0x0f01"], identity(UNIT_B): ["0x0f01"]})
+
+    def test_a_request_waiting_behind_the_mouse_s_does_not_go_to_the_unit_that_took_its_slot(self):
+        old, mouse = keyboard_device(), mouse_device()
+        rig = Rig(self, {1: old, 2: mouse}).start()
+        mouse.delay = 0.5  # the mouse's own request holds the receiver meanwhile
+        foreground = threading.Thread(target=rig.transport().request, args=(2, 0, 1, bytes([0, 0, 1])))
+        foreground.start()
+        time.sleep(0.05)
+        self.divert(rig)
+        time.sleep(0.1)
+        self.assertIs(rig.kb._asked[0], keyboard._set_reporting)  # waiting for its turn
+        unit_b, sent = self.replaced(rig)
+        foreground.join()
+        self.found_again(rig, unit_b, sent)
+        self.assertEqual(old.sets, [])
+
+    def test_a_request_the_keyboard_s_thread_had_not_made_yet_does_not_go_to_the_unit_that_took_its_slot(self):
+        old = keyboard_device()
+        rig = Rig(self, {1: old, 2: mouse_device()}).start()
+        held, entered, release = self.held()
+        with held:
+            self.divert(rig)
+            self.assertTrue(entered.wait(2.0))
+            unit_b, sent = self.replaced(rig)
+            release.set()
+            self.found_again(rig, unit_b, sent)
+        self.assertEqual(old.sets, [])
+
+    def test_settings_changed_meanwhile_call_off_what_the_old_ones_wanted(self):
+        kb = keyboard_device()
+        rig = Rig(self, {1: kb, 2: mouse_device()}).start()
+        held, entered, release = self.held()
+        with held:
+            self.divert(rig)
+            self.assertTrue(entered.wait(2.0))
+            new = copy.deepcopy(rig.engine.cfg)
+            new["keyboard"] = {"keys": {}}  # reset to defaults before the key was diverted
+            rig.engine._apply_config(new)
+            release.set()
+            rig.settle()
+        self.assertEqual(kb.sets, [])  # never diverted, so nothing to give back
+        self.assertEqual(rig.saved()["keyboards"], {})  # the record made first is struck off: the keyboard says native
+        self.assertFalse(rig.key(0x0F01)["active"])
+        self.divert(rig)  # and what comes after works
+        rig.settle()
+        self.assertEqual(diverts(kb), [(0x0F01, True)])
+
+    def test_another_app_in_front_meanwhile_calls_off_what_the_old_keys_wanted(self):
+        kb = keyboard_device()
+        rig = Rig(self, {1: kb, 2: mouse_device()})
+        rig.engine.cfg["keyboard"]["profiles"] = [profile("editor", {"0x0f01": NATIVE})]
+        rig.start()
+        held, entered, release = self.held()
+        with held:
+            self.divert(rig)
+            self.assertTrue(entered.wait(2.0))
+            task = rig.kb._task
+            rig.engine.set_front("browser")  # no keys of its own: the same keys, nothing called off
+            rig.engine._handle(rig.engine._queue.get(timeout=1.0))
+            rig.engine._take_front(float("inf"))
+            self.assertIs(rig.kb._task, task)
+            rig.engine.set_front("editor")
+            rig.engine._handle(rig.engine._queue.get(timeout=1.0))
+            rig.engine._take_front(float("inf"))
+            self.assertIsNot(rig.kb._task, task)  # called off, started over
+            release.set()
+            rig.settle()
+        self.assertEqual(kb.sets, [])  # the request held back never went
+        self.assertEqual(rig.saved()["keyboards"], {})
+        front(rig, "browser")
+        self.assertEqual(diverts(kb), [(0x0F01, True)])
+
+    def test_on_exit_a_request_that_had_its_turn_but_not_gone_yet_never_goes(self):
+        kb = keyboard_device()
+        rig = Rig(self, {1: kb, 2: mouse_device()}).start()
+        transport, entered, release = rig.transport(), threading.Event(), threading.Event()
+        real = transport._take_turn
+
+        def take_turn(background, deadline, cancel):
+            real(background, deadline, cancel)
+            if background and not entered.is_set():  # its turn: held between that and the write
+                entered.set()
+                release.wait(5.0)
+        self.addCleanup(release.set)
+        with mock.patch.object(transport, "_take_turn", take_turn):
+            self.divert(rig)
+            self.assertTrue(entered.wait(2.0))
+            exiting = threading.Thread(target=rig.kb.shutdown)
+            exiting.start()
+            self.assertTrue(rig.kb._called_off.wait(2.0))
+            release.set()
+            exiting.join(5.0)
+        self.assertNotIn((0x0F01, True), diverts(kb))
+        self.assertEqual(rig.saved()["keyboards"], {})  # the keyboard said native on the way out
+
+    def test_a_divert_sent_before_the_keyboard_went_is_kept_on_record_and_read_back(self):
+        kb = keyboard_device()
+        rig = Rig(self, {1: kb, 2: mouse_device()}).start()
+        kb.delays = {device.REPROG_CONTROLS_V4: 0.5}  # sent, the answer still to come
+        self.divert(rig)
+        end = time.monotonic() + 2.0
+        while not kb.sets and time.monotonic() < end:
+            time.sleep(0.01)
+        rig.link(1, False)
+        self.drain(rig)
+        self.assertEqual(diverts(kb), [(0x0F01, True)])
+        self.assertEqual(rig.saved()["keyboards"], {identity(UNIT_A): ["0x0f01"]})  # its record stays
+        kb.delays = {}
+        rig.link(1, True)
+        rig.settle()
+        self.assertEqual(diverts(kb), [(0x0F01, True)])  # read back as diverted: kept, not sent again
+        self.assertTrue(rig.key(0x0F01)["active"])
+        rig.keys_down(1, kb, 0x0F01)
+        self.assertEqual(rig.input.sent[-2:], [("KEY_LEFTCTRL", True), ("KEY_C", True)])
+
+
+class Recovery(unittest.TestCase):
+    """What another run of the program, or another program, left behind."""
+
+    def journal(self, unit=UNIT_A, ids=("0x0f01",)):
+        return {"version": 1, "keyboards": {identity(unit): list(ids)}}
+
+    def test_another_unit_of_the_same_model_is_left_alone(self):
+        kb = keyboard_device(UNIT_B)
+        kb.reporting[0x0F01] = [0x01, 0]  # diverted by someone
+        rig = Rig(self, {1: mouse_device(), 2: kb}, keys={"0x0f01": COPY}, journal=self.journal()).start()
+        self.assertEqual(kb.sets, [])
+        self.assertEqual(rig.key(0x0F01)["native_reason"], "changed")
+        self.assertEqual(rig.saved(), self.journal())
+        rig.kb.shutdown()
+        self.assertEqual(kb.sets, [])
+
+    def test_the_unit_is_known_by_itself_not_by_its_slot(self):
+        other, own = keyboard_device(UNIT_B), keyboard_device(UNIT_A)
+        own.reporting[0x0F01] = [0x01, 0]
+        rig = Rig(self, {1: mouse_device(), 2: other}, journal=self.journal()).start()
+        self.assertEqual(other.sets, [])
+        rig.link(2, False)
+        rig.port.devices = {1: rig.port.devices[1], 3: own}
+        rig.link(3, True)
+        rig.settle()
+        self.assertEqual(diverts(own), [(0x0F01, False)])  # its own leftover, on another slot: given back
+        self.assertEqual(rig.saved()["keyboards"], {})
+
+    def test_a_key_recorded_but_never_diverted_is_struck_off(self):
+        kb = keyboard_device()
+        rig = Rig(self, {1: mouse_device(), 2: kb}, journal=self.journal()).start()
+        self.assertEqual(kb.sets, [])
+        self.assertEqual(rig.saved()["keyboards"], {})
+
+    def test_a_leftover_is_given_back_or_kept_as_the_settings_say(self):
+        for wanted in (False, True):
+            with self.subTest(wanted=wanted):
+                kb = keyboard_device()
+                kb.reporting[0x0F01] = [0x01, 0]
+                rig = Rig(self, {1: mouse_device(), 2: kb}, keys={"0x0f01": COPY} if wanted else {}, journal=self.journal())
+                rig.start()
+                if wanted:
+                    self.assertEqual(kb.sets, [])  # taken over as it is
+                    self.assertTrue(rig.key(0x0F01)["active"])
+                    self.assertEqual(rig.saved(), self.journal())
+                else:
+                    self.assertEqual(diverts(kb), [(0x0F01, False)])
+                    self.assertEqual(rig.saved()["keyboards"], {})
+                rig.stop()
+
+    def test_a_journal_that_cannot_be_written_stops_the_diverting(self):
+        kb = keyboard_device()
+        rig = Rig(self, {1: mouse_device(), 2: kb}, keys={"0x0f01": COPY})
+        folder = os.path.dirname(rig.journal)
+        os.chmod(folder, stat.S_IRUSR | stat.S_IXUSR)
+        self.addCleanup(os.chmod, folder, stat.S_IRWXU)
+        rig.start()
+        self.assertEqual(kb.sets, [])
+        self.assertFalse(rig.key(0x0F01)["active"])
+        self.assertTrue(rig.kb._next_recovery < float("inf"))  # tried again later
+
+    def test_a_key_given_back_stays_recorded_until_the_record_is_written(self):
+        kb = keyboard_device()
+        kb.reporting[0x0F01] = [0x01, 0]
+        rig = Rig(self, {1: mouse_device(), 2: kb}, journal=self.journal())
+        folder = os.path.dirname(rig.journal)
+        os.chmod(folder, stat.S_IRUSR | stat.S_IXUSR)
+        self.addCleanup(os.chmod, folder, stat.S_IRWXU)
+        rig.start()
+        self.assertEqual(diverts(kb), [(0x0F01, False)])
+        self.assertEqual(rig.saved(), self.journal())
+        self.assertEqual(rig.kb._journal, self.journal()["keyboards"])
+        os.chmod(folder, stat.S_IRWXU)
+        rig.kb.tick(rig.kb._next_recovery)
+        rig.settle()
+        self.assertEqual(rig.saved()["keyboards"], {})
+
+    def test_an_unreadable_journal_touches_nothing(self):
+        kb = keyboard_device()
+        kb.reporting[0x0F01] = [0x01, 0]
+        rig = Rig(self, {1: mouse_device(), 2: kb}, keys={"0x0f04": COPY}, journal=self.journal())
+        os.chmod(rig.journal, 0)
+        self.addCleanup(os.chmod, rig.journal, stat.S_IRUSR | stat.S_IWUSR)
+        rig.start()
+        self.assertEqual(kb.sets, [])
+        self.assertEqual(rig.state()["reason"], "journal")
+        self.assertEqual(rig.key(0x0F01)["native_reason"], "changed")  # not claimed to be back to normal
+
+    def test_a_journal_in_another_form_is_neither_used_nor_replaced(self):
+        good = self.journal()
+        cases = {
+            "not json": "{nope",
+            "version 2": json.dumps(dict(good, version=2)),
+            "version true": json.dumps(dict(good, version=True)),
+            "more fields": json.dumps(dict(good, note="")),
+            "bad identity": json.dumps({"version": 1, "keyboards": {"XYZ": ["0x0f01"]}}),
+            "bad key": json.dumps({"version": 1, "keyboards": {identity(UNIT_A): ["0x0F01"]}}),
+            "unsorted": json.dumps({"version": 1, "keyboards": {identity(UNIT_A): ["0x0f02", "0x0f01"]}}),
+            "twice": json.dumps({"version": 1, "keyboards": {identity(UNIT_A): ["0x0f01", "0x0f01"]}}),
+            "empty list": json.dumps({"version": 1, "keyboards": {identity(UNIT_A): []}}),
+            "too many keyboards": json.dumps({"version": 1, "keyboards": {f"{n:016x}": ["0x0f01"] for n in range(17)}}),
+            "too many keys": json.dumps({"version": 1, "keyboards": {identity(UNIT_A): [f"0x{n:04x}" for n in range(129)]}}),
+        }
+        for name, text in cases.items():
+            with self.subTest(name):
+                kb = keyboard_device()
+                kb.reporting[0x0F01] = [0x01, 0]
+                rig = Rig(self, {1: mouse_device(), 2: kb}, keys={"0x0f04": COPY}, journal=text)
+                rig.start()
+                self.assertEqual(kb.sets, [])
+                self.assertEqual(rig.state()["reason"], "journal")
+                with open(rig.journal) as f:
+                    self.assertEqual(f.read(), text)
+                rig.kb.shutdown()
+                self.assertEqual(kb.sets, [])
+                rig.stop()
+
+    def test_a_keyboard_that_does_not_say_which_one_it_is_is_left_alone(self):
+        variants = {"no device information": {"info": False}, "zeros": {"unit": bytes(4)}, "ones": {"unit": b"\xff" * 4}}
+        for name, kwargs in [*variants.items(), ("unreadable", {})]:
+            with self.subTest(name):
+                kb = keyboard_device(**kwargs) if "unit" in kwargs else FakeDevice(controls=CONTROLS, **kwargs)
+                if name == "unreadable":
+                    kb.failing[(device.DEVICE_INFO, 0)] = 4
+                rig = Rig(self, {1: mouse_device(), 2: kb}, keys={"0x0f01": COPY})
+                rig.start()
+                self.assertEqual(kb.sets, [])
+                self.assertEqual(rig.state()["reason"], "identity")
+                self.assertTrue(rig.state()["connected"])  # still shown, with its battery
+                self.assertIsNone(rig.saved())
+                rig.stop()
+
+    def test_with_other_software_running_no_key_is_touched(self):
+        kb = keyboard_device()
+        kb.reporting[0x0F01] = [0x01, 0]
+        rig = Rig(self, {1: mouse_device(), 2: kb}, keys={"0x0f04": COPY}, journal=self.journal(), rivals=["Solaar"])
+        rig.start()
+        self.assertEqual(kb.sets, [])
+        self.assertEqual(rig.state()["reason"], "rivals")
+        self.assertEqual(rig.key(0x0F01)["native_reason"], "changed")
+        rig.kb.shutdown()
+        self.assertEqual(kb.sets, [])
+        self.assertEqual(rig.saved(), self.journal())
+
+    def test_a_recorded_key_someone_else_has_changed_since_is_struck_off(self):
+        for reporting in ([0x05, 0], [0x00, 0x0F02]):  # diverted persistently; sent as another key
+            with self.subTest(reporting=reporting):
+                kb = keyboard_device()
+                kb.reporting[0x0F01] = list(reporting)
+                rig = Rig(self, {1: mouse_device(), 2: kb}, keys={"0x0f01": COPY}, journal=self.journal())
+                rig.start()
+                self.assertEqual(kb.sets, [])
+                self.assertEqual(rig.saved()["keyboards"], {})
+                self.assertEqual(rig.key(0x0F01)["native_reason"], "foreign")
+                rig.stop()
+
+    def test_what_the_keyboard_says_after_a_doubtful_divert_decides(self):
+        kb = keyboard_device()
+        kb.echo = False  # it did divert, but answered something else
+        rig = Rig(self, {1: mouse_device(), 2: kb}, keys={"0x0f01": COPY}).start()
+        self.assertTrue(rig.key(0x0F01)["active"])
+        self.assertEqual(rig.saved()["keyboards"], {identity(UNIT_A): ["0x0f01"]})
+
+        kb = keyboard_device()
+        kb.failing[(device.REPROG_CONTROLS_V4, 3)] = 4  # refused: still native
+        rig = Rig(self, {1: mouse_device(), 2: kb}, keys={"0x0f01": COPY}).start()
+        self.assertFalse(rig.key(0x0F01)["active"])
+        self.assertEqual(rig.saved()["keyboards"], {})
+
+    def test_a_divert_without_an_answer_is_kept_and_tried_again(self):
+        kb = keyboard_device()
+        kb.failing[(device.REPROG_CONTROLS_V4, 3)] = None  # no answer at all
+        rig = Rig(self, {1: mouse_device(), 2: kb}, keys={"0x0f01": COPY})
+        with mock.patch.object(device.Mouse, "call", lambda self, feature, function, *params, no_reply=False, timeout=1.5:
+                               self.transport.request(self.devidx, self.features[feature], function, bytes(params),
+                                                      timeout=min(timeout, 0.2), no_reply=no_reply)):
+            rig.start()
+            self.assertEqual(rig.saved()["keyboards"], {identity(UNIT_A): ["0x0f01"]})  # whether it went through is not known
+            self.assertEqual(rig.key(0x0F01)["native_reason"], "pending")
+            del kb.failing[(device.REPROG_CONTROLS_V4, 3)]
+            rig.kb.tick(rig.kb._next_recovery)
+            rig.settle()
+        self.assertTrue(rig.key(0x0F01)["active"])
+
+    def test_a_key_that_could_not_be_given_back_on_exit_is_given_back_at_the_next_start(self):
+        kb = keyboard_device()
+        rig = Rig(self, {1: mouse_device(), 2: kb}, keys={"0x0f01": COPY}).start()
+        kb.failing[(device.REPROG_CONTROLS_V4, 3)] = 4
+        kb.failing[(device.REPROG_CONTROLS_V4, 2)] = 4  # and it cannot say how the key is
+        rig.kb.shutdown()
+        self.assertEqual(rig.saved()["keyboards"], {identity(UNIT_A): ["0x0f01"]})
+        rig.stop()
+        kb.failing.clear()
+        again = Rig(self, {1: mouse_device(), 2: kb}, journal=rig.saved()).start()
+        self.assertEqual(diverts(kb)[-1], (0x0F01, False))
+        self.assertEqual(again.saved()["keyboards"], {})
+
+    def test_which_unit_it_is_stays_in_the_journal(self):
+        kb = keyboard_device()
+        with self.assertLogs("mxoptions", level="DEBUG") as logs:
+            logging.getLogger("mxoptions").debug("start")
+            rig = Rig(self, {1: mouse_device(), 2: kb}, keys={"0x0f01": COPY}).start()
+            rig.keys_down(2, kb, 0x0f01)
+            rig.kb.shutdown()
+        secret = (identity(UNIT_A), UNIT_A.hex(), UNIT_A.hex(" "), MODEL.hex())
+        shown = json.dumps([rig.states, rig.engine.cfg, logs.output], default=str)
+        for text in secret:
+            self.assertNotIn(text, shown)
+
+
+class Journal(unittest.TestCase):
+    def test_written_for_the_user_alone_and_read_back(self):
+        folder = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, folder)
+        path = os.path.join(folder, "sub", "keyboard-diverted.json")
+        entries = {identity(UNIT_A): ["0x0f02", "0x0f01"], identity(UNIT_B): []}
+        keyboard.write_journal(entries, path)
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        with open(path) as f:
+            self.assertEqual(json.load(f), {"version": 1, "keyboards": {identity(UNIT_A): ["0x0f01", "0x0f02"]}})
+        self.assertEqual(keyboard.read_journal(path), {identity(UNIT_A): ["0x0f01", "0x0f02"]})
+        self.assertEqual(keyboard.read_journal(os.path.join(folder, "none.json")), {})
+
+
+class Battery(unittest.TestCase):
+    def test_low_battery_is_said_once_per_discharge(self):
+        armed, said = True, []
+        for reading in [(40, 0), (16, 0), (15, 0), (14, 0), (9, 0), (9, 1), (30, 0), (12, 0), None, (12, 0)]:
+            armed, say = keyboard.low_battery(armed, reading)
+            said.append(say)
+        self.assertEqual(said, [False, False, True, False, False, False, False, True, False, False])
+
+
+class State(unittest.TestCase):
+    def test_without_a_keyboard_the_state_is_as_before(self):
+        made = engine.Engine(copy.deepcopy(config.DEFAULTS), Recorder())
+        seen = []
+        made.listener.on_state = seen.append
+        made._publish()
+        self.assertEqual(set(seen[0]), {"connected", "known", "name", "uinput", "rivals", "battery", "current_host",
+                                        "hosts", "dpi", "wheel_mode", "caps", "keyboard"})
+        self.assertIsNone(seen[0]["keyboard"])
+
+    def test_the_keyboard_and_its_receiver_go_their_own_ways(self):
+        kb = keyboard_device()
+        rig = Rig(self, {2: mouse_device()})
+        rig.ports[OTHER_PATH] = FakePort({0xFF: kb}, receiver=False)
+        rig.nodes.append((OTHER_PATH, False))
+        rig.start()
+        rig.kb._next_nodes = 0.0
+        rig.engine._tick()
+        rig.settle()
+        self.assertIs(rig.kb.transport, rig.transport(OTHER_PATH))
+        rig.engine._drop_transport(rig.transport(OTHER_PATH))  # the keyboard's Bluetooth link drops
+        self.assertIsNone(rig.kb.device)
+        self.assertTrue(rig.engine.online)
+        rig.engine._drop_transport(rig.transport())
+        self.assertIsNone(rig.engine.mouse)
+
+    def test_the_keyboard_coming_and_going_leaves_the_mouse_be(self):
+        kb, mouse = keyboard_device(), mouse_device()
+        rig = Rig(self, {1: mouse, 2: kb}).start()
+        sent = len(rig.port.sent(1))
+        rig.link(2, False)
+        rig.link(2, True)
+        rig.settle()
+        self.assertTrue(rig.engine.online)
+        self.assertEqual(len(rig.port.sent(1)), sent)  # the mouse was not set up again
+        self.assertEqual(rig.kb.device.devidx, 2)
+
+
+class MacroSteps(unittest.TestCase):
+    """Vibration steps reach the mouse only through the engine's queue, from either executor."""
+
+    def haptic(self, rig):
+        """The next vibration asked of the engine; what else was queued is handled as the engine would."""
+        end = time.monotonic() + 2.0
+        while time.monotonic() < end:
+            item = rig.engine._queue.get(timeout=2.0)
+            if item[0] == "haptic":
+                return item
+            rig.engine._handle(item)
+        raise AssertionError("no vibration was asked for")
+
+    def test_a_key_s_vibration_step_plays_only_on_a_mouse_that_can(self):
+        rig = Rig(self, {1: keyboard_device(), 2: mouse_device()}).start()
+        rig.kb.executor.trigger({"type": "macro", "steps": [{"do": "haptic", "waveform": 4}]})
+        item = self.haptic(rig)
+        self.assertEqual(item, ("haptic", 4, False))
+        sent = len(rig.port.written)
+        rig.engine._handle(item)  # the synthetic mouse has no haptic motor
+        self.assertEqual(len(rig.port.written), sent)
+        played = []
+        motor = mock.Mock(haptic_waveforms=[4], play_haptic=lambda waveform, wait: played.append((waveform, wait)))
+        for mouse, online in ((None, False), (motor, False), (motor, True)):
+            rig.engine.mouse, rig.engine.online = mouse, online
+            rig.engine._handle(item)
+        self.assertEqual(played, [(4, True)])
+        self.assertEqual(len(rig.port.written), sent)
+
+    def test_the_mouse_s_macros_vibrate_through_the_same_queue(self):
+        made = engine.Engine(copy.deepcopy(config.DEFAULTS), Recorder())
+        made._publish = lambda: None
+        with mock.patch.object(engine.vinput, "create", FakeInput), mock.patch.object(made.keyboard, "start"), \
+                mock.patch.object(made.keyboard, "shutdown"):
+            made._running = False
+            made._run()
+        self.assertEqual(made.executor.macros.haptic, made.play_haptic)
+        self.assertEqual(made.executor.macros.trigger, made.executor.trigger)
+        made.executor.macros._step({"do": "haptic", "waveform": 7})
+        self.assertEqual(made._queue.get_nowait(), ("haptic", 7, False))
+
+
+class Picker(unittest.TestCase):
+    def test_a_key_is_offered_nothing_it_cannot_do(self):
+        from mxoptions.ui import keyboard_page
+        for preset in actions.PRESETS:
+            kind = preset.action.get("type")
+            with self.subTest(preset.id):
+                if kind not in config.KEYBOARD_ACTIONS and kind != "default":
+                    self.assertIn(preset.id, keyboard_page.KEYBOARD_EXCLUDE)
+                else:
+                    self.assertNotIn(preset.id, keyboard_page.KEYBOARD_EXCLUDE)
+
+
+if __name__ == "__main__":
+    unittest.main()

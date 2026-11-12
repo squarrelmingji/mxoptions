@@ -94,5 +94,254 @@ class Migration(unittest.TestCase):
         self.assertEqual(loaded["wheel_click"]["sound"], "relay")
 
 
+
+class Keyboard(unittest.TestCase):
+    COPY = {"type": "keys", "keys": ["KEY_LEFTCTRL", "KEY_C"]}
+    load = Migration.load
+
+    def test_what_keys_may_do(self):
+        good = {
+            "0x00c7": self.COPY, "0x00c8": {"type": "none"}, "0x00c9": {"type": "button", "button": "BTN_LEFT"},
+            "0x00ca": {"type": "shortcut", "component": "org_kde_spectacle_desktop", "name": "RecordRegion"},
+            "0x00cb": {"type": "desktop", "do": "overview"}, "0x00cc": {"type": "command", "command": "true"},
+            "0x00cd": {"type": "script", "name": "s", "script": "echo"},
+            "0x00ce": {"type": "macro", "name": "m", "repeat": True, "steps": [{"do": "keys", "keys": ["KEY_A"]}]},
+            "0x00cf": {"type": "host", "host": 1}, "0x00d0": {"type": "hook", "name": "h"},
+        }
+        self.assertEqual(config.clean({"keyboard": {"keys": copy.deepcopy(good)}})["keyboard"]["keys"], good)
+
+    def test_what_keys_may_not_do_or_are_not_is_dropped(self):
+        bad = {
+            "0x00C7": self.COPY, "199": self.COPY, "0x0c7": self.COPY, "0x000c7": self.COPY,  # not a key id
+            "0x0001": {"type": "default"}, "0x0002": {"type": "gestures"}, "0x0003": {"type": "ring"},
+            "0x0004": {"type": "wheel_mode"}, "0x0005": {"type": "dpi_cycle"}, "0x0006": {"type": "dpi_shift"},
+            "0x0007": {"type": "flow"}, "0x0008": "copy", "0x0009": {"type": "keys", "keys": []},
+            "0x000a": {"type": "keys", "keys": [1]}, "0x000b": {"type": "button", "button": "KEY_A"},
+            "0x000c": {"type": "host", "host": "1"}, "0x000d": {"type": "host", "host": True},
+            "0x000e": {"type": "host", "host": 99}, "0x000f": {"type": "command"}, "0x0010": {"type": "hook", "name": 3},
+            "0x0011": {"type": "macro", "steps": [{"do": "warp"}]}, "0x0012": {"type": "macro", "steps": "x"},
+            "0x0013": {"type": "shortcut", "name": "n"},
+        }
+        self.assertEqual(config.clean({"keyboard": {"keys": bad}})["keyboard"]["keys"], {})
+        for section in ("nonsense", ["list"], {"keys": "nonsense"}, {"keys": ["0x00c7"]}):
+            with self.subTest(section=section):
+                self.assertEqual(config.clean({"keyboard": section})["keyboard"], {"keys": {}, "profiles": []})
+
+    def test_malformed_desktop_fields_are_dropped_without_raising(self):
+        for value in ([], {}, None, True, 4):
+            with self.subTest(value=value):
+                cleaned = config.clean({"keyboard": {"keys": {"0x00c7": {"type": "desktop", "do": value}}}})
+                self.assertEqual(cleaned["keyboard"]["keys"], {})
+
+    def test_what_a_key_runs_is_checked_to_the_last_step(self):
+        step = lambda **fields: {"type": "macro", "name": "m", "steps": [fields]}  # noqa: E731
+        good = {
+            "0x0001": step(do="keys", keys=["KEY_LEFTCTRL", "KEY_C"]), "0x0002": step(do="keys", keys=[]),
+            "0x0003": step(do="text", text="hello"), "0x0004": step(do="delay", ms=0), "0x0005": step(do="delay", ms=10000),
+            "0x0006": step(do="click", button="BTN_RIGHT"), "0x0007": step(do="command", command="true"),
+            "0x0008": {"type": "keys", "keys": ["KEY_F5"]}, "0x0009": {"type": "button", "button": "BTN_SIDE"},
+            "0x000a": {"type": "macro", "steps": [{"do": "delay", "ms": 5}] * 64},
+        }
+        self.assertEqual(config.clean({"keyboard": {"keys": copy.deepcopy(good)}})["keyboard"]["keys"], good)
+        bad = {
+            "0x0001": {"type": "keys", "keys": ["KEY_NOT_REAL"]}, "0x0002": {"type": "keys", "keys": ["KEY_A"] * 17},
+            "0x0003": step(do="keys", keys=["KEY_NOT_REAL"]), "0x0004": step(do="keys"), "0x0005": step(do="keys", keys="KEY_A"),
+            "0x0006": step(do="delay", ms="invalid"), "0x0007": step(do="delay", ms=-1), "0x0008": step(do="delay", ms=10001),
+            "0x0009": step(do="delay", ms=1.5), "0x000a": step(do="delay", ms=True), "0x000b": step(do="delay"),
+            "0x000c": step(do="click", button="KEY_A"), "0x000d": step(do="click"), "0x000e": step(do="text"),
+            "0x000f": step(do="text", text=3), "0x0010": step(do="command"), "0x0011": step(do="command", command=["ls"]),
+            "0x0012": {"type": "macro", "steps": []}, "0x0013": {"type": "macro", "steps": [{"do": "delay", "ms": 5}] * 65},
+            "0x0014": {"type": "macro", "repeat": "yes", "steps": [{"do": "delay", "ms": 5}]},
+            "0x0015": {"type": "macro", "count": 3, "repeat": 1, "steps": [{"do": "delay", "ms": 5}]},
+            "0x0016": {"type": "macro", "steps": ["delay"]}, "0x0017": {"type": "desktop", "do": "no_such_thing"},
+            "0x0018": {"type": "command", "command": ""}, "0x0019": {"type": "script", "script": ""},
+            "0x001a": {"type": "shortcut", "component": "", "name": "n"}, "0x001b": {"type": "hook", "name": ""},
+            "0x001c": {"type": "keys", "keys": ["KEY_A", None]}, "0x001d": {"type": "command", "command": "x" * 70000},
+        }
+        self.assertEqual(config.clean({"keyboard": {"keys": bad}})["keyboard"]["keys"], {})
+        for action in bad.values():
+            with self.subTest(action=action):
+                self.assertFalse(config.keyboard_action(action))
+
+    def test_at_most_so_many_keys_the_lowest_first(self):
+        many = {config.key_id(cid): self.COPY for cid in range(300, 0, -1)}
+        kept = config.clean({"keyboard": {"keys": many}})["keyboard"]["keys"]
+        self.assertEqual(len(kept), config.MAX_KEYBOARD_KEYS)
+        self.assertEqual(list(kept), [config.key_id(cid) for cid in range(1, config.MAX_KEYBOARD_KEYS + 1)])
+
+    def test_settings_without_a_keyboard_load_as_before(self):
+        stored = copy.deepcopy(config.DEFAULTS)
+        del stored["keyboard"]
+        stored["pointer"]["dpi"] = 1800
+        stored["wheel"]["threshold"] = 30
+        loaded, saved = self.load(stored)
+        self.assertEqual(loaded["keyboard"], {"keys": {}, "profiles": []})
+        for section in config.DEFAULTS:
+            if section != "keyboard":
+                self.assertEqual(loaded[section], config.clean(stored)[section])
+        self.assertEqual(loaded["version"], 6)
+        self.assertNotIn("keyboard", saved)  # the same version: nothing was written back
+
+    def test_keys_of_a_keyboard_that_is_not_there_are_kept(self):
+        stored = copy.deepcopy(config.DEFAULTS)
+        stored["keyboard"]["keys"] = {"0x00c7": self.COPY}
+        loaded, _saved = self.load(stored)
+        self.assertEqual(loaded["keyboard"]["keys"], {"0x00c7": self.COPY})
+
+
+def deep(depth):
+    value = []
+    for _level in range(depth):
+        value = [value]
+    return value
+
+
+# Not a profile, whatever else is in the file: each one dropped on load, and refused by Set (test_front.py)
+BAD_PROFILES = [
+    "editor", 3, True, None, [], ["editor"], {},
+    {"app": "editor", "name": "E"}, {"app": "editor", "keys": {}}, {"name": "E", "keys": {}},
+    {"app": "editor", "name": "E", "keys": {}, "extra": 1},
+    {"app": "Editor", "name": "E", "keys": {}}, {"app": "", "name": "E", "keys": {}},
+    {"app": "x" * 129, "name": "E", "keys": {}}, {"app": "ed\nitor", "name": "E", "keys": {}},
+    {"app": "ed\u200bitor", "name": "E", "keys": {}}, {"app": "edi\x7ftor", "name": "E", "keys": {}},
+    {"app": 1, "name": "E", "keys": {}}, {"app": True, "name": "E", "keys": {}}, {"app": ["editor"], "name": "E", "keys": {}},
+    {"app": {"a": 1}, "name": "E", "keys": {}}, {"app": "editor", "name": "x" * 65, "keys": {}},
+    {"app": "editor", "name": None, "keys": {}}, {"app": "editor", "name": 5, "keys": {}},
+    {"app": "editor", "name": "E", "keys": []}, {"app": "editor", "name": "E", "keys": "0x0f01"},
+    {"app": "editor", "name": "E", "keys": None}, {"app": "editor", "name": "E", "keys": deep(60)},
+]
+
+
+class Profiles(unittest.TestCase):
+    """keyboard.profiles: at most 32 apps, each with keys of its own; NATIVE for what the key always does there."""
+
+    COPY = {"type": "keys", "keys": ["KEY_LEFTCTRL", "KEY_C"]}
+    load = Migration.load
+
+    def keep(self, profiles):
+        return config.clean({"keyboard": {"profiles": profiles}})["keyboard"]["profiles"]
+
+    def test_what_a_profile_may_be(self):
+        good = [{"app": "org.kde.kate", "name": "Kate", "keys": {"0x0f01": self.COPY, "0x0f02": {"type": "default"},
+                                                                 "0x0f03": {"type": "none"}}},
+                {"app": "firefox.exe", "name": "", "keys": {}}, {"app": "x" * 128, "name": "n" * 64, "keys": {}},
+                {"app": "кейт", "name": "Кейт", "keys": {}}, {"app": "a b,c", "name": "w", "keys": {}}]
+        self.assertEqual(self.keep(copy.deepcopy(good)), good)
+        self.assertEqual(config.clean(copy.deepcopy(config.DEFAULTS))["keyboard"]["profiles"], [])
+
+    def test_what_is_not_one_is_dropped_and_the_rest_kept_in_order(self):
+        kept = {"app": "kept", "name": "K", "keys": {}}
+        for bad in BAD_PROFILES:
+            with self.subTest(bad=bad):
+                self.assertEqual(self.keep([bad, kept]), [kept])
+        for value in ("nonsense", 3, True, None, {"app": "kept"}, deep(60)):
+            with self.subTest(value=value):
+                self.assertEqual(self.keep(value), [])
+
+    def test_keys_a_profile_may_not_have_are_dropped_from_it(self):
+        bad = {"0x0F01": self.COPY, "0x0f02": {"type": "default", "x": 1}, "0x0f03": {"type": "gestures"},
+               "0x0f04": {"type": "keys"}, "0x0f05": {"type": "host", "host": True}, "0x0f06": [], "0x0f07": True,
+               "0x0f08": {"type": "macro", "steps": [{"do": "action", "action": {"type": "macro", "steps": deep(40)}}]},
+               "0x0f09": None, "0x0f0a": "default", "0x0f0b": {"type": "DEFAULT"}, 7: self.COPY}
+        kept = self.keep([{"app": "a", "name": "A", "keys": dict(bad, **{"0x0f10": self.COPY})}])
+        self.assertEqual(kept, [{"app": "a", "name": "A", "keys": {"0x0f10": self.COPY}}])
+
+    def test_at_most_so_many_one_for_each_app(self):
+        many = [{"app": f"app{n}", "name": "", "keys": {}} for n in range(40)]
+        self.assertEqual([p["app"] for p in self.keep(many)], [f"app{n}" for n in range(config.MAX_PROFILES)])
+        twice = [{"app": "a", "name": "first", "keys": {}}, {"app": "a", "name": "second", "keys": {}}]
+        self.assertEqual(self.keep(twice), twice[:1])
+        keys = {config.key_id(cid): self.COPY for cid in range(200, 0, -1)}
+        kept = self.keep([{"app": "a", "name": "", "keys": keys}])[0]["keys"]
+        self.assertEqual(list(kept), [config.key_id(cid) for cid in range(1, config.MAX_KEYBOARD_KEYS + 1)])
+
+    def test_the_mark_for_a_key_s_own_function_is_for_profiles_only(self):
+        self.assertEqual(config.clean({"keyboard": {"keys": {"0x0f01": {"type": "default"}}}})["keyboard"]["keys"], {})
+
+    def test_settings_of_the_build_before_profiles_load_unchanged(self):
+        stored = copy.deepcopy(config.DEFAULTS)
+        stored["keyboard"] = {"keys": {"0x0f01": self.COPY}}  # what the build before wrote: version 6, no profiles
+        loaded, saved = self.load(stored)
+        self.assertEqual(loaded["keyboard"], {"keys": {"0x0f01": self.COPY}, "profiles": []})
+        self.assertEqual(saved, stored)  # the same version: not written back
+
+    def test_profiles_survive_the_build_before(self):
+        stored = copy.deepcopy(config.DEFAULTS)
+        stored["keyboard"]["profiles"] = [{"app": "kate", "name": "Kate", "keys": {"0x0f01": {"type": "default"}}}]
+        before = copy.deepcopy(config.DEFAULTS)
+        del before["keyboard"]["profiles"]  # its defaults: the merge it does keeps what it does not know
+        merged = config._merge(before, stored)
+        self.assertEqual(merged["keyboard"]["profiles"], stored["keyboard"]["profiles"])
+        self.assertEqual(config._keyboard_keys(merged["keyboard"]["keys"]), {})  # its own part, cleaned as it did
+        self.assertEqual(stored["version"], 6)
+
+
+class MacroSteps(unittest.TestCase):
+    """The action and vibration steps of a macro: what a key keeps, what any macro may run."""
+
+    @staticmethod
+    def macro(*steps):
+        return {"type": "macro", "name": "m", "steps": list(steps)}
+
+    GOOD = [
+        {"do": "action", "action": {"type": "keys", "keys": ["KEY_LEFTCTRL", "KEY_C"]}},
+        {"do": "action", "action": {"type": "button", "button": "BTN_SIDE"}},
+        {"do": "action", "action": {"type": "shortcut", "component": "kwin", "name": "Overview"}},
+        {"do": "action", "action": {"type": "desktop", "do": "overview"}},
+        {"do": "action", "action": {"type": "command", "command": "true"}},
+        {"do": "action", "action": {"type": "script", "name": "s", "script": "true"}},
+        {"do": "action", "action": {"type": "hook", "name": "paint.brush"}},
+        {"do": "haptic", "waveform": 0x00}, {"do": "haptic", "waveform": 0x04}, {"do": "haptic", "waveform": 0x1B},
+    ]
+
+    def test_every_allowed_action_and_known_waveform_is_kept(self):
+        self.assertEqual({step["action"]["type"] for step in self.GOOD if step["do"] == "action"}, set(actions.STEP_ACTIONS))
+        keys = {config.key_id(n + 1): self.macro(step) for n, step in enumerate(self.GOOD)}
+        keys["0x0100"] = self.macro(*self.GOOD)
+        self.assertEqual(config.clean({"keyboard": {"keys": copy.deepcopy(keys)}})["keyboard"]["keys"], keys)
+
+    def test_nested_macros_device_actions_and_malformed_steps_are_refused(self):
+        bad = [
+            {"type": "macro", "steps": [{"do": "delay", "ms": 5}]}, {"type": "host", "host": 1}, {"type": "flow"},
+            {"type": "wheel_mode"}, {"type": "dpi_cycle"}, {"type": "dpi_shift"}, {"type": "ring"}, {"type": "gestures"},
+            {"type": "default"}, {"type": "none"}, {"type": "keys", "keys": ["KEY_NOT_REAL"]}, {"type": "command", "command": ""},
+            {"type": ["keys"], "keys": ["KEY_A"]}, {"type": {"keys": 1}}, {"keys": ["KEY_A"]}, {}, [], "keys", None, 3,
+        ]
+        waveforms = [True, False, -1, 0x10, 0x0F, 256, 4.0, "4", None, [4], {"w": 4}]
+        steps = [{"do": "action", "action": action} for action in bad] + [{"do": "action"}]
+        steps += [{"do": "haptic", "waveform": waveform} for waveform in waveforms] + [{"do": "haptic"}]
+        for step in steps:
+            with self.subTest(step=step):
+                self.assertFalse(config.macro_step(step))
+                self.assertFalse(config.keyboard_action(self.macro({"do": "delay", "ms": 5}, step)))
+        keys = {config.key_id(n + 1): self.macro(step) for n, step in enumerate(steps)}
+        self.assertEqual(config.clean({"keyboard": {"keys": keys}})["keyboard"]["keys"], {})
+
+    def test_deep_nesting_is_refused_without_looking_inside(self):
+        deep = {"do": "delay", "ms": 5}
+        for _level in range(5000):  # far past the recursion limit, were each level looked into
+            deep = {"do": "action", "action": self.macro(deep)}
+        self.assertFalse(config.macro_step(deep))
+        self.assertFalse(config.keyboard_action(self.macro(deep)))
+        shallow = {"do": "delay", "ms": 5}
+        for _level in range(50):
+            shallow = {"do": "action", "action": self.macro(shallow)}
+        self.assertEqual(config.clean({"keyboard": {"keys": {"0x0001": self.macro(shallow)}}})["keyboard"]["keys"], {})
+
+    def test_a_mouse_macro_is_kept_as_it_was(self):
+        """Buttons are not checked step by step: what a macro holds is left to the runner."""
+        mouse = self.macro(*self.GOOD, {"do": "action", "action": {"type": "host", "host": 1}}, {"do": "haptic", "waveform": True},
+                           {"do": "warp"})
+        cleaned = config.clean({"buttons": {"back": copy.deepcopy(mouse)}})
+        self.assertEqual(cleaned["buttons"]["back"], mouse)
+
+    def test_macros_without_the_new_steps_stay_as_they_were(self):
+        old = self.macro({"do": "keys", "keys": ["KEY_A"]}, {"do": "text", "text": "hi"}, {"do": "delay", "ms": 5},
+                         {"do": "click", "button": "BTN_LEFT"}, {"do": "command", "command": "true"})
+        cfg = {"buttons": {"back": copy.deepcopy(old)}, "keyboard": {"keys": {"0x00c7": copy.deepcopy(old)}}}
+        cleaned = config.clean(cfg)
+        self.assertEqual((cleaned["buttons"]["back"], cleaned["keyboard"]["keys"]), (old, {"0x00c7": old}))
+
+
 if __name__ == "__main__":
     unittest.main()

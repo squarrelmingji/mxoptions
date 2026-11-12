@@ -45,10 +45,17 @@ service and a D-Bus API for other programs.
 - **Flow.** One mouse on two or three computers: push the pointer past the edge of the screen and
   the mouse carries on on the computer behind it, with the text, pictures and files you copied.
   They are paired with a six-digit code and talk over an encrypted link. See [Flow](#flow).
+- **Keyboard.** A Logitech keyboard that speaks HID++ 2.0 (MX Mechanical, MX Keys and the like) is
+  found next to the mouse, on the same receiver or over Bluetooth, and shows up under it in the
+  sidebar: its programmable keys take the same kinds of actions as the buttons, Easy-Switch from a
+  key moves the keyboard, and its battery, channels and firmware are shown. A key you have not
+  changed is left to the keyboard. Up to 32 apps can have keys of their own, which count while the
+  app is in front (not on GNOME with Wayland, which does not say which app that is). Not tried on a
+  real keyboard yet: see [Known limits](#known-limits).
 - **Also:** Easy-Switch between computers, a tray icon in five styles (plain ones in the colour of
   your panel that show a missing mouse and a low battery, one that fills with the charge), firmware
   versions with an update check through fwupd, four themes with any accent colour, English and
-  Ukrainian.
+  Ukrainian. All settings can be exported to a file and imported again: see [Files](#files).
 - **For other programs:** a [D-Bus API](docs/API.md) to play vibrations, run actions, show a ring of
   their own, change settings, and follow buttons, gestures and the wheel.
 
@@ -403,8 +410,18 @@ How long crossing takes is mostly the mouse changing its radio channel: about ha
 computer with a Bolt receiver, one to two seconds to one on Bluetooth. Flow links computers that
 run MX Options; it does not talk to Logi Options+ on Windows or macOS.
 
-A keyboard does not follow unless it is switched by other means. For networks where the computers
-cannot find each other, the address and the key can be entered by hand at the bottom of the page.
+**Mouse follows the keyboard** (off by default; the switch shows once a keyboard was found). Press
+the keyboard's own Easy-Switch key for one of the other computers, and once that computer reports
+the keyboard has arrived, the mouse is sent there too. This is MX Options Flow, between computers
+that run MX Options and see the keyboard; it is not Logitech Flow or the Enhanced Easy-Switch of
+Logi Options+, and neither of those is asked. Only the mouse moves: Flow never switches the
+keyboard. The mouse goes only within 10 seconds of the keyboard leaving, once each time it leaves,
+not while a button is held, and not when an action of this app sent the keyboard away. Each
+pairing names the keyboard with a value of its own made from the pairing key; which keyboard it is
+never leaves the computer.
+
+For networks where the computers cannot find each other, the address and the key can be entered by
+hand at the bottom of the page.
 
 ## Rumble from games
 
@@ -435,10 +452,19 @@ then, and for other mice, it draws its own 3D model.
 | | |
 |---|---|
 | Settings | `~/.config/mxoptions/config.json` |
+| Settings as they were before the last import | `~/.config/mxoptions/config.backup.json` |
+| Keyboard keys the app has changed (to give them back after a crash) | `~/.local/share/mxoptions/keyboard-diverted.json` |
 | Mouse pictures | `~/.local/share/mxoptions/mouse/` |
 | Generated click sounds | `~/.cache/mxoptions/sounds/` |
 | Files that arrived through Flow | `~/.cache/mxoptions/flow-files/` |
 | Tray icon drawings | `~/.local/share/icons/hicolor/scalable/status/mxoptions-tray-*.svg` |
+
+*Device & app → Settings file* exports every setting to a file of up to 1 MB, and imports one. The
+file holds your commands and scripts too, so keep it private; the pairings of Flow (their keys, what
+this computer goes by, its channel) are never in it, and an import keeps the ones this computer has.
+An import first keeps the settings in use, unsaved changes included, in `config.backup.json`, saves
+the new ones, and only then uses them; when it cannot do all of that, it uses none. To go back,
+quit the app and copy `config.backup.json` over `config.json`.
 
 ## Known limits
 
@@ -454,6 +480,9 @@ then, and for other mice, it draws its own 3D model.
   system's firmware updater, for updates. fwupd can flash both the mouse and the Bolt receiver, but
   Logitech has published no firmware for either of them for Linux, so the check finds nothing. The
   app does not flash anything itself.
+- **The mouse following the keyboard was not tried on real devices.** Only tests with made-up
+  computers and keyboards cover it. If the other computer reports the keyboard before this one
+  notices it has gone, the mouse stays; how often that happens is not known yet.
 - **Flow with three computers was never run on three.** It was written with two at hand: the
   tests put three copies of the program on one machine and cross between them, but no third
   computer has received the mouse.
@@ -466,6 +495,38 @@ then, and for other mice, it draws its own 3D model.
   are passed on.
 - **Checked on one mouse.** Everything was tried on a single MX Master 4. Synthetic tests cover the
   logic; the feel of gestures, vibrations and sounds was judged by one person.
+- **The keyboard has not been tried on a keyboard.** That part was written from Logitech's published
+  description of the protocol and is covered by tests with made-up devices only. What a real
+  keyboard does with a diverted key after a crash, a power cycle or an Easy-Switch to a computer
+  without MX Options has not been seen; until it has, treat the keyboard side as a preview.
+- **One keyboard at a time.** A second one is ignored while the first is there.
+- **Keys for single apps were not tried on a desktop.** Which app is in front is heard from KWin
+  on KDE Plasma, from `swaymsg` on sway, from Hyprland's event socket, from the X server elsewhere
+  on X11 (twice a second) and from Windows (twice a second); only tests with made-up desktops cover
+  that. GNOME on Wayland does not say, so there the keys do what is set for all apps. The app is
+  known by its window class (its program file on Windows), so two windows of one program share its
+  keys, and a Hyprland class with a comma in it cannot be told. A key that changes when another app
+  comes to the front lets go at once and its macros stop before their next step; a command one of
+  them started keeps running. To add an app, switch to it, then come back to the Keys page.
+- **Some keys stay the keyboard's.** The Easy-Switch keys and the keys of the Fn layer are never
+  taken over, and the Fn mode, the backlight and the other settings of the keyboard itself are not
+  offered yet. The Keyboard page lists the ones the keyboard says it has, in general words: that it
+  has one does not say which keys or values it uses, and the app changes none of them.
+- **The keyboard's firmware version is read from the keyboard** where fwupd does not show it, after
+  its keys are set up. How it compares with the version Logitech's own software shows has not been
+  checked on a real keyboard.
+- **Changed keys go back when the app quits.** A key is changed with the keyboard's temporary
+  setting, never the one it keeps for good. The app notes each key before it changes it, in the file listed
+  under [Files](#files), and after a crash gives back what it finds still changed the next time it
+  starts. Keys another program changed are left alone, and while Logi Options+, Solaar or logiops
+  is running no key is touched at all. If that file cannot be read, nothing is touched either:
+  move it away, and if a key then stays dead, switch the keyboard off and on once. An older version of MX Options ignores
+  the keyboard settings and that file; quit this one before going back to it, so the keys are
+  given back first. "Restore defaults" in an older version drops the keyboard settings.
+- **Easy-Switch from a key gives the keys back first.** The keyboard is only sent to the other
+  computer once every key the app changed is back to normal; if one cannot be given back, it stays
+  here with its keys as set, and the Keyboard page says so. The keyboard's own Easy-Switch keys are
+  the keyboard's: when they are used, the app is not asked.
 - **The haptic panel does not answer while a main button is held.** With the left button down the
   mouse reports nothing for the panel, however hard it is pressed; the gesture button is reported
   all the same. So gestures made while a window is being dragged want the gesture button, not the

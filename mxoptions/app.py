@@ -14,7 +14,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtNetwork import QLocalServer, QLocalSocket
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
-from . import APP_ID, APP_NAME, __version__, config, desktop, device, i18n, paths
+from . import APP_ID, APP_NAME, __version__, config, desktop, device, i18n, keyboard, paths
 from .engine import Engine, Listener
 from .i18n import _
 
@@ -108,15 +108,21 @@ def _ask_running_instance(name, arguments):
     return 0 if done else 2
 
 
-def _tray_tooltip(state):
-    if not state["connected"]:
-        return f"{APP_NAME} — {_('Not connected')}"
-    text = state["name"]
-    if state.get("battery"):
-        text += f" — {state['battery'][0]}%"
-        if state["battery"][1] in (device.BATTERY_CHARGING, device.BATTERY_ALMOST_FULL, device.BATTERY_SLOW_CHARGE):
+def _device_line(found):
+    text = found["name"]
+    if found.get("battery"):
+        text += f" — {found['battery'][0]}%"
+        if found["battery"][1] in (device.BATTERY_CHARGING, device.BATTERY_ALMOST_FULL, device.BATTERY_SLOW_CHARGE):
             text += f" ({_('charging')})"
     return text
+
+
+def _tray_tooltip(state):
+    found = state.get("keyboard")
+    second = "\n" + _device_line(found) if found and found["connected"] else ""
+    if not state["connected"]:
+        return f"{APP_NAME} — {_('Not connected')}" + second
+    return _device_line(state) + second
 
 
 def main(argv=None):
@@ -169,7 +175,7 @@ def main(argv=None):
             time.sleep(0.2)
         log.warning("the service did not come up; running without it")
 
-    from . import api, flow_service
+    from . import api, flow_service, front
     from .ui import editors, ring, theme, tray_icon
     from .ui.main_window import MainWindow
     from .ui.sounds import WheelSounds
@@ -193,6 +199,7 @@ def main(argv=None):
     sounds.configure(cfg["wheel_click"])
     store = Store(cfg, engine, sounds)
     store.flow = flow_service.FlowService(store, app)
+    store.front = front.Front(engine, app)
     bridge.state.connect(store.update_state)
     bridge.seeded.connect(lambda seeded: store.replace(seeded, push=False))
     bridge.pressed.connect(store.pressed_changed)
@@ -218,6 +225,7 @@ def main(argv=None):
             overlay.configure(applied["ring"])
         sounds.configure(store.cfg["wheel_click"])
         service.set_enabled(store.cfg["app"]["api"])
+        store.front.want("profiles", bool(store.cfg["keyboard"]["profiles"]))
 
     def engine_event(kind, payload):
         if kind == "wheel_mode":
@@ -242,6 +250,7 @@ def main(argv=None):
     window = MainWindow(store, hide_on_close=stays)
     service = api.Service(store, overlay, window.show_and_raise, app)
     service.set_enabled(cfg["app"]["api"])
+    store.front.want("profiles", bool(cfg["keyboard"]["profiles"]))
     bridge.event.connect(engine_event)
     app.setQuitOnLastWindowClosed(not stays)
 
@@ -297,9 +306,16 @@ def main(argv=None):
         if reason == QSystemTrayIcon.ActivationReason.Trigger else None
     )
 
+    low = {"armed": True}
+
     def tray_state(state):
         tray.setToolTip(_tray_tooltip(state))
         tray_look()
+        found = state.get("keyboard")
+        low["armed"], say = keyboard.low_battery(low["armed"], found.get("battery") if found and found["connected"] else None)
+        if say and tray.isVisible():
+            tray.showMessage(APP_NAME, _("The battery of {name} is low ({percent}%). Charge it soon.").format(
+                name=found["name"], percent=found["battery"][0]), QSystemTrayIcon.MessageIcon.Warning)
 
     store.state_changed.connect(tray_state)
 
@@ -321,6 +337,7 @@ def main(argv=None):
         if hasattr(overlay, "shutdown"):  # it lives in a program of its own: that one ends with this one
             overlay.shutdown()
         store.flow.close()
+        store.front.close()
         store.flush()
         engine.stop()
 

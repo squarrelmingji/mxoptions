@@ -174,7 +174,41 @@ Buttons additionally take `{"type": "default"}` (leave it to the mouse), `{"type
 | `ring.bubbles`, `ring.style`, `ring.size` | The user's Actions Ring. |
 | `flow.enabled`, `flow.push_mm`, `flow.corner`, `flow.fullscreen` | Flow: on/off, millimetres to push past the edge, percent of the edge kept free at each end, whether to cross under a full-screen window. |
 | `flow.peers` | The other computers of Flow, two at most, each with `name`, `address`, `edge` (`left`, `right`, `top`, `bottom`: the side it stands on) and `key`, the pairing key: treat that as a password. A single field is addressed like `flow.peers.0.edge`. |
+| `keyboard.keys` | What the keys of the keyboard do: an object from key id to action, the id being the key's control id as `0x` and four lowercase hex digits (`"0x00c7"`). A key that is not listed does what it always does. Keys take every action above except `wheel_mode`, `dpi_cycle`, `dpi_shift`, `flow`, `gestures` and `ring`; `host` moves the keyboard, not the mouse. At most 128. |
+| `keyboard.profiles` | Keys of their own for single apps, at most 32: a list of `{"app", "name", "keys"}`. `app` is the name the app goes by on this desktop, lowercase, 1 to 128 characters (KDE: its window class; sway: its `app_id`, else its X11 class; Hyprland and other X11 desktops: its class; Windows: its program file, like `firefox.exe`), one profile each. `name` is shown in the window, at most 64 characters. `keys` is like `keyboard.keys`, plus `{"type": "default"}`: the key does what it always does in that app, even where `keyboard.keys` changes it. A key a profile does not list does what `keyboard.keys` says. While that app is in front, the first profile for it counts. GNOME on Wayland does not say which app is in front: there only `keyboard.keys` counts. Which app is in front is not offered here. |
 | `flow.clipboard`, `flow.files`, `flow.files_max_mb`, `flow.cue_arrived`, `flow.cue_failed` | Flow: whether copied text and pictures go along, whether files do, the most megabytes in one go, and the vibration patterns for files that have arrived and files that could not be brought over. |
+
+`Set` changes only what is there, so a key is given an action, or its action taken away, by setting
+the whole of `keyboard.keys` at once; the action of a key already listed can be set on its own:
+
+```sh
+q Set keyboard.keys '{"0x00c7": {"type": "keys", "keys": ["KEY_LEFTCTRL", "KEY_C"]}}'
+q Set keyboard.keys.0x00c7 '{"type": "keys", "keys": ["KEY_F5"]}'
+q Set keyboard.keys '{}'
+```
+
+```sh
+q Set keyboard.profiles '[{"app": "org.kde.kate", "name": "Kate", "keys": {"0x00c7": {"type": "default"}}}]'
+q Set keyboard.profiles.0.keys.0x00c7 '{"type": "keys", "keys": ["KEY_F5"]}'
+```
+
+Under `keyboard`, `Set` returns `false` and changes nothing if any of what was sent would not be kept
+as it is (an id in another form, an action a key cannot have, `{"type": "default"}` in `keyboard.keys`,
+a profile with a field more or less, an app name in capitals, two profiles for one app). An action
+is checked all the way down: key names the virtual keyboard knows, at most 16 to a combination; a
+macro of 1 to 64 steps, each complete (a `delay` a whole number of `ms` from 0 to 10000, a `click`
+a mouse button, a `text` or `command` text, an `action` one complete action of type `keys`, `button`,
+`shortcut`, `desktop`, `command`, `script` or `hook`, a `haptic` a `waveform` the mouse's haptic
+feature names); no empty command, script, shortcut or hook name.
+
+Macro steps, for a button or a key:
+
+| Step | Meaning |
+|---|---|
+| `{"do": "action", "action": {"type": "hook", "name": "paint.brush"}}` | Do one action, as a gesture or the Actions Ring would. No macro inside a macro, and nothing that talks to a device (`host`, `flow`, `wheel_mode`, `dpi_cycle`). |
+| `{"do": "haptic", "waveform": 4}` | Play a vibration on the mouse (waveform ids 0 to 14 and 27), if it is connected and has a haptic motor; otherwise nothing. |
+
+An action or haptic step that is not complete is kept in the settings of a button but skipped when its macro plays.
 
 ## Example: a Python client
 

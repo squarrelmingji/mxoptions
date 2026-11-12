@@ -3,6 +3,7 @@ sides, hand the mouse over at the edge and carry what was copied. The mouse, the
 clipboard are stand-ins; the network between the two is real, on the loopback interface."""
 
 import copy
+import json
 import os
 import shutil
 import sys
@@ -13,13 +14,14 @@ import unittest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtGui import QGuiApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication  # noqa: E402
 
 import tests.support  # noqa: E402,F401
 from tests.test_flow import free_port  # noqa: E402
 from mxoptions import clipboard, config, flow, flow_edges, flow_files, flow_service, vinput  # noqa: E402
 from mxoptions.ui.store import Store  # noqa: E402
 
-APP = QGuiApplication.instance() or QGuiApplication([])
+APP = QGuiApplication.instance() or QApplication([])  # the Flow page is drawn too
 HOSTS = [{"paired": True, "name": "desk"}, {"paired": True, "name": "laptop"}, {"paired": False, "name": ""}]
 
 
@@ -387,6 +389,37 @@ class TwoServices(Services):
         self.assertTrue(wait(lambda: self.laptop.vibrated() == [self.laptop.cfg["cue_failed"]]))
         self.assertEqual(self.laptop.clipboard.written, [])
 
+    def test_the_mouse_follows_the_keyboard_both_computers_see(self):
+        self.meet()
+        self.desk.store.set("flow", "mouse_follows_keyboard", True)
+        keyboard(self.desk, LINK, True)
+        self.assertTrue(wait(lambda: (self.laptop.flow._heard.get(self.laptop.pair_of()) or {}).get("here")))
+        keyboard(self.desk, LINK, False, ago=0.0)  # its Easy-Switch key sends it to the laptop, which finds it
+        keyboard(self.laptop, LINK, True)
+        self.assertTrue(wait(lambda: self.desk.engine.asked("flow_leave")))
+        self.assertEqual(self.desk.engine.asked("flow_leave"), [(1, False)])
+        self.desk.flow.on_engine(("left", 1))
+        self.assertTrue(wait(lambda: self.laptop.engine.asked("expect_mouse")))
+        self.desk.mouse(False)
+        self.laptop.mouse(True, 1)
+        time.sleep(0.3)
+        APP.processEvents()
+        self.assertEqual(self.laptop.engine.asked("flow_leave"), [])  # the keyboard is where the mouse is: nothing to follow
+        self.assertEqual(len(self.desk.engine.asked("flow_leave")), 1)
+
+    def test_an_older_version_on_the_other_side_neither_sends_nor_minds_the_keyboard(self):
+        self.meet()
+        self.desk.store.set("flow", "mouse_follows_keyboard", True)
+        keyboard(self.laptop, LINK, True)
+        self.assertTrue(wait(lambda: self.desk.flow._heard.get(self.desk.pair_of(), {}).get("here")))
+        self.assertNotIn("keyboard", self.desk.flow._peers[self.desk.pair_of()])  # as the copy of an older version drops it
+        old = {key: value for key, value in self.desk.flow._peers[self.desk.pair_of()].items() if key != "id"}
+        keyboard(self.desk, LINK, False, ago=0.0)
+        for _ in range(2):
+            self.desk.flow._on_link("status", dict(old), self.desk.pair_of())  # what an older version says
+        self.assertEqual(self.desk.engine.asked("flow_leave"), [])
+        self.assertEqual(self.desk.peer()["channel"], 1)
+
     def test_forgetting_the_other_computer_switches_flow_off(self):
         self.pair()
         self.desk.flow.unpair(self.desk.pair_of())
@@ -401,6 +434,267 @@ class TwoServices(Services):
         self.assertEqual(link["peers"], [{"key": "ABCD-EFGH-IJKL-MNOP", "id": "", "address": "192.168.1.5", "name": "laptop",
                                           "edge": "left", "edge_at": 5.0}])
         self.assertNotIn("key", link)
+
+
+LINK, OTHER_LINK = "0123456789abcdef", "fedcba9876543210"  # made-up keyboard links (keyboard.flow_link)
+KEY = "SYNT-HETI-CKEY-0001"
+NOTHING = object()
+
+
+def keyboard(computer, link, here, ago=None, sent=False):
+    """What the keyboard side tells Flow on ``computer`` (KeyboardSide._tell_flow): ``ago`` seconds since it left."""
+    computer.flow.on_engine(("keyboard", {"link": link, "here": here,
+                                          "drop": None if ago is None else (time.monotonic() - ago, sent)}))
+
+
+class Follow(Services):
+    """The mouse following the keyboard, with what the other computer says made up and handed in directly."""
+
+    def setUp(self):
+        super().setUp()
+        self.x = self.desk
+        self.x.store.set_section("flow", dict(self.x.cfg, enabled=True, mouse_follows_keyboard=True, peers=[
+            {"key": KEY, "id": "peer", "address": "", "name": "peer", "edge": "right", "edge_at": 0.0}]))
+        self.pair = flow.pair_id(KEY)
+        self.token = flow_service.keyboard_token(KEY, LINK)
+        self.x.mouse(True, 0)
+        keyboard(self.x, LINK, True)
+
+    def say(self, here=None, seq=0, kind="status", token=None, field=NOTHING, channel=1):
+        payload = {"name": "peer", "channel": channel, "present": False, "edge": "left", "edge_at": 0.0}
+        if field is not NOTHING:
+            payload["keyboard"] = field
+        elif here is not None:
+            payload["keyboard"] = {"token": token or self.token, "here": here, "seq": seq}
+        self.x.flow._on_link(kind, payload, self.pair)
+
+    def up(self, here=None, seq=0, **more):
+        self.say(here, seq, kind="up", **more)
+
+    def moves(self):
+        return self.x.engine.asked("flow_leave")
+
+    def test_a_keyboard_that_arrives_there_after_leaving_here_takes_the_mouse_along(self):
+        self.up(False, 1)
+        keyboard(self.x, LINK, False, ago=0.0)
+        with self.assertLogs("mxoptions.flow_service", "INFO") as logs:
+            self.say(True, 2)
+        self.assertEqual(self.moves(), [(1, False)])  # to that computer's channel, as the action does: no edge
+        self.assertIn("follows the keyboard", logs.output[-1])
+
+    def test_tokens_are_the_pairing_s_own(self):
+        token = flow_service.keyboard_token(KEY, LINK)
+        self.assertRegex(token, r"\A[0-9a-f]{16}\Z")
+        self.assertEqual(token, flow_service.keyboard_token(KEY.lower().replace("-", " "), LINK))  # the key as both hold it
+        self.assertNotEqual(token, flow_service.keyboard_token("SYNT-HETI-CKEY-0002", LINK))
+        self.assertNotEqual(token, flow_service.keyboard_token(KEY, OTHER_LINK))
+        self.assertNotIn(LINK, token)
+
+    def test_anything_but_the_exact_field_is_left_out(self):
+        good = {"token": self.token, "here": True, "seq": 2}
+        bad = [{"token": flow_service.keyboard_token(KEY, OTHER_LINK)}, {"token": self.token.upper()},
+               {"token": self.token[:15]}, {"token": self.token + "0"}, {"token": 7}, {"token": None},
+               {"here": 1}, {"here": "true"}, {"here": None}, {"seq": -1}, {"seq": 2 ** 31}, {"seq": True},
+               {"seq": 2.0}, {"seq": "2"}, {"seq": None}, {"more": 1}]
+        fields = [dict(good, **change) for change in bad] + [
+            {key: value for key, value in good.items() if key != left} for left in good] + [[], None, "here", {}, [good]]
+        for field in fields:
+            with self.subTest(field=field):
+                self.x.flow._on_link("down", None, self.pair)
+                self.up(False, 1)
+                keyboard(self.x, LINK, False, ago=0.0)
+                self.say(field=field)
+                self.assertEqual(self.moves(), [])
+                keyboard(self.x, LINK, True)
+        self.x.flow._on_link("down", None, self.pair)
+        self.up(False, 1)
+        keyboard(self.x, LINK, False, ago=0.0)
+        self.say(True, flow_service.SEQ_MAX)  # the largest there is still counts
+        self.assertEqual(self.moves(), [(1, False)])
+
+    def test_only_an_arrival_after_it_left_here_and_soon_after(self):
+        self.up(True, 1)  # there already when the link came up
+        keyboard(self.x, LINK, False, ago=0.0)
+        self.say(True, 2)  # still there: no arrival
+        self.say(field=NOTHING)  # an old version's status, or no keyboard there, says nothing of it either
+        self.assertEqual(self.moves(), [])
+        self.x.flow._on_link("down", None, self.pair)
+        keyboard(self.x, LINK, True)
+        self.up(False, 1)
+        self.say(True, 2)  # arrived there while it was still here
+        keyboard(self.x, LINK, False, ago=0.0)
+        self.say(True, 3)
+        self.assertEqual(self.moves(), [])
+        self.x.flow._on_link("down", None, self.pair)
+        self.up(False, 1)
+        keyboard(self.x, LINK, False, ago=flow_service.FOLLOW_WINDOW + 0.5)
+        self.say(True, 2)  # too late
+        self.assertEqual(self.moves(), [])
+
+    def test_not_while_switched_off_and_not_on_switching_it_on(self):
+        self.x.store.set("flow", "mouse_follows_keyboard", False)
+        self.up(False, 1)
+        keyboard(self.x, LINK, False, ago=0.0)
+        self.say(True, 2)
+        self.x.store.set("flow", "mouse_follows_keyboard", True)
+        self.say(True, 3)
+        self.assertEqual(self.moves(), [])
+
+    def test_not_after_it_came_back_here(self):
+        self.up(False, 1)
+        keyboard(self.x, LINK, False, ago=0.0)
+        keyboard(self.x, LINK, True)
+        self.say(True, 2)
+        self.assertEqual(self.moves(), [])
+        keyboard(self.x, LINK, False, ago=0.0)
+        self.say(False, 3)
+        self.say(True, 4)
+        self.x.flow.on_engine(("refused", "held"))
+        self.x.flow._follow_at = None
+        keyboard(self.x, LINK, True)  # back after that try too
+        self.say(False, 5)
+        self.say(True, 6)
+        self.assertEqual(self.moves(), [(1, False)])
+
+    def test_another_keyboard_there_does_not_count(self):
+        self.up(False, 1)
+        keyboard(self.x, LINK, False, ago=0.0)
+        self.say(True, 2, token=flow_service.keyboard_token(KEY, OTHER_LINK))
+        self.say(False, 3)
+        self.say(True, 4, token=flow_service.keyboard_token("SYNT-HETI-CKEY-0002", LINK))  # the token of another pairing
+        self.assertEqual(self.moves(), [])
+
+    def test_repeated_older_and_late_statuses_move_it_once_at_most(self):
+        self.up(False, 5)
+        keyboard(self.x, LINK, False, ago=0.0)
+        self.say(True, 5)  # the same seq again
+        self.say(True, 4)  # an older one
+        self.assertEqual(self.moves(), [])
+        self.say(False, 6)
+        self.say(True, 7)
+        self.say(False, 6)  # arrives late: nothing
+        self.say(True, 8)
+        self.say(False, 9)
+        self.say(True, 10)  # a second arrival, for the same going
+        self.assertEqual(self.moves(), [(1, False)])
+
+    def test_a_new_link_starts_from_what_it_says_first(self):
+        self.up(False, 1)
+        keyboard(self.x, LINK, False, ago=0.0)
+        self.up(True, 2)  # a second call that took over from the first: how things are, not a change
+        self.x.flow._on_link("down", None, self.pair)
+        self.up(True, 3)  # back after a break: the same
+        self.say(True, 4)
+        self.assertEqual(self.moves(), [])
+        self.x.flow._on_link("down", None, self.pair)
+        self.up(False, 0)  # the other computer started again: its count starts again too
+        self.say(True, 1)
+        self.assertEqual(self.moves(), [(1, False)])
+
+    def test_a_keyboard_sent_away_from_here_is_not_followed(self):
+        self.up(False, 1)
+        keyboard(self.x, LINK, False, ago=0.0, sent=True)
+        self.say(True, 2)
+        self.say(False, 3)
+        self.say(True, 4)
+        self.assertEqual(self.moves(), [])
+
+    def test_one_try_for_each_going_whatever_stops_it(self):
+        self.up(False, 1)
+        keyboard(self.x, LINK, False, ago=0.0)
+        self.say(True, 2)
+        self.x.flow.on_engine(("refused", "held"))  # a button was held: the engine kept the mouse
+        self.say(False, 3)
+        self.say(True, 4)
+        self.assertEqual(self.moves(), [(1, False)])  # not tried again
+        stops = {"on its way": lambda: setattr(self.x.flow, "_leaving", self.pair),
+                 "just sent after it": lambda: None,  # FOLLOW_GRACE after the try above
+                 "mouse not here": lambda: self.x.mouse(False),
+                 "channel unknown": lambda: self.say(False, 5, channel=None),
+                 "channel this one's": lambda: self.say(False, 5, channel=0),
+                 "no answer": lambda: self.x.flow._on_link("quiet", True, self.pair)}
+        for name, stop in stops.items():
+            with self.subTest(name):
+                self.x.flow._on_link("down", None, self.pair)
+                self.up(False, 1)
+                self.x.mouse(True, 0)
+                keyboard(self.x, LINK, True)
+                keyboard(self.x, LINK, False, ago=0.0)
+                self.x.flow._follow_at = time.monotonic() if name == "just sent after it" else None
+                stop()
+                self.say(True, 6, channel=self.x.flow._peers[self.pair]["channel"])
+                self.x.flow._leaving = None
+                self.x.mouse(True, 0)
+                self.x.flow._on_link("quiet", False, self.pair)
+                self.say(False, 7)
+                self.say(True, 8)  # the hindrance is gone, but this going had its try
+                self.assertEqual(self.moves(), [(1, False)])
+
+    def test_what_is_said_of_it_stays_out_of_the_peers_the_log_the_settings_and_the_bus(self):
+        from mxoptions import api
+        bus = api.MouseApi(self.x.store, None, lambda: None)
+        emitted = []
+        for name in ("ButtonPressed", "ButtonReleased", "Gesture", "WheelModeChanged", "Hook", "ConnectedChanged",
+                     "BatteryChanged", "DpiChanged", "ConfigChanged"):
+            getattr(bus, name).connect(lambda *args, n=name: emitted.append(n))
+        with self.assertLogs("mxoptions", "DEBUG") as logs:
+            self.up(False, 1)
+            keyboard(self.x, LINK, False, ago=0.0)
+            bus.on_event("flow", ("keyboard", {"link": LINK, "here": False, "drop": (0.0, False)}))
+            self.say(True, 2)
+            self.x.flow.on_engine(("left", 1))
+            self.x.flow._send_status()
+            APP.processEvents()
+        self.assertEqual(self.moves(), [(1, False)])
+        self.assertEqual(emitted, [])
+        self.assertNotIn("keyboard", self.x.flow._peers[self.pair])
+        for shown in ("\n".join(logs.output), json.dumps(self.x.flow.status()), json.dumps(self.x.store.cfg),
+                      json.dumps(config.clean(copy.deepcopy(self.x.store.cfg))), json.dumps(self.x.store.state, default=str)):
+            for secret in (LINK, self.token):
+                self.assertNotIn(secret, shown)
+        self.assertIs(self.x.store.cfg["flow"]["mouse_follows_keyboard"], True)
+
+    def test_each_of_the_others_is_told_under_its_own_token_and_nobody_else(self):
+        second = "SYNT-HETI-CKEY-0002"
+        peers = self.x.cfg["peers"] + [{"key": second, "id": "peer2", "address": "", "name": "peer2", "edge": "left", "edge_at": 0.0}]
+        self.x.store.set("flow", "peers", peers)
+        self.assertTrue(wait(lambda: len(self.x.flow.link._status_for) == 2
+                             and all("keyboard" in more for more in self.x.flow.link._status_for.values())))
+        told = {pair: more["keyboard"] for pair, more in self.x.flow.link._status_for.items()}
+        self.assertEqual(told, {self.pair: {"token": self.token, "here": True, "seq": 1},
+                                flow.pair_id(second): {"token": flow_service.keyboard_token(second, LINK), "here": True, "seq": 1}})
+        self.assertNotIn("keyboard", self.x.flow.link._status)  # never said to all alike
+        keyboard(self.x, LINK, False, ago=0.0)
+        self.assertTrue(wait(lambda: self.x.flow.link._status_for[self.pair]["keyboard"]["seq"] == 2))
+        self.assertFalse(self.x.flow.link._status_for[self.pair]["keyboard"]["here"])
+
+
+class Page(unittest.TestCase):
+    """The switch on the Flow page: there once a keyboard was found, off at first."""
+
+    def test_the_setting_is_off_at_first_and_only_ever_true_or_false(self):
+        self.assertIs(config.DEFAULTS["flow"]["mouse_follows_keyboard"], False)
+        self.assertEqual(config.DEFAULTS["version"], 6)
+        for value, kept in ((True, True), (1, True), ("yes", True), (None, False), (0, False)):
+            self.assertIs(config.clean({"flow": {"mouse_follows_keyboard": value}})["flow"]["mouse_follows_keyboard"], kept)
+        self.assertIs(config.clean({"flow": {}})["flow"]["mouse_follows_keyboard"], False)
+
+    def test_the_switch_shows_with_a_keyboard_and_sets_the_setting(self):
+        from mxoptions.ui import flow_page
+        store = Store(copy.deepcopy(config.DEFAULTS), Engine())
+        store.flush = lambda: None
+        store._save_timer.timeout.disconnect()
+        page = flow_page.FlowPage(store)
+        self.addCleanup(page.deleteLater)
+        page.show()
+        self.assertTrue(page.follow_row.isHidden())
+        self.assertFalse(page.follow.isChecked())
+        store.update_state(dict(store.state, keyboard={"connected": False, "known": True, "name": "Synthetic keyboard"}))
+        self.assertFalse(page.follow_row.isHidden())
+        page.follow.toggle()
+        self.assertIs(store.cfg["flow"]["mouse_follows_keyboard"], True)
+        store.update_state(dict(store.state, keyboard=None))
+        self.assertTrue(page.follow_row.isHidden())
 
 
 class ThreeServices(Services):
@@ -457,6 +751,33 @@ class ThreeServices(Services):
         self.assertEqual(len(self.desk.cfg["peers"]), 1)
         self.assertTrue(self.desk.cfg["enabled"])
         self.assertTrue(wait(lambda: self.desk.linked() and not self.laptop.linked()))
+
+    def test_the_keyboard_going_round_three_computers_moves_the_mouse_once(self):
+        for computer in (self.desk, self.laptop, self.tower):
+            computer.store.set("flow", "mouse_follows_keyboard", True)
+        laptop, tower = self.desk.pair_of(0), self.desk.pair_of(1)
+        heard = lambda computer, pair: (computer.flow._heard.get(pair) or {}).get("here")  # noqa: E731
+        keyboard(self.tower, LINK, True)
+        self.assertTrue(wait(lambda: heard(self.desk, tower)))
+        keyboard(self.tower, LINK, False, ago=0.0)  # to the desk, where the mouse is already
+        keyboard(self.desk, LINK, True)
+        self.assertTrue(wait(lambda: heard(self.tower, self.tower.pair_of()) and not heard(self.desk, tower)))
+        keyboard(self.desk, LINK, False, ago=0.0)  # and on to the laptop
+        keyboard(self.laptop, LINK, True)
+        self.assertTrue(wait(lambda: self.desk.engine.asked("flow_leave")))
+        stale = {"name": "laptop", "channel": 1, "present": False, "edge": "left", "edge_at": 0.0,
+                 "keyboard": {"token": flow_service.keyboard_token(self.desk.entry(0)["key"], LINK), "here": True, "seq": 0}}
+        self.desk.flow._on_link("status", stale, laptop)  # late, and from before
+        self.desk.flow.on_engine(("left", 1))
+        self.assertTrue(wait(lambda: self.laptop.engine.asked("expect_mouse")))
+        self.desk.mouse(False)
+        self.laptop.mouse(True, 1)
+        time.sleep(0.5)
+        APP.processEvents()
+        self.assertEqual(self.desk.engine.asked("flow_leave"), [(1, False)])
+        self.assertEqual(self.tower.engine.asked("flow_leave"), [])  # its keyboard's going was had: the mouse was not there
+        self.assertEqual(self.laptop.engine.asked("flow_leave"), [])
+        self.assertEqual(self.tower.engine.asked("expect_mouse"), [])
 
     def test_a_third_pairing_is_not_taken(self):
         fourth = self.computer()

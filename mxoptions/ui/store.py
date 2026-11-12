@@ -2,12 +2,18 @@
 
 import copy
 import logging
+import os
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
 from .. import config
+from ..i18n import _
 
 log = logging.getLogger(__name__)
+
+
+def _reason(error):
+    return error.strerror or str(error)
 
 
 def _kind(value):
@@ -31,8 +37,10 @@ class Store(QObject):
         self.engine = engine
         self.sounds = sounds  # WheelSounds, for the pages that let the user hear a click
         self.flow = None      # flow_service.FlowService, once the program has made it
+        self.front = None     # front.Front, once the program has made it: which app is in front
         self.state = {"connected": False, "known": False, "name": "", "uinput": True, "rivals": [], "battery": None,
-                      "current_host": 0, "hosts": [], "dpi": cfg["pointer"]["dpi"], "wheel_mode": "", "caps": None}
+                      "current_host": 0, "hosts": [], "dpi": cfg["pointer"]["dpi"], "wheel_mode": "", "caps": None,
+                      "keyboard": None}
         self._save_timer = QTimer(self, singleShot=True, interval=500)
         self._save_timer.timeout.connect(self.flush)
 
@@ -45,6 +53,68 @@ class Store(QObject):
         if self.cfg["buttons"].get(key) != action:
             self.cfg["buttons"][key] = copy.deepcopy(action)
             self._push()
+
+    def set_key(self, key_id, action):
+        """What a key of the keyboard does; the default action takes it out of the settings. False, and nothing
+        changed, for a key id or an action the settings would not keep (config.keyboard_action)."""
+        keys = self.cfg["keyboard"]["keys"]
+        if not (isinstance(key_id, str) and config.KEY_ID.match(key_id) and isinstance(action, dict)):
+            return False
+        if action.get("type") == "default":
+            if keys.pop(key_id, None) is not None:
+                self._push()
+            return True
+        if not config.keyboard_action(action) or (key_id not in keys and len(keys) >= config.MAX_KEYBOARD_KEYS):
+            log.warning("key %s: action refused", key_id)
+            return False
+        if keys.get(key_id) != action:
+            keys[key_id] = copy.deepcopy(action)
+            self._push()
+        return True
+
+    def profile(self, app):
+        """The profile of ``app`` (see config.DEFAULTS), or None."""
+        return next((profile for profile in self.cfg["keyboard"]["profiles"] if profile["app"] == app), None)
+
+    def add_profile(self, app):
+        """Give ``app`` keys of its own, none to begin with. False, and nothing changed, if it cannot have them."""
+        profiles = self.cfg["keyboard"]["profiles"]
+        if not config.app_id(app) or self.profile(app) is not None or len(profiles) >= config.MAX_PROFILES:
+            return False
+        profiles.append({"app": app, "name": app[:config.MAX_PROFILE_NAME], "keys": {}})
+        self._push()
+        return True
+
+    def remove_profile(self, app):
+        profiles = self.cfg["keyboard"]["profiles"]
+        kept = [profile for profile in profiles if profile["app"] != app]
+        if len(kept) != len(profiles):
+            self.cfg["keyboard"]["profiles"] = kept
+            self._push()
+
+    def set_profile_key(self, app, key_id, action):
+        """What a key does while ``app`` is in front: an action, config.NATIVE for what it always does there, or
+        None for what it does in every app. False, and nothing changed, for what the settings would not keep."""
+        profile = self.profile(app)
+        if profile is None or not (isinstance(key_id, str) and config.KEY_ID.match(key_id)):
+            return False
+        keys = profile["keys"]
+        if action is None:
+            if keys.pop(key_id, None) is not None:
+                self._push()
+            return True
+        if not (action == config.NATIVE or config.keyboard_action(action)) or (
+                key_id not in keys and len(keys) >= config.MAX_KEYBOARD_KEYS):
+            log.warning("key %s: action refused", key_id)
+            return False
+        if keys.get(key_id) != action:
+            keys[key_id] = copy.deepcopy(action)
+            self._push()
+        return True
+
+    def restore_keyboard(self):
+        """Every key does what it always does, in every app: no profile is left either."""
+        self.set_section("keyboard", {"keys": {}, "profiles": []})
 
     def set_section(self, section, values):
         if self.cfg[section] != values:
@@ -97,6 +167,8 @@ class Store(QObject):
             return False
         if isinstance(value, str) and stored != value:
             return False
+        if parts[0] == "keyboard" and stored != value:  # a key, an id or an action a key cannot have: refused, not dropped
+            return False
         if cfg != self.cfg:
             self.replace(cfg)
         return True
@@ -119,6 +191,66 @@ class Store(QObject):
         if caps.get("force"):
             cfg["haptics"]["force"] = caps["force"]["default"]
         self.replace(cfg)
+
+    def export_settings(self, path):
+        """Write the settings in use, changes not saved yet too, to the file ``path`` (config.export_data).
+        None, or what to tell the user."""
+        try:
+            config.write_durable(config.export_data(self.cfg), path)
+        except ValueError as e:
+            return _("Nothing was exported. {}").format(e)
+        except config.NotDurable as e:
+            return _("The settings were written, but the system could not confirm that they are safely on the "
+                     "disk ({}).").format(_reason(e))
+        except OSError as e:
+            return _("The settings could not be written ({}).").format(_reason(e))
+        return None
+
+    def import_settings(self, path):
+        """Use the settings in the file ``path``, which export_settings wrote. All in one go, on this thread:
+        the file is read and checked, the settings in use (changes not saved yet too) are kept in the backup
+        (config.BACKUP_NAME), the new ones are saved, and only then used. A step that fails stops it with the
+        settings in use, the engine and a pending save as they were. None, or what to tell the user."""
+        name = os.path.basename(path)
+        try:
+            cfg = config.import_data(config.read_settings(path), self.cfg)
+        except ValueError as e:
+            return _("{name} cannot be imported. {reason}").format(name=name, reason=e)
+        except OSError as e:
+            return _("{name} could not be read ({reason}).").format(name=name, reason=_reason(e))
+        backup = os.path.join(config.CONFIG_DIR, config.BACKUP_NAME)
+        current = config.to_bytes(self.cfg)
+        try:
+            os.makedirs(config.CONFIG_DIR, exist_ok=True)
+            config.write_durable(current, backup)
+        except OSError as e:  # NotDurable too: a backup that may not outlast a crash is not one to count on
+            return _("Nothing was imported: the settings in use could not be kept in a backup first ({}).").format(
+                _reason(e))
+        had_file = config.exists()
+        try:
+            config.write_durable(config.to_bytes(cfg), config.CONFIG_PATH)
+        except config.NotDurable as e:
+            try:  # the imported settings are in the file, perhaps not for good: the ones in use go back in
+                if had_file:
+                    config.write_durable(current, config.CONFIG_PATH)
+                else:
+                    config.remove_durable(config.CONFIG_PATH)
+            except OSError as again:
+                log.warning("could not put the settings in use back: %s", again)
+                return _("Nothing was imported: the system could not confirm that the new settings are safely on "
+                         "the disk ({reason}), and putting the settings in use back in their file failed too "
+                         "({again}). The file may hold the imported settings; the settings in use are kept in "
+                         "{backup}.").format(reason=_reason(e), again=_reason(again), backup=backup)
+            return _("Nothing was imported: the system could not confirm that the new settings are safely on the "
+                     "disk ({}). The settings in use were put back.").format(_reason(e))
+        except OSError as e:
+            return _("Nothing was imported: the settings could not be saved ({}). They are as they were.").format(
+                _reason(e))
+        self._save_timer.stop()  # what it would save is in the backup; the file holds the imported settings
+        self.cfg = cfg
+        self.engine.set_config(cfg)
+        self.changed.emit()
+        return None
 
     def update_state(self, state):
         self.state = state

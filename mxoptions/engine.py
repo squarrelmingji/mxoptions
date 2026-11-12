@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 
-from . import config, device, environment, gestures, hidpp, vinput
+from . import config, device, environment, gestures, hidpp, keyboard, vinput
 from .actions import Executor, here, keys
 
 if sys.platform == "win32":
@@ -56,6 +56,7 @@ RUMBLE_STEPS = ((0.34, "light"), (0.67, "medium"), (float("inf"), "strong"))
 RUMBLE_TEST = ((0.0, 0.2), (0.45, 0.5), (0.9, 1.0), (1.5, 0.0))  # the test: (s from its start, strength)
 EXPECT_FOR = 12.0    # s the mouse is looked for more often after the other computer sent it here
 EXPECT_INTERVAL = 0.1
+FRONT_DELAY = 0.3    # s another app has to stay in front before the keys do what its profile says: the last one counts
 HID_BUTTONS = ("left", "right", "middle", "back", "forward")  # bit order of the receiver's mouse report
 
 # thumb wheel function -> (wheel clicks per step, action forward, action backward)
@@ -90,7 +91,8 @@ class Listener:
         """Something other programs may want to hear about (it is passed on over D-Bus):
         "button" (key, pressed), "gesture" direction, "wheel_mode" (mode, quiet), "hook" (name, phase).
         And for Flow: "flow" ("asked", None) when an action asks to move to the other computer,
-        ("left", channel) once the mouse was sent there, ("refused", why) when it was not."""
+        ("left", channel) once the mouse was sent there, ("refused", why) when it was not; ("keyboard", ...) when
+        the keyboard comes or goes (keyboard.KeyboardSide._tell_flow). Flow events stay in this program."""
 
     def on_gesture(self, event):
         """A gesture in progress or just finished, while the settings window is watching. ``event`` has
@@ -148,6 +150,8 @@ class Engine:
         self._rumble_pad = None    # the virtual gamepad games vibrate, while rumble is switched on
         self._rumble_mark = None
         self._rumble = {"level": 0.0, "next": 0.0}  # the strength a game asks for now, and when the next pulse is due
+        self.keyboard = keyboard.KeyboardSide(self)  # the keyboard, found and handled next to the mouse
+        self._front = None         # (the app in front, when it counts) not handed to the keyboard yet (see set_front)
 
     # -- thread-safe API --------------------------------------------------
 
@@ -172,6 +176,10 @@ class Engine:
     def feedback(self, waveform):
         """Haptic cue that respects the "feedback" setting."""
         self._queue.put(("haptic", waveform, True))
+
+    def set_front(self, app):
+        """Another app is in front: its name (config.app_id), or None when that cannot be told (front.py)."""
+        self._queue.put(("front", app if config.app_id(app) else None))
 
     def trigger_action(self, action):
         self._queue.put(("trigger", copy.deepcopy(action)))
@@ -238,7 +246,9 @@ class Engine:
 
     def _run(self):
         self.vinput = vinput.create()
-        self.executor = Executor(self.vinput, self._device_action, lambda name, phase: self._emit("hook", (name, phase)))
+        self.executor = Executor(self.vinput, self._device_action, lambda name, phase: self._emit("hook", (name, phase)),
+                                 haptic=self.play_haptic)
+        self.keyboard.start()
         self._publish()
         while self._running:
             try:
@@ -258,6 +268,11 @@ class Engine:
         self._shutdown()
 
     def _idle_timeout(self):
+        now = time.monotonic()
+        front = max(0.005, self._front[1] - now) if self._front is not None else float("inf")
+        return min(self._mouse_timeout(), max(0.05, self.keyboard.due(now)), front)
+
+    def _mouse_timeout(self):
         now = time.monotonic()
         if self.mouse is None:
             return max(0.05, self._next_scan - now)
@@ -285,10 +300,16 @@ class Engine:
                 self._play(item[1])
         elif kind == "trigger":
             self.executor.trigger(item[1])
+        elif kind == "front":
+            self._front = (item[1], time.monotonic() + FRONT_DELAY)
         elif kind == "host":
             self._switch_host(item[1])
         elif kind == "closed":
             self._drop_transport(item[1])
+        elif kind == "kb_found":
+            self.keyboard.found(*item[1:])
+        elif kind == "kb_answer":
+            self.keyboard.answered(*item[1:])
         elif kind == "refresh":
             self._read_status()
             self._publish()
@@ -344,6 +365,8 @@ class Engine:
         now = time.monotonic()
         if now >= self._next_rivals:
             self._look_for_rivals(now)
+        self._take_front(now)
+        self.keyboard.tick(now)
         expected = now < self._expect_until
         if self.mouse is None:
             if now >= self._next_scan:
@@ -375,30 +398,45 @@ class Engine:
             self._read_status(hosts=False)
             self._publish()
 
+    def _take_front(self, now):
+        """The app last said to be in front has been there long enough (see set_front): its keys count now."""
+        if self._front is not None and now >= self._front[1]:
+            app, self._front = self._front[0], None
+            self.keyboard.front_changed(app)
+
     # -- discovery --------------------------------------------------------
 
     def _post_note(self, transport):
         return lambda devidx, sub_id, address, data: self._queue.put(("note", transport, devidx, sub_id, address, data))
 
+    def _transport(self, path, is_receiver):
+        """The open transport of a node, opened now if it is not yet; None if it cannot be."""
+        transport = self._transports.get(path)
+        if transport is None:
+            try:
+                transport = hidpp.Transport(path, is_receiver, on_closed=lambda t: self._queue.put(("closed", t)))
+            except OSError as e:
+                log.debug("cannot open %s: %s", path, e)
+                return None
+            transport.on_notification = self._post_note(transport)
+            self._transports[path] = transport
+        return transport
+
     def _scan(self):
         nodes = dict(hidpp.find_hidpp_nodes())
         for path in [p for p, t in self._transports.items() if p not in nodes or t.closed]:
-            self._transports.pop(path).close()
+            self._drop_transport(self._transports[path])
         for path, is_receiver in nodes.items():
-            transport = self._transports.get(path)
+            transport = self._transport(path, is_receiver)
             if transport is None:
-                try:
-                    transport = hidpp.Transport(path, is_receiver, on_closed=lambda t: self._queue.put(("closed", t)))
-                except OSError as e:
-                    log.debug("cannot open %s: %s", path, e)
-                    continue
-                transport.on_notification = self._post_note(transport)
-                self._transports[path] = transport
+                continue
+            others = []  # what else was loaded on the way: a keyboard, maybe
             try:
                 # A mouse on Bluetooth comes back as a new device every time it returns from another computer:
                 # what it told about itself last time is still true.
                 mouse = device.find_mouse(transport, None if is_receiver else self._known_direct,
-                                          hurry=time.monotonic() < self._expect_until)
+                                          hurry=time.monotonic() < self._expect_until, others=others,
+                                          skip=self.keyboard.skip(transport))
             except HidppClosed:
                 continue
             if mouse:
@@ -407,11 +445,15 @@ class Engine:
                     self._known_direct = mouse
                 self.mouse = mouse
                 self._configure()
+                self.keyboard.after_scan(transport, mouse.devidx, others)
                 return
+            for dev in others:
+                self.keyboard.offer(dev)
 
     def _drop_transport(self, transport):
         self._transports.pop(transport.path, None)
         transport.close()
+        self.keyboard.transport_gone(transport)
         if self.mouse and self.mouse.transport is transport:
             self.mouse = None
             self._set_online(False)
@@ -494,8 +536,8 @@ class Engine:
             self.listener.on_pressed(keys)
 
     def _reset_input_state(self):
-        if self.vinput:
-            self.vinput.release_all()
+        if self.executor:
+            self.executor.reset()  # what the mouse holds: the keyboard's keys stay down
         self._pressed.clear()
         self._held_actions.clear()
         if self._gesture is not None:
@@ -531,7 +573,8 @@ class Engine:
         changed = [s for s in SECTIONS if cfg.get(s) != self.cfg.get(s)]
         if "pointer" in changed:
             self._dpi_override = None  # the user moved the slider: that wins
-        self.cfg = cfg
+        old, self.cfg = self.cfg, cfg
+        self.keyboard.config_changed(old, cfg)
         self._sync_watcher()  # the click or the API may have been switched on or off
         self._sync_rumble()
         if self.mouse and self.online and changed:
@@ -671,6 +714,7 @@ class Engine:
             "dpi": self._current_dpi(),
             "wheel_mode": self._wheel_mode if mouse and self.online else "",
             "caps": None,
+            "keyboard": self.keyboard.state(),
         }
         if mouse:
             state["caps"] = {
@@ -702,6 +746,7 @@ class Engine:
                     mouse.set_dpi(self.cfg["pointer"]["dpi"])
             except HidppError as e:
                 log.debug("restore on exit failed: %s", e)
+        self.keyboard.shutdown()
         if self._watcher is not None:
             self._watcher.close()
             self._watcher = None
@@ -842,6 +887,9 @@ class Engine:
     # -- notifications ----------------------------------------------------
 
     def _on_notification(self, transport, devidx, sub_id, address, data):
+        if self.keyboard.owns(transport, devidx):
+            self.keyboard.on_notification(sub_id, address, data)
+            return
         mouse = self.mouse
         if sub_id == 0x41 and transport.is_receiver:  # device connection
             linked = not (data[0] & 0x40)
@@ -853,6 +901,8 @@ class Engine:
                     self._configure()
                 else:
                     self._set_online(False)
+                return
+            self.keyboard.on_link(transport, devidx, linked)
             return
         if mouse is None or mouse.transport is not transport or devidx != mouse.devidx:
             return

@@ -263,7 +263,12 @@ class MouseApi(QObject):
             parsed = json.loads(value)
         except ValueError:
             parsed = value
-        return self._store.set_path(path, parsed)
+        except RecursionError:  # nested too deep to be anything the settings hold
+            return False
+        try:
+            return self._store.set_path(path, parsed)
+        except RecursionError:
+            return False
 
     @Slot()
     def ShowWindow(self):

@@ -7,7 +7,10 @@ cannot be watched, the "Move to the other computer" action is the way across."""
 
 import collections
 import copy
+import hashlib
+import hmac
 import logging
+import re
 import secrets
 import socket
 import time
@@ -25,6 +28,28 @@ OFFER_AGE = 4.0      # s after which a computer that stopped announcing its pair
 MIB = 1024 * 1024
 RATE_WINDOW = 10.0       # s the speed of a file transfer is averaged over
 RESEND_FOR = 120.0       # s after a crossing during which what was copied is sent again if the link had failed it
+# The mouse following the keyboard (flow.mouse_follows_keyboard). Not measured with a real keyboard yet: knobs.
+FOLLOW_WINDOW = 10.0     # s after the keyboard left this computer during which the mouse may follow it
+FOLLOW_GRACE = 5.0       # s after the mouse was sent after the keyboard before it is sent after it again
+SEQ_MAX = 2 ** 31 - 1    # the largest "seq" of the keyboard in a status
+_TOKEN = re.compile(r"[0-9a-f]{16}")
+
+
+def keyboard_token(key, link):
+    """What the two computers of one pairing call a keyboard (``link``: keyboard.flow_link). The same on both, another
+    for every pairing, and nothing of the keyboard, or of the key, given away."""
+    secret = flow.normalize_key(key).encode("utf-8")
+    return hmac.new(secret, b"mxoptions keyboard token\0" + link.encode("ascii"), hashlib.sha256).hexdigest()[:16]
+
+
+def keyboard_said(value):
+    """The "keyboard" of another computer's status, {"token", "here", "seq"}, if it is exactly what this version
+    sends; None if it is anything else."""
+    if (not isinstance(value, dict) or set(value) != {"token", "here", "seq"} or not isinstance(value["token"], str)
+            or not _TOKEN.fullmatch(value["token"]) or type(value["here"]) is not bool
+            or type(value["seq"]) is not int or not 0 <= value["seq"] <= SEQ_MAX):
+        return None
+    return value
 
 
 class FlowService(QObject):
@@ -55,6 +80,12 @@ class FlowService(QObject):
         self._offers = {}          # computers nearby showing a code: id -> {"id", "name", "address", "port", "seen"}
         self._pair_error = ""      # why the last attempt to pair failed: "code", "closed", "unreachable"
         self._watching = False     # the settings page is open and lists computers showing a code
+        # The keyboard (KeyboardSide._tell_flow): {"link", "here", "drop"}. Never shown, logged or sent as it is.
+        self._keyboard = {"link": None, "here": False, "drop": None}
+        self._keyboard_seq = 0     # goes up whenever what is said of the keyboard changes, for as long as this runs
+        self._heard = {}           # pair -> {"seq", "here": token of the keyboard there, or None}, on the link now up
+        self._drop_used = None     # the keyboard's going that the mouse has been sent after, or was not, once
+        self._follow_at = None     # time.monotonic when the mouse was last sent after the keyboard
         self._watcher = flow_edges.create(self, click=self._click_through, scroll=self._scroll_through)
         if self._watcher is not None:
             self._watcher.reported.connect(self._edge_report)
@@ -259,9 +290,15 @@ class FlowService(QObject):
 
     def _send_status(self):
         state, cfg = self.store.state, self.store.cfg["flow"]
+        per_pair = {pair: {"edge": entry["edge"], "edge_at": entry["edge_at"]} for pair, entry in self._entries()}
+        link = self._keyboard["link"]
+        if link:  # each of the others hears of the keyboard under a name of its own pairing
+            for pair, entry in self._entries():
+                per_pair[pair]["keyboard"] = {"token": keyboard_token(entry["key"], link), "here": self._keyboard["here"],
+                                              "seq": self._keyboard_seq}
         self.link.set_status(
             {"name": socket.gethostname(), "app": __version__, "channel": cfg["channel"], "present": bool(state["connected"])},
-            {pair: {"edge": entry["edge"], "edge_at": entry["edge_at"]} for pair, entry in self._entries()})
+            per_pair)
 
     def _mouse_changed(self):
         state = self.store.state
@@ -352,7 +389,12 @@ class FlowService(QObject):
     def on_engine(self, payload):
         """The engine's side of a handover (see engine.Listener.on_event, "flow")."""
         what, _detail = payload
-        if what == "asked":  # the action on a button, a gesture or the ring: to the first computer that can take the mouse
+        if what == "keyboard":  # it came or went
+            before, self._keyboard = self._keyboard, dict(_detail)
+            if (before["link"], before["here"]) != (self._keyboard["link"], self._keyboard["here"]):
+                self._keyboard_seq = min(self._keyboard_seq + 1, SEQ_MAX)
+                self._send_status()
+        elif what == "asked":  # the action on a button, a gesture or the ring: to the first computer that can take the mouse
             if time.monotonic() < self._quiet_until:
                 return
             for pair, _entry in self._entries():
@@ -446,6 +488,8 @@ class FlowService(QObject):
             self._agree_on_edges(pair)
             if kind == "up":
                 self._send_again(pair)
+                self._heard.pop(pair, None)
+            self._keyboard_heard(pair, payload)
         elif kind == "quiet":
             if pair in self._peers:
                 self._peers[pair]["quiet"] = bool(payload)
@@ -453,6 +497,7 @@ class FlowService(QObject):
                 self._disarm()
         elif kind == "down":
             self._peers.pop(pair, None)
+            self._heard.pop(pair, None)
             if self._armed == pair:
                 self._disarm()
         elif kind == "problem":
@@ -498,6 +543,55 @@ class FlowService(QObject):
         else:
             return
         self.changed.emit()
+
+    # -- the mouse following the keyboard ------------------------------------------------
+
+    def _keyboard_heard(self, pair, payload):
+        """What the computer of ``pair`` says of its keyboard. The first word on a link only says how things are;
+        a keyboard that is there now and was not before, in a status newer than any before, is one that arrived."""
+        if "keyboard" in payload:
+            said = keyboard_said(payload["keyboard"])
+            if said is None:
+                return  # not as this version says it: nothing is taken from it
+        else:
+            said = None  # an older version, or no keyboard seen there
+        before = self._heard.get(pair)
+        if said is not None and before is not None and before["seq"] is not None and said["seq"] <= before["seq"]:
+            return  # heard already, or older than what was
+        here = said["token"] if said is not None and said["here"] else None
+        self._heard[pair] = {"seq": said["seq"] if said is not None else (before or {}).get("seq"), "here": here}
+        if before is not None and here is not None and here != before["here"]:
+            self._follow_keyboard(pair, here)
+
+    def _follow_keyboard(self, pair, token):
+        """The keyboard named ``token`` has just arrived at the computer of ``pair``: if it is the one that left here
+        a moment ago, by itself, the mouse goes after it. Once for each time it left, whatever comes of it."""
+        keyboard, entry = self._keyboard, self._entry(pair)
+        drop, link = keyboard["drop"], keyboard["link"]
+        if (not self.store.cfg["flow"]["mouse_follows_keyboard"] or not link or drop is None  # back here: no drop
+                or entry is None or not hmac.compare_digest(token, keyboard_token(entry["key"], link))):
+            return  # another keyboard, or this one is here, or never went
+        now = time.monotonic()
+        if drop == self._drop_used or now - drop[0] > FOLLOW_WINDOW:
+            return
+        self._drop_used = drop
+        channel = self._target(pair)
+        if drop[1]:
+            why = "the keyboard was sent there from here"
+        elif channel is None:
+            why = "that computer cannot take the mouse"
+        elif self._leaving is not None or now < self._quiet_until or (
+                self._follow_at is not None and now - self._follow_at < FOLLOW_GRACE):
+            why = "the mouse is on its way, or has only just arrived"
+        else:
+            why = None
+        if why:
+            log.info("flow: the mouse does not follow the keyboard: %s", why)
+            return
+        log.info("flow: the mouse follows the keyboard to %s", self._name(pair) or "the other computer")
+        self._follow_at = now
+        self._leaving, self._along = pair, None
+        self.store.engine.flow_leave(channel, False)
 
     def _agree_on_edges(self, pair):
         """If that computer names an edge that does not face the one it stands behind here, one of the two gives way."""

@@ -5,13 +5,14 @@ import copy
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import (
-    QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QVBoxLayout, QWidget,
+    QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QVBoxLayout,
+    QWidget,
 )
 
-from .. import actions
+from .. import actions, config, device
 from ..i18n import _
 from .recorder import ShortcutRecorder
-from .widgets import Segmented, Switch, hint_label
+from .widgets import Segmented, Switch, hint_label, ui_scale
 
 # Set by the application: callable(action) that runs an action right now.
 test_runner = None
@@ -22,14 +23,27 @@ STEP_LABELS = {
     "delay": "Wait",
     "click": "Click",
     "command": "Command",
+    "action": "Action",
+    "haptic": "Vibration",
 }
+# Catalogue entries an action step cannot do (see actions.STEP_ACTIONS); the custom macro is hidden apart
+STEP_EXCLUDE = frozenset(p.id for p in actions.PRESETS if p.action.get("type") not in actions.STEP_ACTIONS)
 STEP_DEFAULTS = {
     "keys": {"do": "keys", "keys": []},
     "text": {"do": "text", "text": ""},
     "delay": {"do": "delay", "ms": 250},
     "click": {"do": "click", "button": "BTN_LEFT"},
     "command": {"do": "command", "command": ""},
+    "action": {"do": "action"},  # no action until one is chosen: left out when saved
+    "haptic": {"do": "haptic", "waveform": device.WAVE_SUBTLE},
 }
+
+
+def _mouse_waveforms(window):
+    """The patterns the mouse can play: a list (empty: no haptic motor), or None while no mouse is known."""
+    store = getattr(window, "store", None)
+    caps = store.state.get("caps") if store is not None else None
+    return list(caps["waveforms"]) if caps else None
 
 
 def _field_label(text):
@@ -131,10 +145,28 @@ class StepRow(QFrame):
             self._button = step.get("button", "BTN_LEFT")
             self.editor.set_value(self._button)
             self.editor.selected.connect(self._set_button)
+        elif self.kind == "action":
+            self.editor = QPushButton()
+            self.editor.setCursor(Qt.CursorShape.PointingHandCursor)
+            self.editor.clicked.connect(self._choose)
+            self._set_action(step["action"] if config.macro_step(step) else None)
+        elif self.kind == "haptic":
+            self.editor = QComboBox()
+            waveforms = dialog.waveforms
+            offered = list(waveforms or device.WAVEFORMS)
+            value = step.get("waveform") if config.macro_step(step) else None
+            if value is not None and value not in offered:
+                offered.append(value)  # what the macro has stays, if another mouse can play it
+            for waveform in offered:
+                self.editor.addItem(_(device.WAVEFORMS[waveform]), waveform)
+            self.editor.setCurrentIndex(max(0, self.editor.findData(value)))
+            self.editor.setEnabled(waveforms != [])
         else:
             self.editor = QLineEdit(step.get("command", ""))
             self.editor.setPlaceholderText(_("e.g. firefox or a script path"))
         layout.addWidget(self.editor, 1)
+        if self.kind == "haptic" and dialog.waveforms == []:
+            layout.addWidget(hint_label(_("This mouse has no haptic motor.")), 1)
         if self.kind in ("delay", "click"):
             layout.addStretch(1)
 
@@ -158,6 +190,41 @@ class StepRow(QFrame):
     def _set_button(self, value):
         self._button = value
 
+    def _set_action(self, action):
+        self._action = action
+        self.editor.setText(actions.describe(action) if action else _("Choose an action"))
+
+    def _choose(self):
+        self._chooser().exec()
+
+    def _chooser(self):
+        """The action picker, with only what an action step can do."""
+        from .action_picker import ActionPicker  # it imports this module
+
+        chooser = QDialog(self.window())
+        chooser.setWindowTitle(_("Action"))
+        layout = QVBoxLayout(chooser)
+        picker = ActionPicker(allow_button_actions=False, exclude=STEP_EXCLUDE)
+        macro = picker.list.macro_row
+        macro.hide()
+        picker.list.search.textChanged.connect(lambda _text: macro.hide())  # after the search showed what it matches
+        picker.edit(_("Action"), self._action or {})
+
+        def picked(action):
+            if config.macro_step({"do": "action", "action": action}):
+                self._set_action(action)
+                chooser.accept()
+
+        picker.changed.connect(picked)
+        layout.addWidget(picker, 1)
+        cancel = QPushButton(_("Cancel"))
+        cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel.clicked.connect(chooser.reject)
+        layout.addWidget(cancel, 0, Qt.AlignmentFlag.AlignRight)
+        chooser.resize(chooser.sizeHint().width(), int(560 * ui_scale()))
+        chooser.picker = picker
+        return chooser
+
     def step(self):
         if self.kind == "keys":
             return {"do": "keys", "keys": list(self._keys)}
@@ -167,6 +234,10 @@ class StepRow(QFrame):
             return {"do": "delay", "ms": self.editor.value()}
         if self.kind == "click":
             return {"do": "click", "button": self._button}
+        if self.kind == "action":
+            return {"do": "action", "action": copy.deepcopy(self._action)} if self._action else None
+        if self.kind == "haptic":
+            return {"do": "haptic", "waveform": self.editor.currentData()}
         return {"do": "command", "command": self.editor.text().strip()}
 
 
@@ -174,6 +245,7 @@ class MacroDialog(_Dialog):
     def __init__(self, action=None, parent=None):
         super().__init__(_("Macro"), parent)
         action = action or {}
+        self.waveforms = _mouse_waveforms(parent)
         self.name.setText(action.get("name", ""))
         self.name.setPlaceholderText(_("e.g. Sign and send"))
         self.body.addWidget(_field_label(_("Steps")))
@@ -268,5 +340,5 @@ class MacroDialog(_Dialog):
             "type": "macro",
             "name": self.name.text().strip(),
             "repeat": self.repeat.isChecked(),
-            "steps": [row.step() for row in self._rows],
+            "steps": [step for step in (row.step() for row in self._rows) if step is not None],
         }

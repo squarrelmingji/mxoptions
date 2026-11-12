@@ -28,8 +28,9 @@ import subprocess
 import sys
 import threading
 import time
+import weakref
 
-from . import environment, paths
+from . import device, environment, paths
 from .i18n import _
 
 log = logging.getLogger(__name__)
@@ -63,7 +64,11 @@ NONE = {"type": "none"}
 #   delay   {"ms": 250}             wait
 #   click   {"button": "BTN_LEFT"}  mouse click
 #   command {"command": "..."}      shell command
-MACRO_STEPS = ("keys", "text", "delay", "click", "command")
+#   action  {"action": {...}}       one action of STEP_ACTIONS, done as if a gesture or the ring did it
+#   haptic  {"waveform": 4}         a vibration of the mouse (device.WAVEFORMS), if it is here and has a motor
+MACRO_STEPS = ("keys", "text", "delay", "click", "command", "action", "haptic")
+# What an action step may do: nothing that talks to a device, and no macro inside a macro
+STEP_ACTIONS = ("keys", "button", "shortcut", "desktop", "command", "script", "hook")
 MAX_MACRO_STEPS = 64
 MAX_DELAY_MS = 10000
 
@@ -295,6 +300,12 @@ def describe_step(step):
         return {"BTN_LEFT": _("Left click"), "BTN_RIGHT": _("Right click"), "BTN_MIDDLE": _("Middle click")}.get(step.get("button"), "")
     if kind == "command":
         return step.get("command", "")
+    if kind == "action":
+        from . import config
+        return describe(step["action"]) if config.macro_step(step) else ""
+    if kind == "haptic":
+        waveform = step.get("waveform")
+        return _(device.WAVEFORMS[waveform]) if type(waveform) is int and waveform in device.WAVEFORMS else ""
     return ""
 
 
@@ -379,49 +390,77 @@ def here(action):
 
 
 class MacroRunner:
-    """Plays macros on its own thread so delays never stall button handling."""
+    """Plays macros on its own thread so delays never stall button handling. ``trigger(action)`` does an
+    action step and ``haptic(waveform)`` a vibration step; both are called on that thread."""
 
-    def __init__(self, vinput):
+    def __init__(self, vinput, trigger=None, haptic=None):
         self.vinput = vinput
+        self.trigger = trigger
+        self.haptic = haptic
         self._queue = queue.Queue()
         self._stop = threading.Event()
+        self._wake = threading.Event()  # what a step waits on when it is not part of a macro being played
+        self._round = 0                 # cancel() counts up: a macro queued or playing in an earlier round goes no further
+        self._playing = None            # the Event the macro playing now waits on (see run)
         self._thread = None
 
-    def run(self, action, held=None):
-        """Queue a macro. With ``held`` (an Event) a repeating macro loops until it is cleared."""
+    def run(self, action, held=None, cancel=None):
+        """Queue a macro. With ``held`` (an Event) a repeating macro loops until it is cleared. Once ``cancel`` (an
+        Event) is set, the macro goes no further: dropped while queued, ended before its next step, a wait cut short."""
         if self._thread is None:
             self._thread = threading.Thread(target=self._loop, name="macro", daemon=True)
             self._thread.start()
         if self._queue.qsize() < 4:  # a stuck macro must not pile up presses
-            self._queue.put((action, held))
+            self._queue.put((action, held, self._round, cancel or threading.Event()))
 
     def stop(self):
         self._stop.set()
+        self._wake_playing()
         self._queue.put(None)
+
+    def cancel(self):
+        """Drop the macros queued and end the one playing before its next step, a wait cut short; the macros
+        run after this play as usual. A command a macro already started keeps running."""
+        self._round += 1
+        self._wake_playing()
+
+    def _wake_playing(self):
+        playing = self._playing
+        if playing is not None:
+            playing.set()  # it goes no further either way
 
     def _loop(self):
         while not self._stop.is_set():
             job = self._queue.get()
             if job is None:
                 return
-            action, held = job
+            action, held, round_, cancel = job
+            job = None
+            self._playing = cancel  # before looking at the round: a cancel() from now on cuts the next wait short
             steps = [s for s in action.get("steps", []) if isinstance(s, dict)][:MAX_MACRO_STEPS]
             try:
                 while True:
                     for step in steps:
                         if self._stop.is_set():
                             return
-                        self._step(step)
-                    if not (action.get("repeat") and held is not None and held.is_set() and steps):
+                        if round_ != self._round or cancel.is_set():
+                            break
+                        self._step(step, cancel)
+                    if not (action.get("repeat") and held is not None and held.is_set() and steps and round_ == self._round
+                            and not cancel.is_set()):
                         break
-                    self._stop.wait(0.02)
+                    cancel.wait(0.02)
             except Exception:
                 log.exception("macro failed")
+            finally:
+                self._playing = None
+                action = held = cancel = None  # nothing of it kept while the next one is waited for (see Executor)
 
-    def _step(self, step):
+    def _step(self, step, wake=None):
+        wake = wake or self._wake
         kind = step.get("do")
         if kind == "delay":
-            self._stop.wait(max(0, min(MAX_DELAY_MS, int(step.get("ms", 0)))) / 1000.0)
+            wake.wait(max(0, min(MAX_DELAY_MS, int(step.get("ms", 0)))) / 1000.0)
             return
         if kind == "keys" and self.vinput:
             self.vinput.tap(step.get("keys", []))
@@ -431,23 +470,47 @@ class MacroRunner:
             insert_text(self.vinput, step.get("text", ""))
         elif kind == "command":
             run_command(step.get("command", ""))
-        self._stop.wait(0.02)  # let the application digest the event
+        elif kind in ("action", "haptic"):
+            from . import config  # it imports this module
+            if not config.macro_step(step):  # mouse macros reach here unchecked
+                log.debug("macro step skipped: %r", kind)
+            elif kind == "action" and self.trigger:
+                self.trigger(step["action"])
+            elif kind == "haptic" and self.haptic:
+                self.haptic(step["waveform"])
+        wake.wait(0.02)  # let the application digest the event
 
 
 class Executor:
-    """Runs actions. ``device_action(action, phase)`` handles the ones that talk to the mouse and
+    """Runs actions. ``device_action(action, phase)`` handles the ones that talk to the device and
     ``hook(name, phase)`` the ones that are only announced to other programs;
-    phase is "press", "release" or "trigger"."""
+    phase is "press", "release" or "trigger". ``owner`` is whose keys are held: "mouse" or "keyboard"
+    (see vinput.Holds)."""
 
-    def __init__(self, vinput, device_action, hook=None):
+    def __init__(self, vinput, device_action, hook=None, owner="mouse", haptic=None):
+        """``haptic(waveform)``: play a vibration on the mouse, from any thread (a macro's)."""
         self.vinput = vinput
         self.device_action = device_action
         self.hook = hook or (lambda name, phase: None)
-        self.macros = MacroRunner(vinput)
+        self.owner = owner
+        self.macros = MacroRunner(vinput, self.trigger, haptic)
         self._macro_holds = {}  # id(action) -> Event set while its button is down
+        # id(action) -> the Event that stops the macros started from that action (MacroRunner.run), while one of them
+        # is queued or plays: they hold the action, so its id is not another's meanwhile
+        self._sources = weakref.WeakValueDictionary()
 
     def close(self):
         self.macros.stop()
+
+    def reset(self):
+        """The device went away or starts over: stop its macros, the queued ones too, and let go of what it holds."""
+        self.macros.cancel()
+        self._sources.clear()  # the one playing had its Event set: a macro started from now on gets a new one
+        for held in self._macro_holds.values():
+            held.clear()
+        self._macro_holds.clear()
+        if self.vinput:
+            self.vinput.release_all(self.owner)
 
     def press(self, action):
         if action.get("type") == "desktop":
@@ -456,10 +519,10 @@ class Executor:
         kind = action.get("type")
         if kind == "keys":
             if self.vinput:
-                self.vinput.press(action.get("keys", []))
+                self.vinput.press(action.get("keys", []), self.owner)
         elif kind == "button":
             if self.vinput:
-                self.vinput.press([action["button"]])
+                self.vinput.press([action["button"]], self.owner)
         elif kind in ("wheel_mode", "dpi_cycle", "dpi_shift", "host", "flow"):
             self.device_action(action, "press")
         elif kind == "hook":
@@ -468,7 +531,7 @@ class Executor:
             held = threading.Event()
             held.set()
             self._macro_holds[id(action)] = held
-            self.macros.run(action, held)
+            self.macros.run(action, held, self._source(action))
         else:
             self._oneshot(action)
 
@@ -476,10 +539,10 @@ class Executor:
         kind = action.get("type")
         if kind == "keys":
             if self.vinput:
-                self.vinput.release(action.get("keys", []))
+                self.vinput.release(action.get("keys", []), self.owner)
         elif kind == "button":
             if self.vinput:
-                self.vinput.release([action["button"]])
+                self.vinput.release([action["button"]], self.owner)
         elif kind == "dpi_shift":
             self.device_action(action, "release")
         elif kind == "hook":
@@ -504,9 +567,26 @@ class Executor:
         elif kind == "hook":
             self.hook(action.get("name", ""), "trigger")
         elif kind == "macro":
-            self.macros.run(action)
+            self.macros.run(action, cancel=self._source(action))
         elif kind:
             self._oneshot(action)
+
+    def cancel(self, action):
+        """Stop the macros started from ``action``, this very object, as reset() stops all of them: the queued ones
+        dropped, the one playing ended before its next step. Its hold is let go of. Other macros play on; a command
+        a macro already started keeps running."""
+        cancel = self._sources.pop(id(action), None)
+        if cancel is not None:
+            cancel.set()
+        held = self._macro_holds.pop(id(action), None)
+        if held:
+            held.clear()
+
+    def _source(self, action):
+        cancel = self._sources.get(id(action))
+        if cancel is None:
+            cancel = self._sources[id(action)] = threading.Event()
+        return cancel
 
     def _oneshot(self, action):
         kind = action.get("type")

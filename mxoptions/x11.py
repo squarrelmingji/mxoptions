@@ -82,6 +82,35 @@ def _property(window, name):
         _lib.XFree(data)
 
 
+def _string(window, name):
+    """The bytes of a property of 8-bit units of a window (empty if it has none)."""
+    actual, size, count, left = ctypes.c_ulong(), ctypes.c_int(), ctypes.c_ulong(), ctypes.c_ulong()
+    data = ctypes.c_void_p()
+    status = _lib.XGetWindowProperty(_display, window, _atom(name), 0, 1024, 0, 0, ctypes.byref(actual), ctypes.byref(size),
+                                     ctypes.byref(count), ctypes.byref(left), ctypes.byref(data))
+    _lib.XSync(_display, 0)
+    if status != 0 or not data.value:
+        return b""
+    try:
+        return ctypes.string_at(data, count.value) if size.value == 8 else b""
+    finally:
+        _lib.XFree(data)
+
+
+def active_class():
+    """The class of the application whose window has the focus: the second of the two strings in its WM_CLASS
+    (ICCCM 4.1.2.5, "two consecutive null-terminated strings", type STRING), found through the root window's
+    _NET_ACTIVE_WINDOW (EWMH). None where there is no X server, no such window or no class."""
+    with _lock:
+        if _open() is None:
+            return None
+        active = _property(_lib.XDefaultRootWindow(_display), "_NET_ACTIVE_WINDOW")
+        if not active or not active[0]:
+            return None
+        parts = _string(active[0], "WM_CLASS").split(b"\0")
+    return parts[1].decode("latin-1") if len(parts) > 1 and parts[1] else None
+
+
 def compositing():
     """Whether windows can be see-through: a compositing manager is running."""
     with _lock:

@@ -322,6 +322,7 @@ STRINGS = {
     "Click": "Клік",
     "Command": "Команда",
     "Text to insert": "Текст для вставлення",
+    "Choose an action": "Виберіть дію",
     "Left": "Лівий",
     "Right": "Правий",
     "Middle": "Середній",
@@ -558,6 +559,11 @@ STRINGS = {
     "Cross while a full-screen window is in front": "Переходити, коли попереду повноекранне вікно",
     "Off, a game or a film in full screen keeps the mouse however hard you push.":
         "Якщо вимкнено, гра чи фільм на весь екран не відпустять мишу, хоч як тисни.",
+    "Mouse follows the keyboard": "Миша йде за клавіатурою",
+    "Switch the keyboard to one of these computers with its Easy-Switch key, and the mouse goes along. "
+    "Only between computers running MX Options; this is not Logitech's Easy-Switch of Options+.":
+        "Перемкніть клавіатуру на один із цих комп'ютерів її клавішею Easy-Switch, і миша піде слідом. "
+        "Лише між комп'ютерами з MX Options; це не Easy-Switch від Logitech в Options+.",
 
     "What goes along": "Що переходить разом із мишею",
     "Copied text and pictures": "Скопійований текст і зображення",
@@ -731,4 +737,148 @@ STRINGS = {
     "Add a udev rule granting your user access to uinput and log in again.":
         "Немає доступу до /dev/uinput: комбінації клавіш, кліки та плавна прокрутка не працюватимуть. "
         "Додайте правило udev із доступом до uinput для вашого користувача та увійдіть знову.",
+
+    # the keyboard
+    "Keyboard": "Клавіатура",
+    "Status": "Стан",
+    "Battery": "Акумулятор",
+    "Key {}": "Клавіша {}",
+    "Fn lock": "Фіксація Fn",
+    "Fn lock key": "Клавіша фіксації Fn",
+    "F-Lock": "F-Lock",
+    "Backlight down": "Підсвітка −",
+    "Backlight up": "Підсвітка +",
+    "Kept by the keyboard": "За клавіатурою",
+    "MX Options leaves the Easy-Switch keys and the keys of the Fn layer to the keyboard, so that switching computers "
+    "and the Fn keys always work.":
+        "MX Options залишає клавіші Easy-Switch і клавіші шару Fn самій клавіатурі, щоб перемикання комп'ютерів "
+        "і клавіші Fn працювали завжди.",
+    "Changed by another program": "Змінено іншою програмою",
+    "Another program has changed what this key sends, so MX Options leaves it alone.":
+        "Інша програма змінила те, що надсилає ця клавіша, тож MX Options її не чіпає.",
+    "Changed already": "Уже змінено",
+    "This key was already changed when the keyboard was found, and MX Options cannot tell by whom, so it leaves the key alone.":
+        "Ця клавіша вже була змінена, коли клавіатуру знайдено, і MX Options не може визначити ким, тож її не чіпає.",
+    "Other software for Logitech devices is running, so the keys of the keyboard are left as they are.":
+        "Працює інша програма для пристроїв Logitech, тож клавіші клавіатури залишено як є.",
+    "This keyboard does not say which one it is, so its keys are left as they are.":
+        "Ця клавіатура не повідомляє, яка саме вона, тож її клавіші залишено як є.",
+    "The record of changed keys cannot be read: {}. Keys are left as they are.":
+        "Не вдається прочитати запис змінених клавіш: {}. Клавіші залишено як є.",
+    "The record of changed keys already lists 16 other keyboards, so the keys of this one are left as they are.":
+        "Запис змінених клавіш уже містить 16 інших клавіатур, тож клавіші цієї залишено як є.",
+    "The keyboard was not moved to the other computer: a key MX Options changed could not be given back first. "
+    "Its keys work as set here; try again in a moment.":
+        "Клавіатуру не перемкнуто на інший комп’ютер: не вдалося спершу повернути клавішу, змінену MX Options. "
+        "Її клавіші працюють, як налаштовано тут; спробуйте ще раз за мить.",
+    "Pick a key to choose what it does. A key left at Default does what it always does; the keys you change go back "
+    "to normal when MX Options quits.":
+        "Виберіть клавішу, щоб задати, що вона робить. Клавіша з дією «Типово» робить те, що й завжди; змінені клавіші "
+        "повертаються до звичайної роботи, коли MX Options завершує роботу.",
+    "The keyboard has not said yet how this key reports; the action is applied once it does.":
+        "Клавіатура ще не повідомила, як працює ця клавіша; дію буде застосовано, щойно вона це зробить.",
+    "Turn the keyboard on to see its keys here. Its receiver can be the one of the mouse.":
+        "Увімкніть клавіатуру, щоб побачити тут її клавіші. Вона може працювати через ресівер миші.",
+    "Press an Easy-Switch key to move the keyboard to the computer on that channel. Hold one for three seconds to pair "
+    "the keyboard with another computer on it.":
+        "Натисніть клавішу Easy-Switch, щоб перевести клавіатуру на комп'ютер цього каналу. Утримуйте її три секунди, "
+        "щоб спарувати клавіатуру з іншим комп'ютером на цьому каналі.",
+    "fwupd, the system's firmware updater, does not see the keyboard right now.":
+        "fwupd, системний засіб оновлення прошивок, зараз не бачить клавіатуру.",
+    "Firmware {}": "Прошивка {}",
+    "Read from the keyboard. fwupd, the system's firmware updater, does not see it right now.":
+        "Прочитано з клавіатури. fwupd, системний засіб оновлення прошивок, зараз її не бачить.",
+    "Keyboard settings": "Налаштування клавіатури",
+    "What the keyboard says it has settings for. They are the keyboard's own: MX Options shows them, but does not "
+    "change them yet.":
+        "Налаштування, які, за словами клавіатури, вона має. Вони належать самій клавіатурі: MX Options їх показує, "
+        "але поки не змінює.",
+    "The keyboard can swap whether the top row gives F1–F12 or its other functions without Fn, as its guide "
+    "describes. MX Options does not change this yet.":
+        "Клавіатура може міняти, що дає верхній ряд без Fn: F1–F12 чи свої інші функції, як описано в її посібнику. "
+        "MX Options поки цього не змінює.",
+    "Backlight": "Підсвітка",
+    "The keyboard has a backlight with settings of its own, set on the keyboard as its guide describes. MX Options "
+    "does not change them yet.":
+        "Клавіатура має підсвітку з власними налаштуваннями, які задають на самій клавіатурі, як описано в її "
+        "посібнику. MX Options поки їх не змінює.",
+    "Operating system layout": "Розкладка для операційної системи",
+    "The keyboard can be set up for the layout of another operating system, on the keyboard itself as its guide "
+    "describes. MX Options does not change this yet.":
+        "Клавіатуру можна налаштувати на розкладку іншої операційної системи на самій клавіатурі, як описано в її "
+        "посібнику. MX Options поки цього не змінює.",
+    "Disable keys": "Вимкнення клавіш",
+    "The keyboard can turn some of its keys off. MX Options does not do this yet.":
+        "Клавіатура може вимикати деякі свої клавіші. MX Options поки цього не робить.",
+    "Lock keys": "Клавіші фіксації",
+    "The keyboard can report the state of its lock keys. MX Options does not show it yet.":
+        "Клавіатура може повідомляти стан своїх клавіш фіксації. MX Options поки його не показує.",
+    "Every key does what it always does": "Кожна клавіша робить те, що й завжди",
+    "Restore keyboard defaults": "Відновити типові налаштування клавіатури",
+    "Give every key of the keyboard back its own function, in every app? The keys set for single apps go too.":
+        "Повернути всім клавішам клавіатури їхні власні функції в усіх програмах? Клавіші, задані для окремих програм, теж зникнуть.",
+    "Keys for": "Клавіші для",
+    "All apps": "Усі програми",
+    "Add app": "Додати програму",
+    "Remove": "Вилучити",
+    "Remove the keys of this app": "Вилучити клавіші цієї програми",
+    "Remove the keys of {}? In that app the keys then do what they do in every app.":
+        "Вилучити клавіші {}? У цій програмі клавіші робитимуть те саме, що й в усіх інших.",
+    "As in all apps": "Як в усіх програмах",
+    "This desktop does not tell other programs which app is in front, so keys of their own for one app cannot "
+    "work here. The keys do what is set for all apps.":
+        "Це робоче середовище не повідомляє іншим програмам, яка програма зараз попереду, тому окремі клавіші для "
+        "однієї програми тут не працюють. Клавіші роблять те, що задано для всіх програм.",
+    "While {} is in front. \"As in all apps\": the key does what it does in every app. \"Default\": the key does "
+    "what it always does, here, even where it is changed for all apps.":
+        "Поки попереду {}. «Як в усіх програмах»: клавіша робить те саме, що й в усіх програмах. «Типово»: клавіша "
+        "робить те, що й завжди, тут, навіть якщо для всіх програм її змінено.",
+    "To give an app keys of its own, add it: {} was in front last.":
+        "Щоб дати програмі власні клавіші, додайте її: останньою попереду була {}.",
+    "To give an app keys of its own, switch to it, then come back here and add it.":
+        "Щоб дати програмі власні клавіші, перейдіть до неї, потім поверніться сюди й додайте її.",
+    "The battery of {name} is low ({percent}%). Charge it soon.":
+        "Акумулятор {name} майже розряджений ({percent}%). Зарядіть його найближчим часом.",
+    "Export…": "Експортувати…",
+    "Import…": "Імпортувати…",
+    "Settings file": "Файл налаштувань",
+    "Every setting in one file, your commands and scripts included: keep it private. The pairings of Flow stay on "
+    "this computer.":
+        "Усі налаштування в одному файлі, разом із вашими командами й скриптами: не показуйте його іншим. "
+        "Пари Flow лишаються на цьому комп’ютері.",
+    "Export settings": "Експорт налаштувань",
+    "Import settings": "Імпорт налаштувань",
+    "Settings (*.json)": "Налаштування (*.json)",
+    "The settings are in {}.": "Налаштування збережено у {}.",
+    "Replace every setting with the ones in {}? The settings you have now are kept in a backup first, and the "
+    "pairings of Flow stay as they are.":
+        "Замінити всі налаштування тими, що у {}? Поточні налаштування спершу буде збережено в резервній копії, "
+        "а пари Flow лишаться як є.",
+    "The settings of {} are in use. A change of language takes effect after restarting the app.":
+        "Налаштування з {} застосовано. Зміна мови набуде чинності після перезапуску програми.",
+    "It is {size} KB, more than the {limit} KB a settings file may have.":
+        "Його розмір {size} КБ, більше за {limit} КБ, дозволені для файлу налаштувань.",
+    "It is not a settings file of MX Options.": "Це не файл налаштувань MX Options.",
+    "It was made by a newer version of MX Options.": "Його створила новіша версія MX Options.",
+    "The settings hold something a settings file cannot.": "Налаштування містять те, чого файл налаштувань містити не може.",
+    "Nothing was exported. {}": "Нічого не експортовано. {}",
+    "The settings were written, but the system could not confirm that they are safely on the disk ({}).":
+        "Налаштування записано, але система не змогла підтвердити, що вони надійно збережені на диску ({}).",
+    "The settings could not be written ({}).": "Не вдалося записати налаштування ({}).",
+    "{name} cannot be imported. {reason}": "{name} не можна імпортувати. {reason}",
+    "{name} could not be read ({reason}).": "Не вдалося прочитати {name} ({reason}).",
+    "Nothing was imported: the settings in use could not be kept in a backup first ({}).":
+        "Нічого не імпортовано: не вдалося спершу зберегти поточні налаштування в резервній копії ({}).",
+    "Nothing was imported: the system could not confirm that the new settings are safely on the disk ({reason}), "
+    "and putting the settings in use back in their file failed too ({again}). The file may hold the imported "
+    "settings; the settings in use are kept in {backup}.":
+        "Нічого не імпортовано: система не змогла підтвердити, що нові налаштування надійно збережені на диску "
+        "({reason}), і повернути поточні налаштування до їхнього файлу теж не вдалося ({again}). Файл може містити "
+        "імпортовані налаштування; поточні налаштування збережено в {backup}.",
+    "Nothing was imported: the system could not confirm that the new settings are safely on the disk ({}). The "
+    "settings in use were put back.":
+        "Нічого не імпортовано: система не змогла підтвердити, що нові налаштування надійно збережені на диску ({}). "
+        "Поточні налаштування повернуто.",
+    "Nothing was imported: the settings could not be saved ({}). They are as they were.":
+        "Нічого не імпортовано: не вдалося зберегти налаштування ({}). Вони лишилися як були.",
 }

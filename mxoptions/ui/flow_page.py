@@ -253,6 +253,14 @@ class FlowPage(ScrollPage):
             _("Cross while a full-screen window is in front"),
             _("Off, a game or a film in full screen keeps the mouse however hard you push."),
             self.fullscreen))
+        self.follow = Switch()
+        self.follow.toggled.connect(lambda on: self.store.set("flow", "mouse_follows_keyboard", on))
+        self.follow_row = card.add(Row(
+            _("Mouse follows the keyboard"),
+            _("Switch the keyboard to one of these computers with its Easy-Switch key, and the mouse goes along. "
+              "Only between computers running MX Options; this is not Logitech's Easy-Switch of Options+."),
+            self.follow))
+        self.crossing_card = card
         self.body.addWidget(card)
 
         # what goes along
@@ -529,6 +537,8 @@ class FlowPage(ScrollPage):
         self.push.set_value(cfg["push_mm"])
         self.corner.set_value(cfg["corner"])
         self.fullscreen.set_checked_silently(cfg["fullscreen"])
+        self.follow.set_checked_silently(cfg["mouse_follows_keyboard"])
+        self.crossing_card.set_row_visible(self.follow_row, self.store.state.get("keyboard") is not None)
         copies = status.get("copies", True)
         self.clipboard.set_checked_silently(cfg["clipboard"] and copies)
         self.clipboard.setEnabled(copies)

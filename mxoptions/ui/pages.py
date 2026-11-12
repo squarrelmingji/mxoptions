@@ -1,10 +1,11 @@
 """The pages of the main window."""
 
+import os
 import sys
 import threading
 import time
 
-from PySide6.QtCore import QObject, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QStandardPaths, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QApplication, QColorDialog, QComboBox, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton, QScrollArea,
@@ -691,6 +692,18 @@ class DevicePage(ScrollPage):
         self.language = Segmented([("auto", _("Auto")), ("en", "English"), ("uk", "Українська")])
         self.language.selected.connect(self._language)
         self.language_row = card.add(Row(_("Language"), _("Takes effect after restarting the app."), self.language))
+        transfer = QWidget()
+        transfer_layout = QHBoxLayout(transfer)
+        transfer_layout.setContentsMargins(0, 0, 0, 0)
+        transfer_layout.setSpacing(10)
+        for label, slot in ((_("Export…"), self._export), (_("Import…"), self._import)):
+            button = QPushButton(label)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.clicked.connect(slot)
+            transfer_layout.addWidget(button)
+        card.add(Row(_("Settings file"), None, transfer, note=_(
+            "Every setting in one file, your commands and scripts included: keep it private. The pairings of Flow "
+            "stay on this computer.")))
         reset = QPushButton(_("Restore defaults"))
         reset.setCursor(Qt.CursorShape.PointingHandCursor)
         reset.clicked.connect(self._reset)
@@ -801,6 +814,33 @@ class DevicePage(ScrollPage):
         color = QColorDialog.getColor(QColor(self.store.cfg["app"]["accent"]), self, _("Accent colour"))
         if color.isValid():
             self.store.set("app", "accent", color.name())
+
+    def _export(self):
+        folder = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
+        path, _filter = QFileDialog.getSaveFileName(  # the dialog asks before it replaces a file
+            self, _("Export settings"), os.path.join(folder, "mxoptions-settings.json"), _("Settings (*.json)"))
+        if path:
+            failed = self.store.export_settings(path)
+            if failed:
+                QMessageBox.warning(self, APP_NAME, failed)
+            else:
+                QMessageBox.information(self, APP_NAME, _("The settings are in {}.").format(os.path.basename(path)))
+
+    def _import(self):
+        path, _filter = QFileDialog.getOpenFileName(self, _("Import settings"), "", _("Settings (*.json)"))
+        if not path:
+            return
+        answer = QMessageBox.question(self, APP_NAME, _(
+            "Replace every setting with the ones in {}? The settings you have now are kept in a backup first, and "
+            "the pairings of Flow stay as they are.").format(os.path.basename(path)))
+        if answer == QMessageBox.StandardButton.Yes:
+            failed = self.store.import_settings(path)
+            if failed:
+                QMessageBox.warning(self, APP_NAME, failed)
+            else:
+                QMessageBox.information(self, APP_NAME, _(
+                    "The settings of {} are in use. A change of language takes effect after restarting the "
+                    "app.").format(os.path.basename(path)))
 
     def _reset(self):
         answer = QMessageBox.question(self, APP_NAME, _("Reset every setting to its default?"))

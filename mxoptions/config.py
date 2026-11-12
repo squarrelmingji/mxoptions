@@ -1,17 +1,36 @@
-"""Settings file (config.json in the place paths.py names: ~/.config/mxoptions on Linux): defaults, load, save."""
+"""Settings file (config.json in the place paths.py names: ~/.config/mxoptions on Linux): defaults, load, save;
+and the settings as a file of their own, to export and import (export_data, import_data)."""
 
+import contextlib
 import copy
 import json
 import logging
 import os
+import re
+import stat
+import sys
+import tempfile
+import unicodedata
 
 from . import device, environment, flow, gestures, paths
-from .actions import DEFAULT, PRESET_BY_ID, SCROLLS, dial_available
+from .i18n import _
+from .actions import DEFAULT, MACRO_STEPS, MAX_DELAY_MS, MAX_MACRO_STEPS, PRESET_BY_ID, SCROLLS, STEP_ACTIONS, dial_available
+from .keys import CODES as KEY_CODES
+from .vinput import MOUSE_BUTTONS
 
 log = logging.getLogger(__name__)
 
 CONFIG_DIR = paths.CONFIG
 CONFIG_PATH = os.path.join(CONFIG_DIR, "config.json")
+BACKUP_NAME = "config.backup.json"  # in CONFIG_DIR: the settings as they were before the last import
+
+# An exported settings file: {"format": SETTINGS_FORMAT, "version": 1, "config": the settings}
+SETTINGS_FORMAT = "mxoptions-settings"
+SETTINGS_FILE_MAX = 1 << 20  # bytes, exported or imported alike: whatever is exported can be imported again
+SETTINGS_DEPTH_MAX = 32      # lists and dicts inside one another: far more than any setting needs
+# What stays on this computer, never exported nor imported: the pairing keys of Flow, what this computer goes by
+# there, its Easy-Switch channel. Their values in an exported file.
+LOCAL_FLOW = {"peers": [], "id": "", "channel": -1}
 
 # Configurable buttons, in the order the UI lists them: key -> control ID
 BUTTONS = {
@@ -203,6 +222,21 @@ MOUSE_COLORS = ("graphite", "pale-grey", "black")
 GESTURE_BUTTONS = ("gesture", "panel")  # the two thumb buttons whose roles can be swapped
 RING_STYLES = ("bubbles", "pie", "grid")
 MAX_SAVED_RINGS = 16
+# What a key of the keyboard can do: everything but what only makes sense on the mouse (its wheel, its pointer
+# speed, gestures, the ring, Flow). Easy-Switch from a key moves the keyboard.
+KEYBOARD_ACTIONS = ("none", "keys", "button", "shortcut", "desktop", "command", "script", "macro", "host", "hook")
+MAX_KEYBOARD_KEYS = 128
+KEY_ID = re.compile(r"0x[0-9a-f]{4}\Z")  # how the keys of the keyboard are named in the settings: key_id(control id)
+MAX_COMBO = 16          # key names in one combination
+MAX_KEY_TEXT = 65536    # characters in a text, command, script or name a key runs
+MAX_PROFILES = 32       # apps with keys of their own
+MAX_APP_ID = 128        # characters in the name an app goes by (front.py)
+MAX_PROFILE_NAME = 64
+NATIVE = {"type": "default"}  # in a profile: the key does what it always does in that app, whatever it does elsewhere
+
+
+def key_id(cid):
+    return f"0x{cid:04x}"
 
 
 DEFAULTS = {
@@ -285,7 +319,12 @@ DEFAULTS = {
         "cue_arrived": 0x07,  # the vibration when copied files have arrived (None: none)
         "cue_failed": 0x06,   # ... and when they could not be brought over
         "channel": -1,        # this computer's Easy-Switch channel, noted whenever the mouse is here (-1: not seen yet)
+        "mouse_follows_keyboard": False,  # the keyboard switched to another of these computers takes the mouse along
     },
+    # The keyboard: what its keys do, by key_id(control id). A key that is not listed does what it always does.
+    # "profiles": [{"app", "name", "keys"}], the first one for the app in front changing what its keys do there
+    # (NATIVE: what the key always does); a key a profile does not list does what "keys" says.
+    "keyboard": {"keys": {}, "profiles": []},
 }
 
 
@@ -375,6 +414,119 @@ def _sanitize_bubbles(bubbles, depth):
     return result[:MAX_BUBBLES]
 
 
+def _text(*values, empty=False):
+    return all(isinstance(value, str) and (empty or value) and len(value) <= MAX_KEY_TEXT for value in values)
+
+
+def _key_names(names, empty=False):
+    """A key combination: a list of key and button names the virtual input knows (keys.CODES)."""
+    return (isinstance(names, list) and (empty or bool(names)) and len(names) <= MAX_COMBO
+            and all(isinstance(name, str) and name in KEY_CODES for name in names))
+
+
+def macro_step(step):
+    """Whether ``step`` is a macro step complete and well-formed (see actions.MACRO_STEPS)."""
+    if not isinstance(step, dict):
+        return False
+    kind = step.get("do")
+    if kind == "keys":
+        return _key_names(step.get("keys"), empty=True)  # the macro editor starts a step empty: it taps nothing
+    if kind == "text":
+        return _text(step.get("text"), empty=True)
+    if kind == "delay":
+        ms = step.get("ms")
+        return type(ms) is int and 0 <= ms <= MAX_DELAY_MS
+    if kind == "click":
+        return step.get("button") in MOUSE_BUTTONS
+    if kind == "command":
+        return _text(step.get("command"), empty=True)
+    if kind == "action":  # the type first: a macro, however deep, is never looked into
+        action = step.get("action")
+        return isinstance(action, dict) and action.get("type") in STEP_ACTIONS and keyboard_action(action)
+    if kind == "haptic":
+        waveform = step.get("waveform")
+        return type(waveform) is int and waveform in device.WAVEFORMS
+    return False
+
+
+def keyboard_action(action):
+    """Whether ``action`` is one a key of the keyboard can run, complete and well-formed down to each macro
+    step. What is not is never kept in the settings, and never diverts a key."""
+    kind = action.get("type") if isinstance(action, dict) else None
+    if kind == "keys":
+        return _key_names(action.get("keys"))
+    if kind == "button":
+        return action.get("button") in MOUSE_BUTTONS
+    if kind == "shortcut":
+        return _text(action.get("component"), action.get("name"))
+    if kind == "desktop":
+        return isinstance(action.get("do"), str) and action["do"] in environment.WAYS
+    if kind == "command":
+        return _text(action.get("command"))
+    if kind == "script":
+        return _text(action.get("script")) and _text(action.get("name", ""), empty=True)
+    if kind == "macro":
+        steps = action.get("steps")
+        return (isinstance(steps, list) and 0 < len(steps) <= MAX_MACRO_STEPS and _text(action.get("name", ""), empty=True)
+                and isinstance(action.get("repeat", False), bool) and all(macro_step(step) for step in steps))
+    if kind == "host":
+        host = action.get("host")
+        return type(host) is int and 0 <= host <= 15
+    if kind == "hook":
+        return _text(action.get("name"))
+    return kind == "none"
+
+
+def _keyboard_keys(keys):
+    """The usable entries of ``keys``: named by key_id, with an action a key can run (see KEYBOARD_ACTIONS);
+    "default" is dropped (a key not listed does what it always does), so is everything else. At most
+    MAX_KEYBOARD_KEYS, the lowest ids first."""
+    kept = {}
+    for name in sorted(key for key in keys if isinstance(key, str)) if isinstance(keys, dict) else ():
+        action = environment.modernize(keys[name])
+        if KEY_ID.match(name) and keyboard_action(action):
+            kept[name] = action
+            if len(kept) >= MAX_KEYBOARD_KEYS:
+                break
+    return kept
+
+
+def app_id(text):
+    """Whether ``text`` is a name an app can go by in a profile: 1 to MAX_APP_ID characters, lowercase, none of
+    them a control or format character."""
+    return (isinstance(text, str) and 0 < len(text) <= MAX_APP_ID and text == text.lower()
+            and not any(unicodedata.category(c).startswith("C") for c in text))
+
+
+def keyboard_profile(profile):
+    """The profile made from ``profile`` (see DEFAULTS): its keys as _keyboard_keys keeps them, NATIVE too. None
+    if it is not one."""
+    if not (isinstance(profile, dict) and set(profile) == {"app", "name", "keys"} and app_id(profile["app"])
+            and isinstance(profile["name"], str) and len(profile["name"]) <= MAX_PROFILE_NAME
+            and isinstance(profile["keys"], dict)):
+        return None
+    keys = {}
+    for name in sorted(key for key in profile["keys"] if isinstance(key, str)):
+        action = environment.modernize(profile["keys"][name])
+        if KEY_ID.match(name) and (action == NATIVE or keyboard_action(action)):
+            keys[name] = action
+            if len(keys) >= MAX_KEYBOARD_KEYS:
+                break
+    return {"app": profile["app"], "name": profile["name"], "keys": keys}
+
+
+def _keyboard_profiles(profiles):
+    """The usable profiles of ``profiles``, in their order: at most MAX_PROFILES, one for each app (the first)."""
+    kept = []
+    for profile in profiles if isinstance(profiles, list) else ():
+        profile = keyboard_profile(profile)
+        if profile is not None and all(other["app"] != profile["app"] for other in kept):
+            kept.append(profile)
+            if len(kept) >= MAX_PROFILES:
+                break
+    return kept
+
+
 def _sanitize(cfg):
     for key in BUTTONS:
         # The KDE shortcuts the catalogue held before it named things for every desktop become those names here.
@@ -455,7 +607,7 @@ def _sanitize(cfg):
         click[key] = _waveform(click.get(key, default_click[key]), default_click[key])
     _clamp(cfg, "wheel_click", "volume", 0.0, 1.0, float)
     link = cfg["flow"]
-    for key in ("enabled", "clipboard", "files", "fullscreen"):
+    for key in ("enabled", "clipboard", "files", "fullscreen", "mouse_follows_keyboard"):
         link[key] = bool(link.get(key))
     link["peers"] = _flow_peers(link)
     link["id"] = link["id"][:64] if isinstance(link.get("id"), str) else ""
@@ -483,6 +635,8 @@ def _sanitize(cfg):
     _clamp(cfg, "rumble", "gain", 0.5, 2.0, float)
     if cfg["haptics"].get("force") is not None:
         _clamp(cfg, "haptics", "force", 0, 0xFFFF)
+    cfg["keyboard"]["keys"] = _keyboard_keys(cfg["keyboard"].get("keys"))
+    cfg["keyboard"]["profiles"] = _keyboard_profiles(cfg["keyboard"].get("profiles"))
     return cfg
 
 
@@ -521,6 +675,19 @@ def load():
     except (OSError, ValueError) as e:
         log.warning("could not read %s: %s", CONFIG_PATH, e)
     stored_version = data.get("version") if isinstance(data, dict) else None
+    cfg = upgrade(data)
+    if stored_version is not None and stored_version != DEFAULTS["version"]:
+        try:
+            save(cfg)  # keep the file in the current format once it has been migrated
+        except OSError as e:
+            log.warning("could not save the migrated settings: %s", e)
+    return cfg
+
+
+def upgrade(data):
+    """The settings of this version made from ``data`` as read from a file: older ones migrated, missing parts
+    filled in, values checked and clamped. Parts it does not know are kept, as clean() keeps them."""
+    stored_version = data.get("version") if isinstance(data, dict) else None
     if isinstance(stored_version, int) and stored_version < 4:
         data = _migrate(data)
     if isinstance(stored_version, int) and stored_version < 5 and isinstance(data.get("wheel_click"), dict):
@@ -532,11 +699,6 @@ def load():
             data["wheel_click"]["sound"] = "custom"
     cfg = _sanitize(_merge(DEFAULTS, data))
     cfg["version"] = DEFAULTS["version"]
-    if stored_version is not None and stored_version != DEFAULTS["version"]:
-        try:
-            save(cfg)  # keep the file in the current format once it has been migrated
-        except OSError as e:
-            log.warning("could not save the migrated settings: %s", e)
     return cfg
 
 
@@ -548,6 +710,145 @@ def save(cfg):
         os.fchmod(f.fileno(), 0o600)  # a file left over from an earlier attempt keeps its old mode otherwise
         json.dump(cfg, f, indent=2, ensure_ascii=False)
     os.replace(tmp, CONFIG_PATH)
+
+
+def to_bytes(cfg):
+    """``cfg`` as the settings file holds it, for write_durable. ASCII only: read back the same whatever the
+    encoding of the system."""
+    return json.dumps(cfg, indent=2).encode("ascii")
+
+
+def _too_big(size):
+    return _("It is {size} KB, more than the {limit} KB a settings file may have.").format(
+        size=-(-size // 1024), limit=SETTINGS_FILE_MAX // 1024)
+
+
+def _depth_ok(value, depth):
+    """Whether ``value`` has no more than ``depth`` lists and dicts inside one another."""
+    if isinstance(value, dict):
+        value = list(value.values())
+    elif not isinstance(value, list):
+        return True
+    return depth > 0 and all(_depth_ok(item, depth - 1) for item in value)
+
+
+def _settings_in(raw):
+    """The settings in an exported file (its bytes), checked as far as the file goes. Raises ValueError, with
+    what to tell the user."""
+    if len(raw) > SETTINGS_FILE_MAX:
+        raise ValueError(_too_big(len(raw)))
+    not_one = _("It is not a settings file of MX Options.")
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError):  # not UTF-8, not JSON, or nested past what the parser takes
+        raise ValueError(not_one) from None
+    if not (isinstance(document, dict) and set(document) == {"format", "version", "config"}
+            and document["format"] == SETTINGS_FORMAT and isinstance(document["config"], dict)
+            and type(document["version"]) is int and type(document["config"].get("version")) is int
+            and _depth_ok(document, SETTINGS_DEPTH_MAX)):
+        raise ValueError(not_one)
+    if document["version"] > 1 or document["config"]["version"] > DEFAULTS["version"]:
+        raise ValueError(_("It was made by a newer version of MX Options."))
+    if document["version"] != 1:
+        raise ValueError(not_one)
+    return document["config"]
+
+
+def export_data(cfg):
+    """The settings ``cfg`` as a file of their own (bytes, UTF-8 JSON): all of them, commands and scripts too,
+    but LOCAL_FLOW. Raises ValueError, with what to tell the user, for settings import_data would not take back."""
+    cfg = copy.deepcopy(cfg)
+    cfg["flow"].update(copy.deepcopy(LOCAL_FLOW))
+    cannot = _("The settings hold something a settings file cannot.")
+    try:
+        raw = json.dumps({"format": SETTINGS_FORMAT, "version": 1, "config": cfg}, indent=2,
+                         ensure_ascii=False).encode("utf-8")
+    except (ValueError, RecursionError):  # nested too deep, or text that is no Unicode (a lone surrogate)
+        raise ValueError(cannot) from None
+    if len(raw) > SETTINGS_FILE_MAX:
+        raise ValueError(_too_big(len(raw)))
+    try:
+        _settings_in(raw)  # the checks of the way back in: every file written here can be imported
+    except ValueError:
+        raise ValueError(cannot) from None
+    return raw
+
+
+def import_data(raw, current):
+    """The settings to use from an exported file (its bytes), brought up to this version as load() does, with
+    LOCAL_FLOW taken from ``current``, the settings in use. Raises ValueError, with what to tell the user."""
+    cfg = upgrade(_settings_in(raw))
+    for key in LOCAL_FLOW:
+        cfg["flow"][key] = copy.deepcopy(current["flow"][key])
+    return cfg
+
+
+def read_settings(path):
+    """The bytes of the file ``path``, refused (ValueError) when larger than SETTINGS_FILE_MAX: never more than
+    that is read. Raises OSError."""
+    # Not blocking: a FIFO opens at once and is then refused as not a file, instead of waiting for a writer.
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
+    with os.fdopen(fd, "rb") as f:
+        info = os.fstat(f.fileno())
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError(_("It is not a settings file of MX Options."))
+        if info.st_size > SETTINGS_FILE_MAX:
+            raise ValueError(_too_big(info.st_size))
+        raw = f.read(SETTINGS_FILE_MAX + 1)  # it may have grown since
+    if len(raw) > SETTINGS_FILE_MAX:
+        raise ValueError(_too_big(len(raw)))
+    return raw
+
+
+class NotDurable(OSError):
+    """The new file is in its place, but the system could not say that its being there is on the disk: after a
+    crash the file may be the one from before."""
+
+
+def write_durable(data, path):
+    """Put ``data`` (bytes) in the file ``path`` so that it outlasts a crash, readable by the user alone: written
+    whole under a name of its own next to it, synced, put in its place, and that synced too. Raises OSError with
+    ``path`` as it was; NotDurable once the new file is in place.
+
+    Linux: fsync of the file, rename, fsync of the folder. Windows: no folder can be synced there; the file is put
+    in its place by MoveFileEx with MOVEFILE_WRITE_THROUGH, which returns once the move is on the disk."""
+    folder = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".", suffix=".tmp", dir=folder)  # 0600, O_EXCL
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        if sys.platform == "win32":
+            from . import windows
+
+            windows.replace_file(tmp, path)
+        else:
+            os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+    _sync_folder(folder)
+
+
+def remove_durable(path):
+    """Take the file ``path`` away, durably as write_durable puts one there. Raises OSError; NotDurable once it is gone."""
+    os.unlink(path)
+    _sync_folder(os.path.dirname(os.path.abspath(path)))
+
+
+def _sync_folder(folder):
+    if sys.platform == "win32":
+        return  # see write_durable; a removal there is as durable as the system makes it
+    try:
+        fd = os.open(folder, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except OSError as e:
+        raise NotDurable(e.errno, e.strerror) from e
 
 
 def seed_from_device(cfg, mouse):
