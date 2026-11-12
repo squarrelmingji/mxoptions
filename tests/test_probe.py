@@ -18,12 +18,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 import hidpp_probe  # noqa: E402
 
 # Functions that only read: (feature ID, function), as Logitech's HID++ 2.0 documents number them, and for
-# the keyboard settings as Solaar reads them. Kept apart from the tool's own list so that a change to that
-# list has to be made here as well.
+# the keyboard settings as Solaar and OpenLogi read them. Kept apart from the tool's own list so that a change to
+# that list has to be made here as well.
 DOCUMENTED_READS = {(0x0000, 0), (0x0000, 1), (0x0001, 0), (0x0001, 1), (0x0005, 0), (0x0005, 1), (0x0005, 2),
                     (0x1B04, 0), (0x1B04, 1), (0x1B04, 2), (0x0003, 1), (0x1815, 0), (0x40A0, 0), (0x40A2, 0),
                     (0x40A3, 0), (0x1982, 0), (0x1982, 2), (0x1983, 1), (0x4521, 0), (0x4521, 1), (0x4530, 0),
-                    (0x4531, 0), (0x4531, 1)}
+                    (0x4531, 0), (0x4531, 1), (0x4220, 0), (0x4540, 0)}
 
 
 class Device:
@@ -240,7 +240,8 @@ HOST_NAME = b"SYNTHETIC-HOST"
 TRAIL = b"\xee" * 6  # bytes after what each answer means: never shown
 FEATURES = (0x0001, 0x0003, 0x0005, 0x1814, 0x1815, 0x40A0, 0x40A2, 0x40A3, 0x1981, 0x1982, 0x1983, 0x1990,
             0x4220, 0x4521, 0x4522, 0x4530, 0x4531, 0x4540, 0x1B04)
-BACKLIGHT = bytes(range(0x10, 0x1C))  # twelve bytes, shown as they are
+BACKLIGHT = bytes(range(0x10, 0x1E))  # fourteen bytes, shown as they are
+BACKLIGHT_INFO = bytes([0x08, 0x02, 0x05, 0x00]) + bytes(range(0x30, 0x38))  # twelve bytes, shown as they are
 FIRMWARE = (bytes([0, *b"ABC", 0x12, 0x03, 0x00, 0x21, 0x01, 0xB3, 0x69]) + TRAIL,   # main application, running
             bytes([1, *b"BOT", 0x01, 0x02, 0x00, 0x05, 0x00, 0xB3, 0x69]) + TRAIL,   # bootloader
             bytes([2, 0x00, 0x00, 0x00, 0x1A, 0x00, 0x00, 0x00, 0x00]) + TRAIL)       # neither ASCII nor BCD
@@ -251,14 +252,16 @@ FIRMWARE_SHOWN = [
 ]
 SETTINGS_SHOWN = {
     "0x40a0": {"0": {"bytes": "01"}},
-    "0x40a2": {"0": {"bytes": "00"}},
-    "0x40a3": {"0": {"bytes": "0101"}},
-    "0x1982": {"0": {"bytes": BACKLIGHT.hex()}, "2": {"bytes": "05"}},
+    "0x40a2": {"0": {"bytes": "0001"}},
+    "0x40a3": {"0": {"bytes": "01010001"}},
+    "0x1982": {"0": {"bytes": BACKLIGHT.hex()}, "2": {"bytes": BACKLIGHT_INFO.hex()}, "version": {"bytes": "03"}},
     "0x1983": {"1": {"bytes": "01f4"}},
     "0x4521": {"0": {"bytes": "1f"}, "1": {"bytes": "04"}},
     "0x4530": {"0": {"bytes": "01"}},
-    "0x4531": {"0": {"bytes": "02000201"}, "1:0": {"bytes": "000001000a000f00"},
+    "0x4531": {"0": {"bytes": "02000502030101"}, "1:0": {"bytes": "000001000a000f00"},
                "1:1": {"bytes": "010001000a000f00"}},
+    "0x4220": {"0": {"bytes": "02"}},
+    "0x4540": {"0": {"bytes": "0d"}},
 }
 
 
@@ -284,7 +287,7 @@ def keyboard(host=1):
     def fn_hosts(params):
         if params != bytes([host]):
             raise hidpp.HidppFeatureError(2)
-        return bytes([host, 0x01]) + TRAIL
+        return bytes([host, 0x01, 0x00, 0x01]) + TRAIL
 
     def platform(params):
         return bytes([params[0], 0x00, 0x01, 0x00, 0x0A, 0x00, 0x0F, 0x00]) + TRAIL
@@ -297,14 +300,17 @@ def keyboard(host=1):
         (0x40A0, 0): lambda params: b"\x01" + TRAIL,
         (0x40A2, 0): lambda params: b"\x00\x01" + TRAIL,
         (0x40A3, 0): fn_hosts,
-        (0x1982, 0): lambda params: BACKLIGHT + TRAIL[:4],
-        (0x1982, 2): lambda params: b"\x05" + TRAIL,
+        (0x1982, 0): lambda params: BACKLIGHT + TRAIL[:2],
+        (0x1982, 2): lambda params: BACKLIGHT_INFO + TRAIL,
         (0x1983, 1): lambda params: b"\x01\xf4" + TRAIL,
         (0x4521, 0): lambda params: b"\x1f" + TRAIL,
         (0x4521, 1): lambda params: b"\x04" + TRAIL,
         (0x4530, 0): lambda params: b"\x01" + TRAIL,
-        (0x4531, 0): lambda params: bytes([0x02, 0x00, 2, 0xEE, 0xEE, 0xEE, 0x01]) + TRAIL,
+        # five platforms, two descriptors (byte 3: the count, not byte 2), three hosts, on host 1, platform 1
+        (0x4531, 0): lambda params: bytes([0x02, 0x00, 5, 2, 3, 1, 0x01]) + TRAIL,
         (0x4531, 1): platform,
+        (0x4220, 0): lambda params: b"\x02" + TRAIL,
+        (0x4540, 0): lambda params: b"\x0d" + TRAIL,
     })
     return dev
 
@@ -322,7 +328,7 @@ def learned(port, devidx=1):
 
 
 # Each read with parameters it takes, and parameters it must refuse (once the guard knows the current host
-# 1, two platform descriptors and backlight feature version 3).
+# 1 and two platform descriptors).
 VALID = {
     (0x0000, 0): struct.pack("!H", 0x1815), (0x0000, 1): bytes([0, 0, 7]),
     (0x0001, 0): b"", (0x0001, 1): bytes([1]),
@@ -332,7 +338,7 @@ VALID = {
     (0x40A0, 0): b"", (0x40A2, 0): b"", (0x40A3, 0): bytes([1]),
     (0x1982, 0): b"", (0x1982, 2): b"", (0x1983, 1): b"",
     (0x4521, 0): b"", (0x4521, 1): b"", (0x4530, 0): b"",
-    (0x4531, 0): b"", (0x4531, 1): bytes([1]),
+    (0x4531, 0): b"", (0x4531, 1): bytes([1]), (0x4220, 0): b"", (0x4540, 0): b"",
 }
 INVALID = {
     (0x0000, 0): [b"", b"\x18", b"\x18\x15\x00"], (0x0000, 1): [b"\x01\x00\x07", b"\x00\x00", b"\x00\x00\x07\x00"],
@@ -343,7 +349,8 @@ INVALID = {
     (0x40A0, 0): [b"\x00"], (0x40A2, 0): [b"\x00"], (0x40A3, 0): [b"", bytes([2]), bytes([0xFF]), b"\x01\x00"],
     (0x1982, 0): [b"\x00"], (0x1982, 2): [b"\x00"], (0x1983, 1): [b"\x09"],
     (0x4521, 0): [b"\x00"], (0x4521, 1): [b"\x00"], (0x4530, 0): [b"\x00"],
-    (0x4531, 0): [b"\x00"], (0x4531, 1): [bytes([2]), b"", b"\x00\x00"],
+    (0x4531, 0): [b"\x00"], (0x4531, 1): [bytes([2]), bytes([4]), b"", b"\x00\x00"],  # 4: under byte 2, not byte 3
+    (0x4220, 0): [b"\x00"], (0x4540, 0): [b"\x00"],
 }
 # Writes, and reads of what is private or of features the tool leaves alone; none may ever be sent.
 NEVER = [
@@ -351,9 +358,11 @@ NEVER = [
     (0x1815, 1, b"\x00"), (0x1815, 2, b"\x00"), (0x1815, 3, b"\x00\x00"),  # host names
     (0x1814, 0, b""), (0x1814, 1, b"\x00"),                   # change host
     (0x40A0, 1, b"\x01"), (0x40A2, 1, b"\x01"), (0x40A3, 1, b"\x01\x01"),
-    (0x1982, 1, bytes(12)), (0x1983, 2, b"\x00\x00\x09"), (0x4521, 2, b"\x00"), (0x4530, 2, b"\x00"),
-    (0x4531, 3, b"\xff\x00"), (0x1B04, 3, struct.pack("!HBH", 0x00C7, 0x03, 0)),
-    (0x1981, 0, b""), (0x1990, 0, b""), (0x4220, 0, b""), (0x4522, 0, b""), (0x4540, 0, b""),
+    (0x1982, 1, bytes(12)), (0x1982, 3, bytes(3)), (0x1983, 2, b"\x00\x00\x09"), (0x4521, 2, b"\x00"),
+    (0x4530, 1, b"\x00"), (0x4530, 2, b"\x00"), (0x4531, 3, b"\xff\x00"), (0x4531, 3, b"\x01\x00"),
+    (0x4522, 1, b"\x00\x39"), (0x4522, 2, b"\x00\x39"), (0x4522, 3, b""),
+    (0x1B04, 3, struct.pack("!HBH", 0x00C7, 0x03, 0)),
+    (0x1981, 0, b""), (0x1990, 0, b""), (0x4522, 0, b""),
 ]
 
 
@@ -379,10 +388,9 @@ class KeyboardGuard(unittest.TestCase):
 
     def test_reads_that_depend_on_an_earlier_answer_wait_for_it(self):
         port = Port({1: keyboard()})
-        port.devices[1].versions[0x1982] = 2
         guard = learned(port)
         sent = list(port.sent)
-        for feature, function, params in ((0x40A3, 0, b"\x01"), (0x4531, 1, b"\x00"), (0x1982, 2, b"")):
+        for feature, function, params in ((0x40A3, 0, b"\x01"), (0x4531, 1, b"\x00")):
             with self.subTest(feature=hex(feature)), self.assertRaises(hidpp_probe.Refused):
                 guard.request(1, index_of(port.devices[1], feature), function, params)
         self.assertEqual(port.sent, sent)
@@ -461,8 +469,10 @@ class KeyboardReads(unittest.TestCase):
         text = "\n".join(hidpp_probe.describe([{"node": 1, "receiver": True, "devices": [found], "error": None}]))
         self.assertIn("firmware 0: application ABC 12.3.21, running", text)
         self.assertIn("firmware 2: hardware ? ?", text)
-        self.assertIn("setting 0x40a3: function 0 0101", text)
-        self.assertIn("setting 0x4531: function 0 02000201, function 1:0 000001000a000f00", text)
+        self.assertIn("setting 0x40a3: function 0 01010001", text)
+        self.assertIn("setting 0x4531: function 0 02000502030101, function 1:0 000001000a000f00", text)
+        self.assertIn("setting 0x1982: function 0 " + BACKLIGHT.hex() + ", function 2 " + BACKLIGHT_INFO.hex()
+                      + ", function version 03", text)
 
     def test_firmware_is_listed_without_getdeviceinfo(self):
         for case in ("error", "no answer", "short", "all eight"):
@@ -512,18 +522,42 @@ class KeyboardReads(unittest.TestCase):
                 self.assertNotIn(0x40A3, {f for _, f, _, _ in port.sent})
                 self.assertEqual(found["settings"], {**SETTINGS_SHOWN, "0x40a3": {"0": {"error": "not read"}}})
 
-    def test_backlight_levels_only_from_feature_version_3(self):
+    def test_backlight_information_is_read_on_every_version_and_the_version_shown(self):
+        for version in (2, 3):
+            with self.subTest(version=version):
+                port = Port({1: keyboard()})
+                port.devices[1].versions[0x1982] = version
+                found = probe(port)[0]
+                self.assertIn((0x1982, 2), {(f, fn) for _, f, fn, _ in port.sent})
+                self.assertEqual(found["settings"]["0x1982"], {"0": {"bytes": BACKLIGHT.hex()},
+                                                               "2": {"bytes": BACKLIGHT_INFO.hex()},
+                                                               "version": {"bytes": f"{version:02x}"}})
         port = Port({1: keyboard()})
-        port.devices[1].versions[0x1982] = 2
+        dev = port.devices[1]
+
+        def get_feature(params):  # no version told for the backlight feature: an empty answer
+            wanted = struct.unpack("!H", params)[0]
+            return b"" if wanted == 0x1982 else bytes([dev.table.index(wanted) if wanted in dev.table else 0, 0, 0])
+        dev.answers[0x0000, 0] = get_feature
         found = probe(port)[0]
-        self.assertNotIn((0x1982, 2), {(f, fn) for _, f, fn, _ in port.sent})
-        self.assertEqual(found["settings"]["0x1982"], {"0": {"bytes": BACKLIGHT.hex()}, "2": {"error": "not read"}})
+        self.assertEqual(found["settings"]["0x1982"]["version"], {"error": "not read"})
+        self.assertEqual(found["settings"]["0x1982"]["2"], {"bytes": BACKLIGHT_INFO.hex()})
+
+    def test_platform_descriptors_are_counted_by_byte_3_alone(self):
+        for byte2, byte3, asked in ((5, 2, 2), (0, 3, 3), (9, 0, 0), (0, 40, hidpp_probe.MAX_PLATFORMS)):
+            with self.subTest(byte2=byte2, byte3=byte3):
+                port = Port({1: keyboard()})
+                port.devices[1].answers[0x4531, 0] = lambda params, b2=byte2, b3=byte3: bytes([0x02, 0, b2, b3, 3, 1, 1])
+                found = probe(port)[0]
+                self.assertEqual([p for _, f, fn, p in port.sent if (f, fn) == (0x4531, 1)],
+                                 [bytes([i]) for i in range(asked)])
+                self.assertEqual(len(found["settings"]["0x4531"]), 1 + asked)
 
     def test_a_read_that_fails_does_not_hide_the_others(self):
         # (feature, function, platform index or None) -> keys of that feature asked after it
         reads = [(0x40A0, 0, None), (0x40A2, 0, None), (0x40A3, 0, None), (0x1982, 0, None), (0x1982, 2, None),
                  (0x1983, 1, None), (0x4521, 0, None), (0x4521, 1, None), (0x4530, 0, None), (0x4531, 0, None),
-                 (0x4531, 1, 0)]
+                 (0x4531, 1, 0), (0x4220, 0, None), (0x4540, 0, None)]
         for (feature, function, which), failure in [(r, f) for r in reads for f in ("error", "no answer", "empty")]:
             with self.subTest(feature=hex(feature), function=function, failure=failure):
                 dev = keyboard()
@@ -544,7 +578,9 @@ class KeyboardReads(unittest.TestCase):
                 name, key = f"0x{feature:04x}", str(function) if which is None else f"1:{which}"
                 expected = copy.deepcopy(SETTINGS_SHOWN)
                 if feature == 0x1982 and function == 0 and failure == "no answer":
-                    del expected[name]["2"]  # the rest of the feature is left
+                    del expected[name]["2"], expected[name]["version"]  # the rest of the feature is left
+                if feature == 0x1982 and function == 2 and failure == "no answer":
+                    del expected[name]["version"]
                 if feature == 0x4521 and function == 0 and failure == "no answer":
                     del expected[name]["1"]
                 if feature == 0x4531 and function == 0:
@@ -576,13 +612,13 @@ class KeyboardReads(unittest.TestCase):
         port = Port({1: keyboard()})
         dev = port.devices[1]
         dev.answers[0x0003, 1] = lambda params: FIRMWARE[0]
-        dev.answers[0x4531, 0] = lambda params: bytes([0x02, 0x00, 255, 0, 0, 0, 0x01])
+        dev.answers[0x4531, 0] = lambda params: bytes([0x02, 0x00, 0, 255, 0, 0, 0x01])
         found = probe(port)[0]
         self.assertEqual(len(found["settings"]["0x4531"]), 1 + hidpp_probe.MAX_PLATFORMS)
         keyboard_reads = [s for s in port.sent if s[1] in (0x0003, 0x1815, 0x40A0, 0x40A2, 0x40A3, 0x1982, 0x1983,
-                                                            0x4521, 0x4530, 0x4531)]
+                                                            0x4521, 0x4530, 0x4531, 0x4220, 0x4540)]
         root_lookups = [s for s in port.sent if s[1:3] == (0x0000, 0) and s[3] == struct.pack("!H", 0x1982)]
-        self.assertEqual(len(keyboard_reads) + len(root_lookups), 36)
+        self.assertEqual(len(keyboard_reads) + len(root_lookups), 38)
         self.assertLessEqual(max(port.timeouts), 0.2)
 
 

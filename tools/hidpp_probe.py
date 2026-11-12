@@ -30,7 +30,8 @@ sys.path.insert(0, ROOT)
 from mxoptions import environment, hidpp  # noqa: E402
 from mxoptions.device import (  # noqa: E402
     BACKLIGHT_2, BACKLIGHT_3, DEVICE_INFO, DEVICE_NAME, DISABLE_KEYS, DUAL_PLATFORM, FEATURE_SET, FN_INVERSION,
-    FN_INVERSION_DEFAULT, FN_INVERSION_HOSTS, HOSTS_INFO, MAX_FIRMWARE_ENTITIES, MULTI_PLATFORM, REPROG_CONTROLS_V4)
+    FN_INVERSION_DEFAULT, FN_INVERSION_HOSTS, HOSTS_INFO, INTERNATIONAL_LAYOUTS, LOCK_KEY_STATE, MAX_FIRMWARE_ENTITIES,
+    MULTI_PLATFORM, REPROG_CONTROLS_V4)
 from mxoptions.device import ROOT as ROOT_FEATURE  # noqa: E402
 
 REQUEST_TIMEOUT = 1.0  # s for one answer; a sleeping device may need a second ask (see ping)
@@ -44,7 +45,7 @@ MAX_PLATFORMS = 16     # platform descriptors asked about; the count is one byte
 
 # Checks of the parameters of one request: (params, facts) -> bool. ``facts`` are what this run's own answers
 # from the same device said: "versions" {feature id: version} from Root getFeature, "host" from HostsInfo
-# function 0 and "platforms" from MultiPlatform function 0.
+# function 0 and "platforms" (the descriptor count) from MultiPlatform function 0.
 def _empty(params, facts):
     return params == b""
 
@@ -69,16 +70,13 @@ def _platform(params, facts):
     return len(params) == 1 and params[0] < min(facts.get("platforms", 0), MAX_PLATFORMS)
 
 
-def _level_count(params, facts):
-    return params == b"" and facts["versions"].get(BACKLIGHT_2, 0) >= 3
-
-
 # The requests that may be sent: (feature ID, function) -> check of its parameters. Each one only reads.
 # Function numbers are the HID++ 2.0 function index; Solaar writes them shifted left by four (0x10 is 1).
 # Sources: Logitech's HID++ 2.0 specification and feature documents x0000 Root, x0003 DeviceInformation and
 # x1b04 SpecialKeysMseButtons; the keyboard feature names in github.com/Logitech/cpg-docs (hidpp20/README.rst),
-# which gives no layouts; for the keyboard reads, the way Solaar reads each setting (lib/logitech_receiver/
-# settings_templates.py and hidpp20.py, master at e7304c4), restated here as facts.
+# which gives no layouts; for the keyboard reads, the way Solaar 1.1.20 (lib/logitech_receiver/
+# settings_templates.py and hidpp20.py) and OpenLogi v0.9.0 (crates/openlogi-hidpp/src/feature/) read each
+# setting, restated here as facts. Where they differ, the bytes both name are shown, so a run tells which is right.
 RULES = {
     (ROOT_FEATURE, 0): _two_bytes,                  # getFeature(feature ID); answer byte 2 is its version
     (ROOT_FEATURE, 1): _ping,                       # ping: 0, 0, a byte echoed back
@@ -94,25 +92,30 @@ RULES = {
     (HOSTS_INFO, 0): _empty,                        # feature information; byte 3 is the current host
     (FN_INVERSION, 0): _empty,                      # Fn inversion: byte 0, 1 when swapped
     (FN_INVERSION_DEFAULT, 0): _empty,              # the same, for the feature with a default state
-    (FN_INVERSION_HOSTS, 0): _current_host,         # the same per host: asked for the current host; byte 0 is
-                                                    # skipped, byte 1 is the value
-    (BACKLIGHT_2, 0): _empty,                       # backlight configuration, bytes 0-11
-    (BACKLIGHT_2, 2): _level_count,                 # how many levels, byte 0; only from feature version 3
+    (FN_INVERSION_HOSTS, 0): _current_host,         # the same per host: asked for the current host; byte 0 the
+                                                    # host, 1 the value, 2 the default, 3 capability flags
+    (BACKLIGHT_2, 0): _empty,                       # backlight configuration, bytes 0-13
+    (BACKLIGHT_2, 2): _empty,                       # backlight information: level count, level, status, effect,
+                                                    # default durations; answered from feature version 2 on too
     (BACKLIGHT_3, 1): _empty,                       # backlight time, bytes 0-1
     (DISABLE_KEYS, 0): _empty,                      # which keys can be disabled, byte 0
     (DISABLE_KEYS, 1): _empty,                      # which keys are disabled, byte 0
     (DUAL_PLATFORM, 0): _empty,                     # platform, byte 0: 0 iOS and macOS, 1 Android and Windows
-    (MULTI_PLATFORM, 0): _empty,                    # bytes 0-2 flags, -, descriptor count; byte 6 the platform
+    (MULTI_PLATFORM, 0): _empty,                    # bytes 0-1 flags, 2 platform count, 3 descriptor count,
+                                                    # 4 host count, 5 current host, 6 the platform
     (MULTI_PLATFORM, 1): _platform,                 # platform descriptor(index), bytes 0-7
+    (LOCK_KEY_STATE, 0): _empty,                    # which lock keys are on, byte 0
+    (INTERNATIONAL_LAYOUTS, 0): _empty,             # the layout of the keys themselves (a HID country code), byte 0
 }
 
 # Of the answers to the keyboard reads, the bytes shown: (feature ID, function) -> positions. Backlight
-# configuration bytes are shown as they are: the sources disagree on their byte order and mode values.
+# configuration bytes are shown as they are, so that a run settles what the sources leave open.
 SHOWN = {
-    (FN_INVERSION, 0): (0,), (FN_INVERSION_DEFAULT, 0): (0,), (FN_INVERSION_HOSTS, 0): (0, 1),
-    (BACKLIGHT_2, 0): tuple(range(12)), (BACKLIGHT_2, 2): (0,), (BACKLIGHT_3, 1): (0, 1),
+    (FN_INVERSION, 0): (0,), (FN_INVERSION_DEFAULT, 0): (0, 1), (FN_INVERSION_HOSTS, 0): (0, 1, 2, 3),
+    (BACKLIGHT_2, 0): tuple(range(14)), (BACKLIGHT_2, 2): tuple(range(12)), (BACKLIGHT_3, 1): (0, 1),
     (DISABLE_KEYS, 0): (0,), (DISABLE_KEYS, 1): (0,), (DUAL_PLATFORM, 0): (0,),
-    (MULTI_PLATFORM, 0): (0, 1, 2, 6), (MULTI_PLATFORM, 1): tuple(range(8)),
+    (MULTI_PLATFORM, 0): tuple(range(7)), (MULTI_PLATFORM, 1): tuple(range(8)),
+    (LOCK_KEY_STATE, 0): (0,), (INTERNATIONAL_LAYOUTS, 0): (0,),
 }
 FIRMWARE_TYPES = {0: "application", 1: "bootloader", 2: "hardware"}  # getFwInfo byte 0
 
@@ -174,8 +177,8 @@ class ReadOnly:
             self._learn(known, params[0], struct.unpack("!H", reply[:2])[0])
         elif feature == HOSTS_INFO and function == 0 and len(reply) > 3:
             facts["host"] = reply[3]
-        elif feature == MULTI_PLATFORM and function == 0 and len(reply) > 2:
-            facts["platforms"] = reply[2]
+        elif feature == MULTI_PLATFORM and function == 0 and len(reply) > 3:
+            facts["platforms"] = reply[3]  # byte 3 in two of the three sources; byte 2 is the platform count
         return reply
 
     @staticmethod
@@ -267,16 +270,15 @@ def _keyboard_reads(port, devidx, indexes):
             ask(FN_INVERSION_HOSTS, 0, bytes([host]))
 
     def backlight_2():
+        reply = needed(0x00, 0, struct.pack("!H", BACKLIGHT_2))  # which controls it has depends on its version
         ask(BACKLIGHT_2, 0)
-        reply = needed(0x00, 0, struct.pack("!H", BACKLIGHT_2))
-        if reply is not None and len(reply) > 2 and reply[2] >= 3:
-            ask(BACKLIGHT_2, 2)
-        else:
-            note(BACKLIGHT_2, "2", {"error": "not read"})
+        ask(BACKLIGHT_2, 2)
+        note(BACKLIGHT_2, "version", {"bytes": f"{reply[2]:02x}"} if reply is not None and len(reply) > 2
+             else {"error": "not read"})
 
     def multi_platform():
         reply = ask(MULTI_PLATFORM, 0)
-        for index in range(min(reply[2], MAX_PLATFORMS) if reply is not None else 0):
+        for index in range(min(reply[3], MAX_PLATFORMS) if reply is not None else 0):
             ask(MULTI_PLATFORM, 1, bytes([index]), key=f"1:{index}")
 
     for feature, read in ((FN_INVERSION, lambda: ask(FN_INVERSION, 0)),
@@ -286,7 +288,9 @@ def _keyboard_reads(port, devidx, indexes):
                           (BACKLIGHT_3, lambda: ask(BACKLIGHT_3, 1)),
                           (DISABLE_KEYS, lambda: (ask(DISABLE_KEYS, 0), ask(DISABLE_KEYS, 1))),
                           (DUAL_PLATFORM, lambda: ask(DUAL_PLATFORM, 0)),
-                          (MULTI_PLATFORM, multi_platform)):
+                          (MULTI_PLATFORM, multi_platform),
+                          (LOCK_KEY_STATE, lambda: ask(LOCK_KEY_STATE, 0)),
+                          (INTERNATIONAL_LAYOUTS, lambda: ask(INTERNATIONAL_LAYOUTS, 0))):
         if indexes.get(feature):
             try:
                 read()

@@ -112,11 +112,13 @@ class FakeDevice:
     """A synthetic HID++ 2.0 device behind a FakePort slot. ``controls``: [(cid, tid, flags)], flags as getCidInfo
     gives them (byte 4 low, byte 8 high). ``reporting``: cid -> [flags, remap] as getCidReporting answers.
     ``entities``: the getFwInfo replies of DEVICE_INFO, by index; ``extra``: further feature ids it lists, answered
-    with an error."""
+    with an error, except for the settings in ``settings``: {FN_INVERSION_HOSTS: {host: [state, default]},
+    FN_INVERSION_DEFAULT: [state, default], FN_INVERSION: [state], HOSTS_INFO: current host it says}, each
+    answered (functions 0 and 1) and listed."""
 
     def __init__(self, name="Synthetic keyboard", kind=device.KIND_KEYBOARD, controls=(), unit=b"\x5e\x01\x5e\x02",
                  model=b"\x0a\x0b\x0c\x0d\x0e\x0f", info=True, battery=(80, device.BATTERY_DISCHARGING), hosts=(3, 0),
-                 entities=(), extra=()):
+                 entities=(), extra=(), settings=None):
         self.name = name
         self.kind = kind
         self.controls = list(controls)
@@ -129,6 +131,8 @@ class FakeDevice:
         if info:
             self.features.append(device.DEVICE_INFO)
         self.features += list(extra)
+        self.settings = copy.deepcopy(settings or {})
+        self.features += [feature for feature in self.settings if feature not in self.features]
         self.entities = list(entities)
         if kind in (device.KIND_MOUSE, device.KIND_TRACKBALL):
             self.features = [device.ROOT, device.FEATURE_SET, device.DEVICE_NAME, device.REPROG_CONTROLS_V4]
@@ -139,6 +143,10 @@ class FakeDevice:
         self.echo = True         # setCidReporting answers with what it was sent
         self.sets = []           # (cid, flags) of every setCidReporting
         self.switched = []       # the hosts it was told to change to
+        self.setting_writes = []  # (feature id, params) of every setter of a setting
+        self.ignore_writes = False  # a setter is answered, but changes nothing
+        self.taken = {}          # feature id -> [state, ...]: what the next setters leave instead of what they send
+        self.replies = {}        # (feature id, function) -> payload answered instead
 
     def index(self, feature):
         return self.features.index(feature)
@@ -150,6 +158,10 @@ class FakeDevice:
         feature = self.features[feat_idx]
         if (feature, function) in self.failing:
             return self.failing[(feature, function)]
+        if (feature, function) in self.replies:
+            return self.replies[(feature, function)]
+        if feature in self.settings:
+            return self._setting(feature, function, params)
         if feature == device.ROOT:
             if function == 1:
                 return bytes([4, 2, params[2]])
@@ -193,6 +205,29 @@ class FakeDevice:
                 self.switched.append(params[0])
                 return bytes()
         return 7
+
+    def _setting(self, feature, function, params):
+        value = self.settings[feature]
+        if feature == device.HOSTS_INFO:
+            return bytes([0, 0, self.hosts[0], value]) if function == 0 else 7
+        if function not in (0, 1):
+            return 7
+        if feature == device.FN_INVERSION_HOSTS:
+            host = params[0]
+            if host not in value:
+                return 2
+            if function == 0:
+                return bytes([host, *value[host]])
+            self.setting_writes.append((feature, bytes(params[:2])))
+            if not self.ignore_writes:
+                value[host][0] = self.taken[feature].pop(0) if self.taken.get(feature) else params[1]
+            return bytes(params[:2])
+        if function == 0:
+            return bytes(value)
+        self.setting_writes.append((feature, bytes(params[:1])))
+        if not self.ignore_writes:
+            value[0] = self.taken[feature].pop(0) if self.taken.get(feature) else params[0]
+        return bytes(params[:1])
 
 
 class FakePort:

@@ -796,10 +796,22 @@ STRINGS = {
     "Read from the keyboard. fwupd, the system's firmware updater, does not see it right now.":
         "Прочитано з клавіатури. fwupd, системний засіб оновлення прошивок, зараз її не бачить.",
     "Keyboard settings": "Налаштування клавіатури",
-    "What the keyboard says it has settings for. They are the keyboard's own: MX Options shows them, but does not "
-    "change them yet.":
-        "Налаштування, які, за словами клавіатури, вона має. Вони належать самій клавіатурі: MX Options їх показує, "
-        "але поки не змінює.",
+    "Settings the keyboard keeps itself. Where MX Options can change one, the change is made on the keyboard and "
+    "stays there; the keyboard's own keys change it too.":
+        "Налаштування, які клавіатура зберігає сама. Там, де MX Options може змінити налаштування, зміна робиться на "
+        "клавіатурі й залишається там; власні клавіші клавіатури теж його змінюють.",
+    "Use F1–F12 without Fn": "F1–F12 без Fn",
+    "On: the top row gives F1–F12, and Fn with a key gives its other function. Off: the other way round. The "
+    "keyboard's own Fn lock shortcut changes it too.":
+        "Увімкнено: верхній ряд дає F1–F12, а Fn разом із клавішею дає її іншу функцію. Вимкнено: навпаки. "
+        "Власне сполучення клавіатури для фіксації Fn теж це змінює.",
+    "The keyboard did not say how this is set.": "Клавіатура не повідомила, як це налаштовано.",
+    "The keyboard does not let MX Options change this.": "Клавіатура не дозволяє MX Options це змінювати.",
+    "The keyboard did not take the change.": "Клавіатура не прийняла зміну.",
+    "The keyboard did not take the change as asked; the earlier setting was put back.":
+        "Клавіатура прийняла зміну не так, як просили; попереднє налаштування повернуто.",
+    "The keyboard did not confirm the change. Shown as the keyboard reports it.":
+        "Клавіатура не підтвердила зміну. Показано так, як повідомляє клавіатура.",
     "The keyboard can swap whether the top row gives F1–F12 or its other functions without Fn, as its guide "
     "describes. MX Options does not change this yet.":
         "Клавіатура може міняти, що дає верхній ряд без Fn: F1–F12 чи свої інші функції, як описано в її посібнику. "

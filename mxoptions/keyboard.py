@@ -1,5 +1,6 @@
 """The keyboard: found next to the mouse (on the same receiver, or on a connection of its own), its
-programmable keys turned into actions, its battery and Easy-Switch channels shown.
+programmable keys turned into actions, its battery and Easy-Switch channels shown, and the settings it keeps
+itself (kbsettings) read and, where asked, changed.
 
 What is known of the keyboard is kept, and decided on, on the engine's thread, like the mouse. Every request
 to the keyboard is made on a thread of its own, though, in the background: it gives way to every other
@@ -12,7 +13,12 @@ only keys this program diverted itself are given back. Which ones those are is w
 one is diverted, in a small file of this computer's (JOURNAL), so that a start after a crash knows them
 again. What the keyboard says is what counts; the file only says what was meant. Where it cannot be told
 (the keyboard does not say which unit it is, the file cannot be read, other software for the device is
-running) no key is touched at all."""
+running) no key is touched at all.
+
+A setting the keyboard keeps is changed one at a time, after the keys, and only from what a fresh read of it
+said a moment before: the change is read back, and where the keyboard took something else than asked, what it
+had before is sent back once. Nothing of it is kept on this computer: the keyboard's own keys change the same
+settings, and what it says is what is shown."""
 
 import copy
 import hashlib
@@ -25,7 +31,7 @@ import struct
 import threading
 import time
 
-from . import config, device, hidpp, paths
+from . import config, device, hidpp, kbsettings, paths
 from .actions import Executor, here
 from .hidpp import HidppCancelled, HidppClosed, HidppError, HidppTimeout
 
@@ -251,6 +257,11 @@ class KeyboardSide:
         self._hosts = (0, [])
         self._firmware = None   # its firmware version, once read (see _read_firmware)
         self._firmware_due = False  # it is still to be read, once the keys leave time for it
+        self._controls = {}     # name -> {"value", "default", "writable"}: its settings as last read (see kbsettings)
+        self._pending = {}      # name -> value asked for and not sent yet; the last one asked for counts
+        self._outcomes = {}     # name -> how the last change went, when not as asked (see _change)
+        self._settings_at = float("inf")  # time.monotonic from which its settings are to be read again
+        self._committing = None  # the setting whose new value is on its way: that task is not called off
         self._seen = None       # (name, keys, settings) of the keyboard last connected, while it is away
         self._slots = {}        # transport -> {devidx: what is there, see device.probe_slot; "pending" while looked at}
         self._generation = 0    # results of looks started before the last change of this number are dropped
@@ -339,6 +350,7 @@ class KeyboardSide:
         self._started.clear()
         self._battery, self._hosts, self._failed, self._leaving = battery, hosts, None, 0.0
         self._firmware, self._firmware_due = None, True
+        self._controls, self._pending, self._outcomes, self._settings_at = {}, {}, {}, 0.0
         self._sent_at, self.link, self.last_drop = None, flow_link(identity), None
         log.info("found %s on %s slot %s", dev.name, transport.path, dev.devidx)
         self._tell_flow()
@@ -374,6 +386,10 @@ class KeyboardSide:
             self.engine._publish()
         elif feature == device.WIRELESS_DEVICE_STATUS and event == 0 and data[1] == 1:
             self._again(True)  # power-cycled: loaded again, and what its keys report read afresh
+        elif any(feature in codec.features for codec in kbsettings.CODECS.values()):
+            self._settings_at = 0.0  # changed on the keyboard, maybe: read again, never taken from the report
+            if self._task is None:
+                self._next_task()
 
     def transport_gone(self, transport):
         if self._slots.pop(transport, None) is not None:
@@ -422,7 +438,8 @@ class KeyboardSide:
 
     def due(self, now):
         """How long until tick() has something to do."""
-        moments = [self._next_recovery] if self.device is not None and self.online and self._task is None else []
+        idle = self.device is not None and self.online and self._task is None
+        moments = [self._next_recovery, self._settings_moment()] if idle else []
         if self.device is None and self.engine.mouse is not None:
             moments += [self._next_nodes, self._next_look]
         if self._follow_wait is not None:
@@ -442,6 +459,8 @@ class KeyboardSide:
         if self.device is not None and self.online and self._task is None and now >= self._next_recovery:
             self._leaving = 0.0  # still here: see _switch
             self.configure()
+        elif self.device is not None and self.online and self._task is None and now >= self._settings_moment():
+            self._next_task()
 
     # -- the keyboard following the mouse ----------------------------------------
 
@@ -574,7 +593,131 @@ class KeyboardSide:
                 "current_host": self._hosts[0], "hosts": copy.deepcopy(self._hosts[1]) if connected else [],
                 "keys": copy.deepcopy(self._seen[1]), "reason": self._block if dev is not None else None,
                 "failed": self._failed if connected else None, "firmware": self._firmware if connected else None,
-                "settings": list(self._seen[2])}
+                "settings": list(self._seen[2]), "controls": self._shown_controls()}
+
+    def _shown_controls(self):
+        return {name: dict(control, busy=name in self._pending or name == self._committing,
+                           outcome=self._outcomes.get(name)) for name, control in self._controls.items()}
+
+    # -- settings the keyboard keeps -----------------------------------------------
+
+    def set_setting(self, name, value):
+        """Have setting ``name`` (see kbsettings.CODECS) changed to ``value`` on the keyboard. Asked from outside the
+        engine: whatever does not fit a setting the keyboard has, and was read, is dropped."""
+        codec = kbsettings.CODECS.get(name) if type(name) is str else None
+        control = self._controls.get(name) if codec is not None else None
+        if control is None or not codec.valid(value) or not control["writable"] or control["value"] is None:
+            log.debug("keyboard setting change ignored")
+            return
+        self._pending[name] = value  # one asked for before, and not sent yet, is replaced
+        self._outcomes[name] = None
+        self.engine._publish()
+        if self._task is None:
+            self._next_task()
+
+    def _settings_moment(self):
+        """From when (time.monotonic) a settings task may run: a change once no key this program follows is down,
+        a read when one is due; neither while the keyboard may be on its way elsewhere. inf: none to run."""
+        at = 0.0 if self._pending and not (self._pressed or self._held) else self._settings_at
+        return max(at, self._leaving) if at < float("inf") else at
+
+    def _read_one(self, name, codec, host=None):
+        """A task: read setting ``name`` afresh into self._controls; returns (host, what was read). Where it fails,
+        the setting is unknown, and the error is passed on."""
+        try:
+            if host is None and codec.needs_host(self.device):
+                host = yield (kbsettings.current_host, self._hosts[0])
+            read = yield (codec.read, host)
+        except Exception:
+            self._controls[name] = {"value": None, "default": None, "writable": False}
+            raise
+        self._controls[name] = dict(read, writable=True)
+        return host, read
+
+    def _read_settings(self):
+        """A task: what the keyboard says of each setting it has that kbsettings knows. One left unanswered ends the
+        reading, which is tried again after RECOVERY_RETRY; one that does not fit is shown as unknown."""
+        for name, codec in kbsettings.CODECS.items():
+            if not codec.supported(self.device):
+                continue
+            try:
+                yield from self._read_one(name, codec)
+            except HidppClosed:
+                raise
+            except HidppTimeout:
+                self._settings_at = time.monotonic() + RECOVERY_RETRY
+                break
+            except (HidppError, kbsettings.BadReply, kbsettings.Unsupported, IndexError) as e:
+                log.debug("keyboard setting %s not read: %s", name, e)
+        self.engine._publish()
+
+    def _write_setting(self, name):
+        """A task: change setting ``name`` to the value last asked for (self._pending), see _change."""
+        self._outcomes[name] = None
+        self.engine._publish()
+        try:
+            self._outcomes[name] = yield from self._change(name, kbsettings.CODECS[name])
+        finally:
+            self._committing = None
+        self.engine._publish()
+
+    def _change(self, name, codec):
+        """A task: read the setting; if it is not the value asked for, send that once and read it back. Where the
+        keyboard then has something else again, send back what it had and read that. Returns None when the
+        keyboard has the value asked for, or why not: "unknown" (not read: nothing sent), "unsupported",
+        "not-applied" (it kept what it had), "restored" (it took another value, and the earlier one was sent back),
+        "unconfirmed" (it did not say what it has now; read again after RECOVERY_RETRY). Until the setter is on
+        its way, the task may be called off (see _want) and the value asked for stays to be sent; from then on it
+        is seen to its end."""
+        try:
+            host, before = yield from self._read_one(name, codec)
+        except HidppClosed:
+            raise
+        except kbsettings.Unsupported:
+            self._pending.pop(name, None)
+            return "unsupported"
+        except (HidppError, kbsettings.BadReply, IndexError) as e:
+            log.debug("keyboard setting %s not read: %s", name, e)
+            self._pending.pop(name, None)
+            if isinstance(e, HidppTimeout):
+                self._settings_at = time.monotonic() + RECOVERY_RETRY
+            return "unknown"
+        target = self._pending.get(name)
+        if target is None or target == before["value"]:
+            self._pending.pop(name, None)
+            return None
+        if self._pressed or self._held or time.monotonic() < self._leaving:
+            return None  # a key is down, or the keyboard is on its way: asked again once that is over
+        del self._pending[name]  # from here on what is asked for after this is a change of its own
+        self._committing = name
+        outcome = yield from self._send(name, codec, host, target)
+        if outcome is not None or self._controls[name]["value"] == target:
+            return outcome
+        if self._controls[name]["value"] == before["value"]:
+            log.info("keyboard setting %s: the keyboard did not take the change", name)
+            return "not-applied"
+        log.warning("keyboard setting %s: the keyboard took another value; the earlier one is sent back", name)
+        outcome = yield from self._send(name, codec, host, before["value"])
+        return outcome or ("restored" if self._controls[name]["value"] == before["value"] else "unconfirmed")
+
+    def _send(self, name, codec, host, value):
+        """A task: send ``value`` and read the setting back into self._controls. "unconfirmed" when it could not be
+        read back, else None."""
+        try:
+            yield (codec.write, host, value)
+        except HidppClosed:
+            raise
+        except HidppError as e:  # it may have gone through all the same: the reading says
+            log.debug("keyboard setting %s: %s", name, e)
+        try:
+            yield from self._read_one(name, codec, host)
+        except HidppClosed:
+            raise
+        except (HidppError, kbsettings.BadReply, kbsettings.Unsupported, IndexError) as e:
+            log.info("keyboard setting %s: the change was not confirmed (%s)", name, type(e).__name__)
+            self._settings_at = time.monotonic() + RECOVERY_RETRY
+            return "unconfirmed"
+        return None
 
     # -- actions -------------------------------------------------------------
 
@@ -683,6 +826,8 @@ class KeyboardSide:
                 log.info("key %s up", config.key_id(cid))
                 self.executor.release(action)
         self._pressed = pressed
+        if self._pending and not (pressed or self._held) and self._task is None:
+            self._next_task()  # a change of a setting waited for the key to be let go
 
     # -- the keys ------------------------------------------------------------
 
@@ -699,9 +844,13 @@ class KeyboardSide:
             return
         if wish == "configure" and (self._wish is not None or time.monotonic() < self._leaving):
             return  # leaving: taken up at self._next_recovery, should it stay
-        if self._task is not None and self._task.__name__ == "_read_firmware":  # never holds up the keys: called
-            self._stop_task()                                                   # off, and read again after them
-            self._firmware_due = True
+        running = self._task.__name__ if self._task is not None else None
+        if running in ("_read_firmware", "_read_settings") or (running == "_write_setting" and self._committing is None):
+            self._stop_task()  # never holds up the keys: called off, and done again after them; a change not sent
+            if running == "_read_firmware":  # yet stays asked for (self._pending)
+                self._firmware_due = True
+            elif running == "_read_settings":
+                self._settings_at = 0.0
         if isinstance(self._wish, tuple) and self._wish[0] == "follow":  # an Easy-Switch from a key goes instead
             _stays("busy")
         self._wish = wish
@@ -720,6 +869,12 @@ class KeyboardSide:
             else:
                 follow = wish[2:] if wish[0] == "follow" else None
                 self._task = self._switch(wish[1], follow)
+        elif self._settings_moment() <= time.monotonic():
+            if self._pending and not (self._pressed or self._held):
+                self._task = self._write_setting(next(iter(self._pending)))
+            else:
+                self._settings_at = float("inf")
+                self._task = self._read_settings()
         elif self._firmware_due and time.monotonic() >= self._leaving:  # not while it may be on its way elsewhere
             self._firmware_due = False
             self._task = self._read_firmware()
@@ -965,6 +1120,7 @@ class KeyboardSide:
         self._started.clear()
         self._battery = self._firmware = None
         self._firmware_due = False
+        self._controls, self._pending, self._outcomes, self._settings_at = {}, {}, {}, float("inf")
         self._block = self._failed = None
         self._next_recovery = float("inf")
         self.engine._publish()

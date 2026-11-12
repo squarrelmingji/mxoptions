@@ -226,6 +226,11 @@ class Engine:
         """Flow: call off the keyboard following the mouse begun with ``event``."""
         self._queue.put(("kb_follow", None, None, event))
 
+    def set_keyboard_setting(self, name, value):
+        """Change a setting the keyboard keeps itself (kbsettings.CODECS); what does not fit one is dropped
+        (keyboard.KeyboardSide.set_setting). How it went comes back in the state."""
+        self._queue.put(("kb_setting", name, value))
+
     def rumble_test(self):
         """Play on the mouse what a game's rumble growing from weak to strong feels like."""
         def run():
@@ -320,6 +325,8 @@ class Engine:
             self.keyboard.found(*item[1:])
         elif kind == "kb_answer":
             self.keyboard.answered(*item[1:])
+        elif kind == "kb_setting":
+            self.keyboard.set_setting(item[1], item[2])
         elif kind == "kb_follow":
             if item[1] is None:
                 self.keyboard.follow_cancel(item[3])
