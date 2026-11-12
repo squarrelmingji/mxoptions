@@ -414,11 +414,28 @@ run MX Options; it does not talk to Logi Options+ on Windows or macOS.
 the keyboard's own Easy-Switch key for one of the other computers, and once that computer reports
 the keyboard has arrived, the mouse is sent there too. This is MX Options Flow, between computers
 that run MX Options and see the keyboard; it is not Logitech Flow or the Enhanced Easy-Switch of
-Logi Options+, and neither of those is asked. Only the mouse moves: Flow never switches the
-keyboard. The mouse goes only within 10 seconds of the keyboard leaving, once each time it leaves,
-not while a button is held, and not when an action of this app sent the keyboard away. Each
+Logi Options+, and neither of those is asked. This switch only ever moves the mouse; the one below
+moves the keyboard. The mouse goes only within 10 seconds of the keyboard leaving, once each time it
+leaves, not while a button is held, and not when an action of this app sent the keyboard away. Each
 pairing names the keyboard with a value of its own made from the pairing key; which keyboard it is
 never leaves the computer.
+
+**Keyboard follows the mouse** (off by default; the switch shows once a keyboard was found). Send
+the mouse to one of the other computers, past the edge or with the action, and the keyboard is sent
+there too, to the Easy-Switch channel that computer saw it on. It goes once each time the mouse
+leaves, and only when the keyboard is here, the other computer saw this same keyboard since it
+started and the keyboard is paired there, the keyboard itself says that channel is paired, and no
+key is held down. Whether a key is down is asked of the keyboard just before it goes, through the
+connection the app already has: the answer is reduced to one yes or no at once, and nothing of it
+is kept, logged or sent. Otherwise the keyboard stays, and the log says why ("the keyboard stays";
+see `journalctl --user -u mxoptions`). It is never tried again for that crossing.
+
+It can only start from Linux with the keyboard on Bluetooth (BlueZ). A keyboard on a receiver or a
+cable stays, and so does one that reports anything but keys (letters, media and system keys) and
+its HID++ messages. Windows can receive the keyboard but cannot send it onward automatically: there,
+press the keyboard's Easy-Switch key. The computer the mouse goes to needs this version too, to say
+where the keyboard goes; with an older one the keyboard stays. The keyboard's own Easy-Switch keys
+always work, and switching this off or stopping the app (`systemctl --user stop mxoptions`) stops it.
 
 For networks where the computers cannot find each other, the address and the key can be entered by
 hand at the bottom of the page.
@@ -483,6 +500,18 @@ quit the app and copy `config.backup.json` over `config.json`.
 - **The mouse following the keyboard was not tried on real devices.** Only tests with made-up
   computers and keyboards cover it. If the other computer reports the keyboard before this one
   notices it has gone, the mouse stays; how often that happens is not known yet.
+- **The keyboard following the mouse was not tried on a real keyboard.** Only tests with made-up
+  keyboards and computers cover it; whether a real keyboard reports a key held down correctly over
+  Bluetooth is not known yet. A key pressed in the very moment the keyboard switches can stay down
+  on the computer it left, repeating, until the keyboard is back there or the key is pressed again.
+  If the keyboard was paired anew since the other computer last saw it, it can land on a third
+  computer; its Easy-Switch key brings it back. Each check reads the keyboard over Bluetooth, and
+  bluetoothd keeps a copy of every read (about 8.5 KiB each) while the keyboard stays connected and
+  replays them when it reconnects: so the app reads a keyboard at most 32 times each time it opens
+  it, and starts counting again after a restart. With `UserspaceHID=persist` in
+  `/etc/bluetooth/input.conf` those copies outlast disconnects until bluetoothd restarts. While a
+  check waits for the keyboard's answer, other programs opening or closing a HID device may wait
+  too, rarely up to 5 seconds.
 - **Flow with three computers was never run on three.** It was written with two at hand: the
   tests put three copies of the program on one machine and cross between them, but no third
   computer has received the mouse.

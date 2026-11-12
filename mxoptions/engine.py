@@ -91,8 +91,9 @@ class Listener:
         """Something other programs may want to hear about (it is passed on over D-Bus):
         "button" (key, pressed), "gesture" direction, "wheel_mode" (mode, quiet), "hook" (name, phase).
         And for Flow: "flow" ("asked", None) when an action asks to move to the other computer,
-        ("left", channel) once the mouse was sent there, ("refused", why) when it was not; ("keyboard", ...) when
-        the keyboard comes or goes (keyboard.KeyboardSide._tell_flow). Flow events stay in this program."""
+        ("left", channel) once the mouse was sent there, ("refused", why) when it was not; ("keyboard", {"link",
+        "here", "drop", "channel"}) when the keyboard comes or goes (keyboard.KeyboardSide._tell_flow). Flow events
+        stay in this program."""
 
     def on_gesture(self, event):
         """A gesture in progress or just finished, while the settings window is watching. ``event`` has
@@ -216,6 +217,15 @@ class Engine:
         The outcome comes back as a "flow" event."""
         self._queue.put(("flow", int(channel), bool(by_edge)))
 
+    def keyboard_follow(self, host, link, event):
+        """Flow: the mouse has just gone to the computer that has the keyboard ``link`` on channel ``host``: send the
+        keyboard after it if it may go (keyboard.KeyboardSide.follow). ``event`` set calls that off."""
+        self._queue.put(("kb_follow", int(host), link, event))
+
+    def keyboard_follow_cancel(self, event):
+        """Flow: call off the keyboard following the mouse begun with ``event``."""
+        self._queue.put(("kb_follow", None, None, event))
+
     def rumble_test(self):
         """Play on the mouse what a game's rumble growing from weak to strong feels like."""
         def run():
@@ -310,6 +320,11 @@ class Engine:
             self.keyboard.found(*item[1:])
         elif kind == "kb_answer":
             self.keyboard.answered(*item[1:])
+        elif kind == "kb_follow":
+            if item[1] is None:
+                self.keyboard.follow_cancel(item[3])
+            else:
+                self.keyboard.follow(*item[1:])
         elif kind == "refresh":
             self._read_status()
             self._publish()
@@ -369,7 +384,7 @@ class Engine:
         self.keyboard.tick(now)
         expected = now < self._expect_until
         if self.mouse is None:
-            if now >= self._next_scan:
+            if now >= self._next_scan and not self.keyboard.reading_keys():  # opening a node would wait on that
                 self._next_scan = now + (EXPECT_INTERVAL if expected else SCAN_INTERVAL)
                 self._scan()
             return
@@ -462,6 +477,8 @@ class Engine:
     def _set_online(self, online):
         if online != self.online:
             self.online = online
+            if online:
+                self.keyboard.follow_cancel(None)  # the mouse is back: the keyboard stays with it
             if not online:
                 self._reset_input_state()
                 self._next_ping = time.monotonic() + OFFLINE_PING_INTERVAL

@@ -41,6 +41,10 @@ RECOVERY_RETRY = 30.0        # s between two attempts at keys whose state could 
 REQUEST_BUDGET = 5.0         # s one request of a task may wait for its turn and its answer, in all
 SHUTDOWN_BUDGET = 3.0        # s the keys may take to be given back on exit
 SWITCH_GRACE = 5.0           # s after an Easy-Switch request before keys are taken again if the keyboard stayed
+# The keyboard following the mouse (flow.keyboard_follows_mouse). Not measured with a real keyboard yet: knobs.
+FOLLOW_SETTLE = 3.0  # s a mouse on Bluetooth may take to be gone before the keyboard is asked; too small gives "late"
+FOLLOW_BUDGET = 5.0  # s from the mouse leaving to the keyboard's Easy-Switch request going out, at most
+KEYS_FRESH = 0.3     # s from the first read of which keys are down to that request going out; too small gives "late"
 LOW_BATTERY = 15             # percent: where the battery in the sidebar turns red
 MAX_CONTROLS = 128
 MAX_JOURNAL_KEYBOARDS = 16
@@ -176,6 +180,38 @@ def _view(dev, transport, timeout, cancel, budget):
     return view
 
 
+def _stays(why):
+    log.info("flow: the keyboard stays (%s)", why)
+
+
+def _snap_switch(dev, host, deadline):
+    """A request of the keyboard following the mouse (see KeyboardSide._follow_steps): see whether a key is down,
+    and only if none is, send the keyboard to ``host``, all within KEYS_FRESH of the first look and before
+    ``deadline`` (time.monotonic). Made on the keyboard's thread, ``dev`` making its requests in the background
+    (_view): its cancel, once set, stops the asking and the request. "sent", or why not: "held", "unknown",
+    "late", "cancelled". The request cannot be taken back once it has gone, whatever is called off after."""
+    view = dev.transport
+    first = time.monotonic()  # before the first read: no part of the answer is older
+    fresh_by = min(deadline, first + KEYS_FRESH)
+    held = view.keys_held(fresh_by)
+    done = time.monotonic()
+    if held is None:
+        return "unknown"
+    if held:
+        return "held"
+    if view.cancel.is_set():
+        return "cancelled"
+    if done > fresh_by:
+        return "late"
+    fresh = copy.copy(dev)
+    fresh.transport = hidpp.ProbeTransport(view.transport, view.timeout, view.cancel, min(view.deadline, fresh_by))
+    try:
+        fresh.change_host(host)  # waits for its turn no later than fresh_by: then it is not sent
+    except HidppCancelled:
+        return "cancelled" if view.cancel.is_set() else "late"
+    return "sent"
+
+
 def _status(dev):
     """(battery, (current host, hosts)) of a keyboard, as far as it says. HidppCancelled and HidppClosed are passed on."""
     battery, hosts = None, (0, [])
@@ -224,6 +260,10 @@ class KeyboardSide:
         self._asked = None      # the request of the task on its way now
         self._called_off = threading.Event()  # set once the task under way is dropped: what it has not sent yet never goes
         self._wish = None       # what to do once the task under way is over: None | "configure" | ("host", n)
+        #                         | ("follow", n, event, deadline): see follow()
+        self._following = False  # the task under way is the keyboard following the mouse; _called_off is its event
+        self._follow_wait = None  # (host, link, event, settle_by, deadline) of one waiting for the mouse to be gone
+        self._reading = threading.Event()  # the keyboard's thread is seeing whether a key is down (see reading_keys)
         self._failed = None     # "switch": the keyboard could not be moved to another computer last time
         self._leaving = 0.0     # time.monotonic until which the keyboard is on its way to another computer
         self._sent_at = None    # time.monotonic of the last Easy-Switch request this program made, while it may be going
@@ -343,6 +383,8 @@ class KeyboardSide:
         self._look()
 
     def config_changed(self, old_cfg, new_cfg):
+        if not new_cfg["flow"]["keyboard_follows_mouse"]:
+            self.follow_cancel(None)
         self._remap(effective_keys(old_cfg["keyboard"], self._front), effective_keys(new_cfg["keyboard"], self._front))
 
     def front_changed(self, app):
@@ -383,9 +425,13 @@ class KeyboardSide:
         moments = [self._next_recovery] if self.device is not None and self.online and self._task is None else []
         if self.device is None and self.engine.mouse is not None:
             moments += [self._next_nodes, self._next_look]
+        if self._follow_wait is not None:
+            moments.append(self._follow_wait[3])
         return min(moments, default=float("inf")) - now
 
     def tick(self, now):
+        if self._follow_wait is not None:
+            self._settled(now)
         if self.device is None and self.engine.mouse is not None:
             if now >= self._next_nodes:
                 self._next_nodes = now + NODE_INTERVAL
@@ -396,6 +442,106 @@ class KeyboardSide:
         if self.device is not None and self.online and self._task is None and now >= self._next_recovery:
             self._leaving = 0.0  # still here: see _switch
             self.configure()
+
+    # -- the keyboard following the mouse ----------------------------------------
+
+    def follow(self, host, link, event):
+        """Flow: the mouse has just been sent to the computer that has this keyboard (``link``, see flow_link) on
+        channel ``host``. Send the keyboard after it, once, if all is as it should be; otherwise it stays, and the
+        log says why. ``event`` (a threading.Event) set calls it off, up to the moment the request goes."""
+        dev, now = self.device, time.monotonic()
+        current, hosts = self._hosts
+        if event.is_set():
+            why = "cancelled"
+        elif not self.engine.cfg["flow"]["keyboard_follows_mouse"]:
+            why = "off"
+        elif dev is None or not self.online or link is None or self.link != link:
+            why = "not-here"
+        elif self._busy(now):
+            why = "busy"
+        elif not (dev.pairing_read is True and len(hosts) == dev.host_count and 0 <= current < dev.host_count
+                  and 0 <= host < dev.host_count and host != current and hosts[host]["paired"] is True):
+            why = "pairing"  # only to a channel the keyboard itself said is paired
+        elif not self.transport.can_tell_keys():
+            why = "unsupported"  # it could not be told whether a key is down there
+        else:
+            why = None
+        if why:
+            _stays(why)
+            return
+        deadline = now + FOLLOW_BUDGET
+        if self._mouse_on_its_way():
+            self._follow_wait = (host, link, event, now + FOLLOW_SETTLE, deadline)
+        else:
+            self._want(("follow", host, event, deadline))
+
+    def _busy(self, now):
+        return (self._follow_wait is not None or isinstance(self._wish, tuple) or now < self._leaving
+                or (self._task is not None and self._task.__name__ == "_switch"))
+
+    def _mouse_on_its_way(self):
+        """The mouse, sent off on a connection of its own (Bluetooth), is still there. While a key is being looked
+        at, its node going would wait on the kernel's (it holds one lock for every hidraw node, up to 5 s: Linux
+        drivers/hid/hidraw.c), and the engine with it: so the keyboard waits for the mouse to be gone first."""
+        mouse = self.engine.mouse
+        return mouse is not None and not mouse.transport.is_receiver
+
+    def _settled(self, now):
+        """tick(): the follow waiting for the mouse to be gone goes on, or ends."""
+        host, link, event, settle_by, deadline = self._follow_wait
+        if event.is_set():
+            why = "cancelled"
+        elif self.device is None or not self.online or self.link != link:
+            why = "not-here"
+        elif not self._mouse_on_its_way():
+            self._follow_wait = None
+            if self._busy(now):
+                _stays("busy")
+            else:
+                self._want(("follow", host, event, deadline))
+            return
+        elif now > settle_by:
+            why = "late"
+        else:
+            return
+        self._follow_wait = None
+        _stays(why)
+
+    def follow_cancel(self, event):
+        """Call off the keyboard following the mouse that ``event`` belongs to (None: any). One whose request has
+        gone already is not called back."""
+        def ours(other):
+            return event is None or other is event
+        wish = self._wish
+        if self._follow_wait is not None and ours(self._follow_wait[2]):
+            self._follow_wait[2].set()
+            self._follow_wait = None
+        elif isinstance(wish, tuple) and wish[0] == "follow" and ours(wish[2]):
+            wish[2].set()
+            self._wish = None
+            self.configure()
+        elif self._task is not None and self._following and ours(self._called_off):
+            self._stop_task()  # what it gave back is taken again, as the settings say
+            self.configure()
+        else:
+            return
+        _stays("cancelled")
+
+    def reading_keys(self):
+        """Whether the keyboard's thread is, or is about to be, seeing whether a key is down: the engine opens no
+        node meanwhile (see _mouse_on_its_way)."""
+        asked = self._asked
+        return self._reading.is_set() or (asked is not None and asked[0] is _snap_switch)
+
+    def _paired_channel(self):
+        """The channel the keyboard is on here, if it said itself that this one is paired; None otherwise."""
+        dev = self.device
+        if dev is None or not self.online or dev.pairing_read is not True:
+            return None
+        current, hosts = self._hosts
+        if len(hosts) != dev.host_count or not 0 <= current < dev.host_count or hosts[current]["paired"] is not True:
+            return None
+        return current
 
     def shutdown(self):
         """Hand back the keys this program diverted, and stop looking (the engine closes the transports after)."""
@@ -442,10 +588,14 @@ class KeyboardSide:
             return
         self._want(("host", host))
 
-    def _switch(self, host):
+    def _switch(self, host, follow=None):
         """A task: move the keyboard to ``host``, only once every key this program diverted is given back (it
         comes back as new, and its keys are diverted again then). Where that cannot be done, or the keyboard
-        does not go, it stays here with its keys as the settings say."""
+        does not go, it stays here with its keys as the settings say. ``follow``: (event, deadline) when it is
+        to follow the mouse (see _follow_steps)."""
+        if follow is not None:
+            yield from self._follow_steps(host, *follow)
+            return
         self._sent_at = None
         if not (yield from self._give_back()):
             log.warning("keyboard not moved to channel %s: a key could not be given back first", host + 1)
@@ -468,6 +618,52 @@ class KeyboardSide:
         self._sent_at = time.monotonic()
         self._leaving = self._next_recovery = self._sent_at + SWITCH_GRACE  # still here then: it did not go,
         self.engine._publish()                                                 # and its keys are taken again
+
+    def _follow_steps(self, host, event, deadline):
+        """_switch() after the mouse: as from a key, but only while ``event`` is not set and ``deadline`` has not
+        passed, and only if no key is down. Each of these is looked at once; whatever stops it, the keyboard stays,
+        its keys taken again, and the log says why. It is not tried again."""
+        if event.is_set() or time.monotonic() > deadline:
+            yield from self._stay("cancelled" if event.is_set() else "late")
+            return
+        self._sent_at = None
+        if not (yield from self._give_back()):
+            self._failed = "switch"
+            yield from self._stay("give-back")
+            return
+        if self._pressed or self._held:
+            yield from self._stay("held")  # a key this program follows is down: it would stay down here
+            return
+        self.executor.reset()
+        self._sent_at = time.monotonic()  # it may be gone before the answer is back: then it went because of this
+        try:
+            outcome = yield (_snap_switch, host, deadline)
+        except HidppClosed:
+            raise
+        except HidppError as e:  # nothing was sent: _snap_switch says so itself where it may have been
+            log.debug("keyboard not asked which keys are down: %s", e)
+            outcome = "unknown"
+        if outcome != "sent":
+            self._sent_at = None
+            yield from self._stay(outcome)
+            return
+        self._follow_over()
+        self._failed, self._wish = None, None
+        self._sent_at = time.monotonic()
+        self._leaving = self._next_recovery = self._sent_at + SWITCH_GRACE
+        log.info("flow: the keyboard follows the mouse to channel %d", host + 1)
+        self.engine._publish()
+
+    def _follow_over(self):
+        """What the following still asks of the keyboard is ordinary from now on: calling it off no longer stops it."""
+        self._called_off = threading.Event()
+        self._following = False
+
+    def _stay(self, why):
+        """A task: the keyboard does not follow the mouse (``why``); its keys are taken again."""
+        self._follow_over()
+        _stays(why)
+        yield from self._configure()
 
     def _on_keys(self, pressed):
         keys = self._effective()
@@ -506,6 +702,8 @@ class KeyboardSide:
         if self._task is not None and self._task.__name__ == "_read_firmware":  # never holds up the keys: called
             self._stop_task()                                                   # off, and read again after them
             self._firmware_due = True
+        if isinstance(self._wish, tuple) and self._wish[0] == "follow":  # an Easy-Switch from a key goes instead
+            _stays("busy")
         self._wish = wish
         if self._task is None:
             self._next_task()
@@ -514,16 +712,22 @@ class KeyboardSide:
         wish, self._wish = self._wish, None
         if self.device is None or not self.online:
             return
+        follow = None
         if wish is not None:
             self._next_recovery, self._leaving = float("inf"), 0.0
-            self._task = self._configure() if wish == "configure" else self._switch(wish[1])
+            if wish == "configure":
+                self._task = self._configure()
+            else:
+                follow = wish[2:] if wish[0] == "follow" else None
+                self._task = self._switch(wish[1], follow)
         elif self._firmware_due and time.monotonic() >= self._leaving:  # not while it may be on its way elsewhere
             self._firmware_due = False
             self._task = self._read_firmware()
         else:
             return
         self._token += 1
-        self._called_off = threading.Event()
+        self._called_off = follow[0] if follow else threading.Event()  # the follow's own: Flow calls it off with it
+        self._following = follow is not None
         self._step(None, None)
 
     def _step(self, reply, error):
@@ -558,6 +762,7 @@ class KeyboardSide:
                 self._reporting.pop(self._asked[1], None)  # whether it went through is for the keyboard to say
             self._task.close()
         self._task = self._asked = self._wish = None
+        self._following = False
         self._token += 1
 
     def _timeout(self, transport):
@@ -750,6 +955,9 @@ class KeyboardSide:
         self.last_drop = (now, sent) if self.link else None
         self._sent_at = None
         self.device, self.transport, self.online = None, None, False
+        if self._follow_wait is not None:
+            self._follow_wait = None
+            _stays("not-here")
         self._identity = None
         self._active.clear()
         self._pressed.clear()
@@ -766,7 +974,7 @@ class KeyboardSide:
         """Flow's side of the keyboard coming and going (flow_service.FlowService.on_engine, "keyboard"). An event
         of the engine's that stays in this program: the link is not in the state, which the window and others see."""
         self.engine._emit("flow", ("keyboard", {"link": self.link, "here": self.device is not None and self.online,
-                                                "drop": self.last_drop}))
+                                                "drop": self.last_drop, "channel": self._paired_channel()}))
 
     def _again(self, linked):
         transport, devidx = self.transport, self.device.devidx
@@ -819,10 +1027,16 @@ class KeyboardSide:
                 if called_off.is_set():
                     continue  # its task was dropped (keyboard gone or replaced, settings changed, exit): never sent
                 reply = error = None
+                reading = request[0] is _snap_switch
+                if reading:
+                    self._reading.set()
                 try:  # called off while waiting for its turn, or just before it goes: not sent either
                     reply = _call(_view(dev, transport, timeout, called_off, REQUEST_BUDGET), request)
                 except Exception as e:
                     error = e
+                finally:
+                    if reading:
+                        self._reading.clear()
                 self.engine._queue.put(("kb_answer", token, reply, error))
                 continue
             _look, generation, transport, slots, loaded, timeout = job

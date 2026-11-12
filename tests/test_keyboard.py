@@ -3,6 +3,7 @@ back safely, its actions kept apart from the mouse's. The engine runs on the tes
 transports on FakePorts; the devices are synthetic (tests/support.py)."""
 
 import copy
+import errno
 import hashlib
 import json
 import logging
@@ -11,13 +12,16 @@ import queue
 import shutil
 import stat
 import struct
+import sys
 import tempfile
 import threading
 import time
 import unittest
 from unittest import mock
 
+import tests.support as tests_support
 from tests.support import Actions, Clock, FakeDevice, FakeInput, FakePort, Recorder
+from tests.test_transport import AGGREGATE, MODS, ZERO, KeyNode, bluetooth, count, inp, lmax, page, report, size, umax, umin
 from mxoptions import actions, config, device, engine, hidpp, keyboard
 
 # Synthetic controls: (cid, tid, getCidInfo flags). 0x30 = reprogrammable and divertable, 0x32 also on the F-row,
@@ -283,18 +287,18 @@ class FlowRecord(unittest.TestCase):
         rig = self.rig
         self.assertEqual(rig.kb.link, flow_link(UNIT_A))
         self.assertNotEqual(rig.kb.link, identity(UNIT_A))
-        self.assertEqual(self.told(), [{"link": flow_link(UNIT_A), "here": True, "drop": None}])
+        self.assertEqual(self.told(), [{"link": flow_link(UNIT_A), "here": True, "drop": None, "channel": None}])
         before = time.monotonic()
         rig.link(1, False)
         self.assertEqual(rig.kb.link, flow_link(UNIT_A))
         when, sent = rig.kb.last_drop
         self.assertTrue(before <= when <= time.monotonic())
         self.assertFalse(sent)
-        self.assertEqual(self.told()[-1], {"link": flow_link(UNIT_A), "here": False, "drop": (when, False)})
+        self.assertEqual(self.told()[-1], {"link": flow_link(UNIT_A), "here": False, "drop": (when, False), "channel": None})
         rig.link(1, True)
         rig.settle()
         self.assertIsNone(rig.kb.last_drop)  # back: its going counts no more
-        self.assertEqual(self.told()[-1], {"link": flow_link(UNIT_A), "here": True, "drop": None})
+        self.assertEqual(self.told()[-1], {"link": flow_link(UNIT_A), "here": True, "drop": None, "channel": None})
 
     def test_the_link_is_never_in_the_state(self):
         rig = self.rig
@@ -1355,6 +1359,540 @@ class Picker(unittest.TestCase):
                     self.assertIn(preset.id, keyboard_page.KEYBOARD_EXCLUDE)
                 else:
                     self.assertNotIn(preset.id, keyboard_page.KEYBOARD_EXCLUDE)
+
+
+# -- the keyboard following the mouse (KeyboardSide.follow) ----------------------------------------------------------
+
+KB_PATH = "/dev/synthetic-kb"
+
+
+class PairedKeyboard(FakeDevice):
+    """A synthetic keyboard that also says which of its channels are paired, and their names (HOSTS_INFO).
+    ``fail_at``: the channel whose question it answers with an error; ``capable``: it says it can tell at all."""
+
+    def __init__(self, paired=(True, True, False), names=("desk", "", ""), capable=True, fail_at=None, current=0, **kwargs):
+        super().__init__(controls=CONTROLS, unit=UNIT_A, model=MODEL, extra=(device.HOSTS_INFO,),
+                         hosts=(len(paired), current), **kwargs)
+        self.paired, self.names, self.capable, self.fail_at = list(paired), list(names), capable, fail_at
+
+    def answer(self, feat_idx, function, params):
+        if (self.silent or feat_idx >= len(self.features) or self.features[feat_idx] != device.HOSTS_INFO
+                or (device.HOSTS_INFO, function) in self.failing):
+            return super().answer(feat_idx, function, params)
+        if function == 0:
+            return bytes([1 if self.capable else 0])
+        host = params[0]
+        if host == self.fail_at:
+            return 2
+        name = self.names[host].encode()
+        if function == 1:
+            return bytes([host, 1 if self.paired[host] else 0, 0, 0, len(name)])
+        if function == 3:
+            return bytes([host, params[1]]) + name[params[1]:params[1] + 14]
+        return 7
+
+
+@unittest.skipIf(sys.platform == "win32", "the keyboard is asked which keys are down on Linux only")
+class FollowsMouse(unittest.TestCase):
+    """The keyboard on a Bluetooth node of its own, sent after the mouse once no key is down. The nodes and every
+    answer about the keys are synthetic (tests/test_transport.py); the engine runs on the test's thread."""
+
+    def setUp(self):
+        self.ioctls = bluetooth(self, dict(ZERO))
+
+    def make(self, kb=None, desc=AGGREGATE, direct=False, flag=True):
+        """The mouse on a receiver (or on Bluetooth, ``direct``), the keyboard (a new PairedKeyboard unless given) on
+        a node of its own."""
+        kb = self.kb = kb or PairedKeyboard()
+        mouse = mouse_device()
+        rig = Rig(self, {0xFF: mouse} if direct else {2: mouse}, keys={"0x0f01": CTRL, "0x0f02": COPY}, receiver=not direct)
+        rig.engine.cfg["flow"]["keyboard_follows_mouse"] = flag
+        rig.start()
+        rig.ports[KB_PATH] = KeyNode(FakePort({0xFF: kb}, receiver=False), KB_PATH, desc)
+        rig.nodes.append((KB_PATH, False))
+        rig.kb._next_nodes = 0.0
+        rig.engine._tick()
+        rig.settle()
+        self.assertEqual((rig.kb.transport.path, rig.kb.device.devidx), (KB_PATH, 0xFF))
+        self.assertTrue(rig.key(0x0F01)["active"])
+        self.rig, self.node = rig, rig.ports[KB_PATH]
+        return rig
+
+    def follow(self, host=1, event=None, link=None, settle=True):
+        """Flow asks the engine to send the keyboard after the mouse to ``host``."""
+        event = event or threading.Event()
+        self.rig.engine.keyboard_follow(host, link or self.rig.kb.link, event)
+        if settle:
+            self.rig.settle()
+        return event
+
+    def stays(self, why, **kwargs):
+        sets = len(self.kb.sets)
+        with self.assertLogs("mxoptions.keyboard", "INFO") as logs:
+            self.follow(**kwargs)
+        self.assertIn(f"flow: the keyboard stays ({why})", logs.output[-1])
+        self.assertEqual(self.kb.switched, [])
+        return sets, logs
+
+    def blocked(self):
+        """Hold every read of the keys back until the Event returned is set (as a slow Bluetooth answer would)."""
+        release, reading = threading.Event(), threading.Event()
+        self.addCleanup(release.set)
+
+        def wait(_rid):
+            reading.set()
+            release.wait(5.0)
+        self.ioctls.wait = wait
+        return release, reading
+
+    def pump(self, until, timeout=4.0):
+        end = time.monotonic() + timeout
+        while time.monotonic() < end and not until():
+            try:
+                self.rig.engine._handle(self.rig.engine._queue.get(timeout=0.02))
+            except queue.Empty:
+                pass
+        self.assertTrue(until())
+
+    # -- it goes ---------------------------------------------------------------------------------------------------
+
+    def test_with_no_key_down_it_goes_after_the_keys_are_given_back(self):
+        rig = self.make()
+        resets = []
+        real_reset = rig.kb.executor.reset
+        rig.kb.executor.reset = lambda: (resets.append(1), real_reset())
+        written = []
+        self.ioctls.wait = lambda _rid: written.append(len(self.node.fake.written))
+        start = len(self.node.fake.written)
+        with self.assertLogs("mxoptions.keyboard", "INFO") as logs:
+            self.follow(1)
+        self.assertEqual(self.kb.switched, [1])
+        self.assertIn("flow: the keyboard follows the mouse to channel 2", logs.output[-1])
+        packets = self.node.fake.written[start:]
+        give_back = [i for i, p in enumerate(packets) if p[2] == self.kb.index(device.REPROG_CONTROLS_V4) and p[3] >> 4 == 3]
+        switch = [i for i, p in enumerate(packets) if p[2] == self.kb.index(device.CHANGE_HOST) and p[3] >> 4 == 1]
+        self.assertEqual(len(switch), 1)
+        self.assertEqual(len(give_back), 2)  # each of its keys, once
+        self.assertEqual(self.ioctls.ids(), [1, 3, 4])  # every key report, once, after the keys were given back
+        self.assertTrue(all(max(give_back) < at - start <= switch[0] for at in written))
+        self.assertEqual(resets, [1])
+        self.assertEqual(rig.saved()["keyboards"], {})
+        self.assertIsNotNone(rig.kb._sent_at)
+        self.assertGreater(rig.kb._leaving, time.monotonic())
+        self.assertIsNone(rig.kb._failed)
+        self.assertEqual({call[4] for call in self.ioctls.calls}, {"keyboard"})  # on the keyboard's thread only
+        rig.engine._drop_transport(rig.transport(KB_PATH))  # and when it goes, it went because of this
+        self.assertTrue(rig.kb.last_drop[1])
+
+    def test_the_mouse_on_bluetooth_is_waited_for_first(self):
+        rig = self.make(direct=True)
+        mouse_path = PATH
+        self.follow(1)
+        self.assertIsNotNone(rig.kb._follow_wait)
+        self.assertEqual((self.ioctls.calls, self.kb.switched), ([], []))
+        self.assertEqual(diverts(self.kb)[-1][1], True)  # nothing given back yet
+        self.assertLessEqual(rig.kb.due(time.monotonic()), keyboard.FOLLOW_SETTLE)
+        rig.engine._tick()
+        self.assertIsNotNone(rig.kb._follow_wait)  # still there
+        rig.engine._drop_transport(rig.transport(mouse_path))  # gone to the other computer
+        rig.engine._tick()
+        rig.settle()
+        self.assertEqual(self.kb.switched, [1])
+        self.assertIsNone(rig.kb._follow_wait)
+
+    def test_a_mouse_on_bluetooth_that_does_not_go_in_time_keeps_the_keyboard(self):
+        for name in ("late", "cancelled", "not-here"):
+            with self.subTest(name):
+                rig = self.make(direct=True)
+                event = self.follow(1)
+                with self.assertLogs("mxoptions.keyboard", "INFO") as logs:
+                    if name == "late":
+                        rig.kb.tick(time.monotonic() + keyboard.FOLLOW_SETTLE + 0.1)
+                    elif name == "cancelled":
+                        event.set()
+                        rig.kb.tick(time.monotonic())
+                    else:
+                        rig.engine._drop_transport(rig.transport(KB_PATH))
+                self.assertIn(f"stays ({name})", logs.output[-1])
+                self.assertIsNone(rig.kb._follow_wait)
+                rig.engine._drop_transport(rig.transport(PATH))
+                rig.engine._tick()
+                rig.settle()
+                self.assertEqual((self.ioctls.calls, self.kb.switched), ([], []))
+                rig.stop()
+
+    # -- it stays, and why -----------------------------------------------------------------------------------------
+
+    def test_before_anything_is_asked_each_reason_to_stay(self):
+        rig = self.make()
+        hosts = copy.deepcopy(rig.kb._hosts)
+        called_off = threading.Event()
+        called_off.set()
+        cases = [  # (what, why, what makes it so, channel, more for follow())
+            ("called off", "cancelled", None, 1, {"event": called_off}),
+            ("switched off", "off", lambda: rig.engine.cfg["flow"].update(keyboard_follows_mouse=False), 1, {}),
+            ("another keyboard", "not-here", None, 1, {"link": "0" * 16}),
+            ("offline", "not-here", lambda: setattr(rig.kb, "online", False), 1, {}),
+            ("leaving", "busy", lambda: setattr(rig.kb, "_leaving", time.monotonic() + 30), 1, {}),
+            ("a switch wished", "busy", lambda: setattr(rig.kb, "_wish", ("host", 2)), 1, {}),
+            ("one waiting", "busy", lambda: setattr(rig.kb, "_follow_wait", (1, rig.kb.link, threading.Event(), 0, 0)), 1, {}),
+            ("its own channel", "pairing", None, 0, {}),
+            ("a channel not paired", "pairing", None, 2, {}),
+            ("past the last channel", "pairing", None, 3, {}),
+            ("pairing never read", "pairing", lambda: setattr(rig.kb.device, "pairing_read", False), 1, {}),
+            ("fewer channels than it has", "pairing", lambda: setattr(rig.kb, "_hosts", (0, hosts[1][:2])), 1, {}),
+            ("current channel out of range", "pairing", lambda: setattr(rig.kb, "_hosts", (3, hosts[1])), 1, {}),
+        ]
+        for what, why, prepare, host, more in cases:
+            with self.subTest(what):
+                if prepare:
+                    prepare()
+                sets, _logs = self.stays(why, host=host, **more)
+                self.assertEqual(len(self.kb.sets), sets)  # not a key given back
+                self.assertEqual(self.ioctls.calls, [])
+                rig.engine.cfg["flow"]["keyboard_follows_mouse"] = True
+                rig.kb._leaving, rig.kb._wish, rig.kb._follow_wait, rig.kb.online = 0.0, None, None, True
+                rig.kb._hosts, rig.kb.device.pairing_read = copy.deepcopy(hosts), True
+        self.follow(1)  # and with all as it should be, it goes
+        self.assertEqual(self.kb.switched, [1])
+
+    def test_a_keyboard_that_cannot_be_asked_stays(self):
+        buttons = report(1, MODS) + report(2, page(0x09) + umin(1) + umax(8) + lmax(1) + size(1) + count(8) + inp(0x02))
+        self.make(desc=buttons)
+        self.stays("unsupported")
+        self.assertEqual(self.ioctls.calls, [])
+        self.kb = PairedKeyboard()
+        rig = Rig(self, {1: self.kb, 2: mouse_device()}, keys={"0x0f01": CTRL})  # on the mouse's receiver
+        rig.engine.cfg["flow"]["keyboard_follows_mouse"] = True
+        rig.start()
+        self.rig = rig
+        self.assertTrue(rig.kb.transport.is_receiver)
+        self.stays("unsupported")
+        self.assertEqual(self.ioctls.calls, [])
+
+    def test_a_key_down_keeps_it_here_with_its_keys(self):
+        cases = {
+            "held": ({1: bytes([1, 0, 0, 0x0D]) + bytes(5)}, None),
+            "held (media)": ({3: bytes([3, 0xEA, 0, 0, 0])}, None),
+            "unknown": ({3: OSError(errno.EIO, "synthetic")}, None),
+            "late": ({}, 0.05),  # the last report read past KEYS_FRESH: all of them were in time to be asked
+            "unknown (out of time)": ({}, 0.01),  # past it before the last report: that one is not asked
+        }
+        for name, (answers, fresh) in cases.items():
+            with self.subTest(name):
+                rig = self.make()
+                self.ioctls.answers = {**ZERO, **answers}
+                why = name.split(" ")[0]
+                if fresh is not None:
+                    self.ioctls.wait = lambda rid_: time.sleep(0.1 if rid_ == 4 else 0.02 if fresh < 0.05 else 0)
+                with mock.patch.object(keyboard, "KEYS_FRESH", fresh if fresh is not None else keyboard.KEYS_FRESH):
+                    self.stays(why)
+                self.assertIsNone(rig.kb._sent_at)
+                self.assertTrue(rig.key(0x0F01)["active"])  # taken again
+                self.assertEqual(diverts(self.kb)[-1][1], True)
+                self.assertEqual(rig.saved()["keyboards"], {identity(UNIT_A): ["0x0f01", "0x0f02"]})
+                self.ioctls.wait = None
+                rig.stop()
+
+    def test_a_key_it_follows_down_keeps_it_without_asking(self):
+        rig = self.make()
+        rig.kb._on_keys({0x0F01})  # down, as the keyboard reported
+        self.stays("held")
+        self.assertEqual(self.ioctls.calls, [])
+        self.assertTrue(rig.key(0x0F01)["active"])
+
+    def test_called_off_while_the_keys_are_read(self):
+        rig = self.make()
+        event = threading.Event()
+        self.ioctls.wait = lambda rid_: event.set() if rid_ == 4 else None
+        self.stays("cancelled", event=event)
+        self.assertTrue(rig.key(0x0F01)["active"])
+
+    def test_a_key_that_cannot_be_given_back_keeps_it(self):
+        rig = self.make()
+        self.kb.failing[(device.REPROG_CONTROLS_V4, 3)] = 4
+        self.stays("give-back")
+        self.assertEqual(rig.state()["failed"], "switch")
+        self.assertEqual(self.ioctls.calls, [])
+
+    # -- called off while it is under way -----------------------------------------------------------------------------
+
+    def test_whatever_calls_it_off_while_the_keys_are_read_nothing_is_sent(self):
+        def drop(rig, event):
+            rig.kb.transport_gone(rig.kb.transport)
+
+        def off(rig, event):
+            new = copy.deepcopy(rig.engine.cfg)
+            new["flow"]["keyboard_follows_mouse"] = False
+            rig.engine._apply_config(new)
+
+        def mouse_back(rig, event):
+            rig.engine.online = False
+            rig.engine._set_online(True)
+        stops = {"keyboard gone": drop, "setting off": off, "mouse back here": mouse_back,
+                 "Flow calls it off": lambda rig, event: (event.set(), rig.engine.keyboard_follow_cancel(event)),
+                 "shutdown": lambda rig, event: rig.kb.shutdown()}
+        for name, stop in stops.items():
+            with self.subTest(name):
+                rig = self.make()
+                release, reading = self.blocked()
+                event = self.follow(settle=False)
+                self.pump(reading.is_set)
+                self.assertTrue(rig.kb.reading_keys())
+                if name == "shutdown":
+                    threading.Timer(0.2, release.set).start()
+                stop(rig, event)
+                if name == "Flow calls it off":
+                    self.pump(lambda: rig.kb._task is None or not rig.kb._following)
+                self.assertTrue(event.is_set())
+                release.set()
+                self.pump(lambda: not rig.kb._reading.is_set())
+                time.sleep(0.05)
+                while not rig.engine._queue.empty():
+                    rig.engine._handle(rig.engine._queue.get())
+                self.assertEqual(self.kb.switched, [], name)
+                self.ioctls.wait = None
+                rig.stop()
+
+    def test_an_answer_for_a_keyboard_gone_and_back_is_dropped(self):
+        rig = self.make()
+        release, reading = self.blocked()
+        self.follow(settle=False)
+        self.pump(reading.is_set)
+        transport = rig.kb.transport
+        rig.kb.transport_gone(transport)
+        rig.engine._transports[KB_PATH] = transport
+        rig.kb._queue(transport, [0xFF])  # found again: a new start
+        self.ioctls.wait = None
+        release.set()
+        rig.settle()
+        self.assertIsNotNone(rig.kb.device)
+        self.assertEqual(self.kb.switched, [])
+        self.assertTrue(rig.key(0x0F01)["active"])
+
+    def test_one_wished_behind_other_requests_is_called_off_before_it_starts(self):
+        rig = self.make()
+        self.kb.delays[device.REPROG_CONTROLS_V4] = 0.3
+        rig.kb._reporting.pop(0x0F02)
+        rig.kb.configure()  # asks the keyboard about a key: under way
+        self.assertIsNotNone(rig.kb._task)
+        event = self.follow(settle=False)
+        rig.engine._handle(rig.engine._queue.get(timeout=1.0))
+        self.assertEqual(rig.kb._wish[0], "follow")
+        with self.assertLogs("mxoptions.keyboard", "INFO") as logs:
+            event.set()
+            rig.engine.keyboard_follow_cancel(event)
+            rig.settle()
+        self.assertIn("stays (cancelled)", "\n".join(logs.output))
+        self.assertEqual((self.ioctls.calls, self.kb.switched), ([], []))
+
+    def test_an_easy_switch_from_a_key_goes_before_a_wished_follow(self):
+        rig = self.make()
+        self.kb.delays[device.REPROG_CONTROLS_V4] = 0.3
+        rig.kb._reporting.pop(0x0F02)
+        rig.kb.configure()
+        self.follow(settle=False)
+        rig.engine._handle(rig.engine._queue.get(timeout=1.0))
+        with self.assertLogs("mxoptions.keyboard", "INFO") as logs:
+            rig.kb.device_action({"type": "host", "host": 2}, "press")
+        self.assertIn("stays (busy)", logs.output[-1])
+        rig.settle()
+        self.assertEqual((self.ioctls.calls, self.kb.switched), ([], [2]))
+
+    def test_one_follow_at_a_time(self):
+        rig = self.make()
+        release, reading = self.blocked()
+        self.follow(settle=False)
+        self.pump(reading.is_set)
+        with self.assertLogs("mxoptions.keyboard", "INFO") as logs:
+            start = time.monotonic()
+            self.follow(settle=False)
+            rig.engine._handle(rig.engine._queue.get(timeout=1.0))
+            self.assertLess(time.monotonic() - start, 0.1)
+        self.assertIn("stays (busy)", logs.output[-1])
+        release.set()
+        rig.settle()
+        self.assertEqual(self.kb.switched, [1])
+
+    # -- nothing waits on it ------------------------------------------------------------------------------------------
+
+    def test_the_engine_goes_on_and_opens_no_node_while_the_keys_are_read(self):
+        rig = self.make(direct=True)
+        rig.engine._drop_transport(rig.transport(PATH))  # the mouse has gone
+        scans = []
+        rig.engine._scan = lambda: scans.append(1)
+        release, reading = self.blocked()
+        start = time.monotonic()
+        self.follow(settle=False)
+        self.assertLess(time.monotonic() - start, 0.05)
+        self.pump(reading.is_set)
+        for _ in range(3):
+            rig.engine._next_scan = 0.0
+            start = time.monotonic()
+            rig.engine.set_front("synthetic.app")
+            rig.engine._handle(rig.engine._queue.get(timeout=1.0))
+            rig.engine._tick()
+            self.assertLess(time.monotonic() - start, 0.1)
+        self.assertEqual(scans, [])  # opening a node now would wait on the read
+        release.set()
+        rig.settle()
+        self.assertFalse(rig.kb.reading_keys())
+        rig.engine._next_scan = 0.0
+        rig.engine._tick()
+        self.assertEqual(scans, [1])
+        self.assertEqual(self.kb.switched, [1])
+
+    def test_the_keys_are_only_ever_read_on_the_keyboard_s_thread(self):
+        rig = self.make()
+        self.ioctls.wait = lambda _rid: self.assertEqual(threading.current_thread().name, "keyboard")
+        rig.kb.follow(1, rig.kb.link, threading.Event())
+        self.assertEqual(self.ioctls.calls, [])  # handed on, not read here
+        rig.settle()
+        self.assertEqual(len(self.ioctls.calls), 3)
+
+    # -- what Flow is told ---------------------------------------------------------------------------------------------
+
+    def test_flow_hears_the_channel_only_when_the_keyboard_said_it_is_paired(self):
+        def told(rig):
+            return [payload[1] for kind, payload in rig.listener.events if kind == "flow" and payload[0] == "keyboard"]
+        rig = self.make()
+        self.assertEqual(told(rig)[-1]["channel"], 0)
+        rig.engine._drop_transport(rig.transport(KB_PATH))
+        self.assertIsNone(told(rig)[-1]["channel"])
+        for name, kb in (("not paired", PairedKeyboard(paired=(True, True, False), current=2)),
+                         ("not said", PairedKeyboard(capable=False)), ("cut short", PairedKeyboard(fail_at=1)),
+                         ("no such feature", keyboard_device())):
+            with self.subTest(name):
+                rig = self.make(kb=kb)
+                self.assertIsNone(told(rig)[-1]["channel"])
+                self.stays("pairing", host=2 if name == "not paired" else 1)
+                rig.stop()
+
+    def test_nothing_of_the_keys_is_logged_kept_or_shown(self):
+        rig = self.make()
+        self.ioctls.answers = {**ZERO, 1: bytes([1, 0x02, 0, 0x5A]) + bytes(5)}
+        with self.assertLogs(level="DEBUG") as logs:
+            logging.getLogger("mxoptions").debug("start")
+            self.follow()
+        text = "\n".join(logs.output)
+        self.assertIn("stays (held)", text)
+        self.assertNotIn("5a", text.lower())
+        self.assertIsNone(rig.kb.transport.on_report)
+        for buf in self.ioctls.buffers:
+            self.assertEqual(bytes(buf), bytes(len(buf)))
+        shown = json.dumps(rig.state())
+        self.assertNotIn("held", shown)
+
+
+@unittest.skipIf(sys.platform == "win32", "the keyboard is asked which keys are down on Linux only")
+class SnapSwitch(unittest.TestCase):
+    """_snap_switch on its own: every read of the keys and the request that sends the keyboard, all within
+    KEYS_FRESH of the start of the first read, counted once for all of them."""
+
+    def setUp(self):
+        self.ioctls = bluetooth(self, dict(ZERO))
+        self.kb = PairedKeyboard()
+        self.node = KeyNode(FakePort({0xFF: self.kb}, receiver=False))
+        self.transport = tests_support.open_fake(self.node, receiver=False)
+        self.addCleanup(self.transport.close)
+        self.cancel = threading.Event()
+
+    def snap(self):
+        dev = device.Mouse(None, 0xFF)
+        dev.features = {feature: index for index, feature in enumerate(self.kb.features)}
+        dev.transport = hidpp.ProbeTransport(self.transport, 1.0, self.cancel, time.monotonic() + keyboard.REQUEST_BUDGET)
+        return keyboard._snap_switch(dev, 1, time.monotonic() + keyboard.FOLLOW_BUDGET)
+
+    def test_all_up_sends_it_once(self):
+        self.assertEqual(self.snap(), "sent")
+        self.assertEqual(self.kb.switched, [1])
+        self.assertEqual(self.ioctls.ids(), [1, 3, 4])
+
+    def test_the_time_counts_from_the_first_read_not_from_each(self):
+        cases = {0.09: ("sent", [1, 3, 4]), 0.12: ("late", [1, 3, 4]), 0.16: ("unknown", [1, 3])}
+        for each, (expected, asked) in cases.items():
+            with self.subTest(each=each):
+                self.kb.switched.clear()
+                self.ioctls.calls.clear()
+                with Clock(1000.0) as clock:
+                    self.ioctls.wait = lambda _rid, c=clock, step=each: setattr(c, "now", c.now + step)
+                    self.assertEqual(self.snap(), expected)  # each read alone is well within KEYS_FRESH
+                self.assertEqual(self.ioctls.ids(), asked)
+                self.assertEqual(self.kb.switched, [1] if expected == "sent" else [])
+
+    def test_waiting_for_its_turn_counts_too(self):
+        """Read in time, but the mouse's own requests keep the request back past KEYS_FRESH: not sent."""
+        for hold, expected in ((0.6, "late"), (0.05, "sent")):
+            with self.subTest(hold=hold):
+                self.kb.switched.clear()
+                self.kb.delays[device.ROOT] = hold
+                holder = []
+
+                def wait(rid_):
+                    time.sleep(0.1)
+                    if rid_ == 4:  # the mouse's turn comes while the last report is read
+                        thread = threading.Thread(target=lambda: self.transport.ping(0xFF), daemon=True)
+                        thread.start()
+                        holder.append(thread)
+                        time.sleep(0.02)
+                self.ioctls.wait = wait
+                with mock.patch.object(keyboard, "KEYS_FRESH", 0.6):
+                    self.assertEqual(self.snap(), expected)
+                holder[0].join(2.0)
+                self.assertEqual(self.kb.switched, [1] if expected == "sent" else [])
+
+    def test_called_off_while_reading(self):
+        self.ioctls.wait = lambda rid_: self.cancel.set() if rid_ == 4 else None
+        self.assertEqual(self.snap(), "cancelled")
+        self.assertEqual(self.kb.switched, [])
+        self.cancel.clear()
+        self.ioctls.calls.clear()
+        self.ioctls.wait = lambda rid_: self.cancel.set() if rid_ == 1 else None
+        self.assertEqual(self.snap(), "unknown")  # before the next report: not asked
+        self.assertEqual((self.ioctls.ids(), self.kb.switched), ([1], []))
+
+    def test_a_keyboard_gone_while_reading_is_said_to_be(self):
+        self.ioctls.wait = lambda rid_: self.transport.close() if rid_ == 4 else None
+        with self.assertRaises(hidpp.HidppClosed):
+            self.snap()
+        self.assertEqual(self.kb.switched, [])
+
+
+class DeviceHosts(unittest.TestCase):
+    """device.Mouse.get_hosts: what is shown is what it was, and pairing_read says whether the device told it all."""
+
+    def hosts(self, dev_fake):
+        port = FakePort({0xFF: dev_fake}, receiver=False)
+        transport = tests_support.open_fake(port, receiver=False)
+        self.addCleanup(transport.close)
+        dev = device.Mouse(transport, 0xFF)
+        dev.features = {feature: index for index, feature in enumerate(dev_fake.features)}
+        self.assertIs(dev.pairing_read, False)
+        return dev, dev.get_hosts(), port
+
+    def test_what_it_says_and_whether_it_said_it_all(self):
+        cases = {
+            "all told": (PairedKeyboard(), True, [True, True, False], ["desk", "", ""]),
+            "no such feature": (keyboard_device(), False, [True, True, True], ["", "", ""]),
+            "says it cannot": (PairedKeyboard(capable=False), False, [True, True, True], ["", "", ""]),
+            "stops half way": (PairedKeyboard(fail_at=1), False, [True, True, True], ["desk", "", ""]),
+        }
+        for name, (fake, read, paired, names) in cases.items():
+            with self.subTest(name):
+                dev, (current, hosts), _port = self.hosts(fake)
+                self.assertIs(dev.pairing_read, read)
+                self.assertEqual((current, [h["paired"] for h in hosts], [h["name"] for h in hosts]), (0, paired, names))
+
+    def test_it_asks_exactly_what_it_asked_before(self):
+        fake = PairedKeyboard()
+        dev, _hosts, port = self.hosts(fake)
+        info, change = fake.index(device.HOSTS_INFO), fake.index(device.CHANGE_HOST)
+        self.assertEqual([(p[2], p[3] >> 4, p[4:6]) for p in port.written],
+                         [(change, 0, b"\0\0"), (info, 0, b"\0\0"), (info, 1, b"\0\0"), (info, 3, b"\0\0"),
+                          (info, 1, b"\x01\0"), (info, 1, b"\x02\0")])
+        fake.fail_at = 0
+        dev.get_hosts()  # read again, and not all of it this time
+        self.assertIs(dev.pairing_read, False)
 
 
 if __name__ == "__main__":

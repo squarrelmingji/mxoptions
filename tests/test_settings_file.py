@@ -39,14 +39,14 @@ FLOW_KEYS = {
     "enabled": "portable", "id": "local", "peers": "secret", "port": "portable", "push_mm": "portable",
     "corner": "portable", "fullscreen": "portable", "clipboard": "portable", "files": "portable",
     "files_max_mb": "portable", "cue_arrived": "portable", "cue_failed": "portable", "channel": "local",
-    "mouse_follows_keyboard": "portable",
+    "mouse_follows_keyboard": "portable", "keyboard_follows_mouse": "portable",
 }
 
 
 def settings(secret=SECRET, here=LOCAL_ID, channel=2):
     """Settings in use on one made-up computer: paired over Flow, a command and a script on keys, a profile."""
     cfg = copy.deepcopy(config.DEFAULTS)
-    cfg["flow"].update(enabled=True, id=here, channel=channel, mouse_follows_keyboard=True, peers=[{
+    cfg["flow"].update(enabled=True, id=here, channel=channel, mouse_follows_keyboard=True, keyboard_follows_mouse=True, peers=[{
         "key": secret, "id": PEER_ID, "address": PEER_ADDRESS, "name": PEER_NAME, "edge": "left", "edge_at": 1.7e9}])
     cfg["keyboard"]["keys"] = {"0x0f01": {"type": "command", "command": COMMAND},
                                "0x0f02": {"type": "script", "script": SCRIPT, "name": "Synthetic"}}

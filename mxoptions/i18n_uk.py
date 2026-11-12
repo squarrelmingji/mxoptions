@@ -564,6 +564,13 @@ STRINGS = {
     "Only between computers running MX Options; this is not Logitech's Easy-Switch of Options+.":
         "Перемкніть клавіатуру на один із цих комп'ютерів її клавішею Easy-Switch, і миша піде слідом. "
         "Лише між комп'ютерами з MX Options; це не Easy-Switch від Logitech в Options+.",
+    "Keyboard follows the mouse": "Клавіатура йде за мишею",
+    "Send the mouse to one of these computers and the keyboard goes along, when no key is held. Works "
+    "from Linux with a Bluetooth keyboard; not yet tried with a real keyboard. Windows can receive the "
+    "keyboard but cannot send it on; use the keyboard's Easy-Switch key there.":
+        "Перешліть мишу на один із цих комп'ютерів, і клавіатура піде слідом, якщо жодна клавіша не натиснута. "
+        "Працює з Linux із клавіатурою на Bluetooth; зі справжньою клавіатурою ще не перевірено. Windows може "
+        "прийняти клавіатуру, але не передати її далі; там скористайтеся клавішею Easy-Switch клавіатури.",
 
     "What goes along": "Що переходить разом із мишею",
     "Copied text and pictures": "Скопійований текст і зображення",

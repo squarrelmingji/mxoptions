@@ -260,6 +260,14 @@ class FlowPage(ScrollPage):
             _("Switch the keyboard to one of these computers with its Easy-Switch key, and the mouse goes along. "
               "Only between computers running MX Options; this is not Logitech's Easy-Switch of Options+."),
             self.follow))
+        self.lead = Switch()
+        self.lead.toggled.connect(lambda on: self.store.set("flow", "keyboard_follows_mouse", on))
+        self.lead_row = card.add(Row(
+            _("Keyboard follows the mouse"),
+            _("Send the mouse to one of these computers and the keyboard goes along, when no key is held. Works "
+              "from Linux with a Bluetooth keyboard; not yet tried with a real keyboard. Windows can receive the "
+              "keyboard but cannot send it on; use the keyboard's Easy-Switch key there."),
+            self.lead))
         self.crossing_card = card
         self.body.addWidget(card)
 
@@ -539,6 +547,8 @@ class FlowPage(ScrollPage):
         self.fullscreen.set_checked_silently(cfg["fullscreen"])
         self.follow.set_checked_silently(cfg["mouse_follows_keyboard"])
         self.crossing_card.set_row_visible(self.follow_row, self.store.state.get("keyboard") is not None)
+        self.lead.set_checked_silently(cfg["keyboard_follows_mouse"])
+        self.crossing_card.set_row_visible(self.lead_row, self.store.state.get("keyboard") is not None)
         copies = status.get("copies", True)
         self.clipboard.set_checked_silently(cfg["clipboard"] and copies)
         self.clipboard.setEnabled(copies)

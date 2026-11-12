@@ -109,6 +109,22 @@ class Transport:
         with self._admit:
             self._admit.notify_all()
 
+    def can_tell_keys(self):
+        """Whether keys_held() can be asked here: a keyboard on a node of its own, of a kind whose answers are
+        understood (see hid_linux.Port.keys_layout). Reads only what the system says of the node."""
+        return not self.is_receiver and not self._closed and self._port.keys_layout() is not None
+
+    def keys_held(self, stop):
+        """Whether a key of the keyboard on this node is down now: True, False, or None when that cannot be told
+        (see hid_linux.Port.keys_held; ``stop()`` ends the asking). Takes no turn of the HID++ requests: it is not
+        one. Blocks: call it on the keyboard's thread only."""
+        if not self.can_tell_keys():
+            return None
+        try:
+            return self._port.keys_held(stop)
+        except (OSError, ValueError):
+            return None
+
     def _read_loop(self):
         while not self._closed:
             try:
@@ -274,6 +290,18 @@ class ProbeTransport:
 
     def slots(self):
         return self.transport.slots()
+
+    def can_tell_keys(self):
+        return self.transport.can_tell_keys()
+
+    def keys_held(self, until):
+        """Transport.keys_held, given up (None) once ``cancel`` is set or ``until`` or the deadline (time.monotonic)
+        has passed: checked before each read."""
+        limit = min(self.deadline, until)
+
+        def stop():
+            return self.cancel.is_set() or time.monotonic() > limit
+        return None if stop() else self.transport.keys_held(stop)
 
     def request(self, devidx, feat_idx, function, params=b"", timeout=1.5, no_reply=False):
         return self.transport.request(devidx, feat_idx, function, params, timeout=min(timeout, self.timeout),

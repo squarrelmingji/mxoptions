@@ -95,6 +95,36 @@ class Migration(unittest.TestCase):
 
 
 
+class KeyboardFollowsMouse(unittest.TestCase):
+    """flow.keyboard_follows_mouse: off at first, only ever true or false, in the same settings version."""
+
+    load = Migration.load
+
+    def test_off_at_first_and_only_true_or_false(self):
+        self.assertIs(config.DEFAULTS["flow"]["keyboard_follows_mouse"], False)
+        self.assertEqual(config.DEFAULTS["version"], 6)
+        for value, kept in ((True, True), (1, True), ("yes", True), (None, False), (0, False), ([], False)):
+            with self.subTest(value=value):
+                self.assertIs(config.clean({"flow": {"keyboard_follows_mouse": value}})["flow"]["keyboard_follows_mouse"], kept)
+
+    def test_settings_from_before_it_load_with_it_off_and_are_not_written_back(self):
+        stored = copy.deepcopy(config.DEFAULTS)
+        del stored["flow"]["keyboard_follows_mouse"]
+        stored["flow"]["mouse_follows_keyboard"] = True
+        loaded, saved = self.load(stored)
+        self.assertIs(loaded["flow"]["keyboard_follows_mouse"], False)
+        self.assertIs(loaded["flow"]["mouse_follows_keyboard"], True)
+        self.assertEqual(loaded["version"], 6)
+        self.assertNotIn("keyboard_follows_mouse", saved["flow"])  # the same version: nothing was written back
+
+    def test_it_goes_into_a_settings_file_and_back(self):
+        cfg = copy.deepcopy(config.DEFAULTS)
+        cfg["flow"]["keyboard_follows_mouse"] = True
+        raw = config.export_data(cfg)
+        self.assertIs(json.loads(raw)["config"]["flow"]["keyboard_follows_mouse"], True)
+        self.assertIs(config.import_data(raw, config.DEFAULTS)["flow"]["keyboard_follows_mouse"], True)
+
+
 class Keyboard(unittest.TestCase):
     COPY = {"type": "keys", "keys": ["KEY_LEFTCTRL", "KEY_C"]}
     load = Migration.load

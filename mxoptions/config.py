@@ -320,6 +320,7 @@ DEFAULTS = {
         "cue_failed": 0x06,   # ... and when they could not be brought over
         "channel": -1,        # this computer's Easy-Switch channel, noted whenever the mouse is here (-1: not seen yet)
         "mouse_follows_keyboard": False,  # the keyboard switched to another of these computers takes the mouse along
+        "keyboard_follows_mouse": False,  # the mouse sent to another of these computers takes the keyboard along
     },
     # The keyboard: what its keys do, by key_id(control id). A key that is not listed does what it always does.
     # "profiles": [{"app", "name", "keys"}], the first one for the app in front changing what its keys do there
@@ -607,7 +608,7 @@ def _sanitize(cfg):
         click[key] = _waveform(click.get(key, default_click[key]), default_click[key])
     _clamp(cfg, "wheel_click", "volume", 0.0, 1.0, float)
     link = cfg["flow"]
-    for key in ("enabled", "clipboard", "files", "fullscreen", "mouse_follows_keyboard"):
+    for key in ("enabled", "clipboard", "files", "fullscreen", "mouse_follows_keyboard", "keyboard_follows_mouse"):
         link[key] = bool(link.get(key))
     link["peers"] = _flow_peers(link)
     link["id"] = link["id"][:64] if isinstance(link.get("id"), str) else ""

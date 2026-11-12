@@ -167,6 +167,7 @@ class Mouse:
         self.haptic_waveforms = []
         self.force = None  # {"min", "max", "default", "changeable"}
         self.host_count = 0
+        self.pairing_read = False  # get_hosts() last read from the device itself which channels are paired
         self.firmware_entities = 0  # how many DEVICE_INFO tells the firmware of: byte 0 of its answer to identity()
 
     # -- plumbing ---------------------------------------------------------
@@ -437,7 +438,9 @@ class Mouse:
         return None
 
     def get_hosts(self):
-        """Return (current_host, [{"paired": bool, "name": str}, ...])."""
+        """Return (current_host, [{"paired": bool, "name": str}, ...]). A channel the device does not say
+        anything of counts as paired; ``pairing_read`` tells whether it said that of every one."""
+        self.pairing_read = False
         count, current = self.call(CHANGE_HOST, 0)[:2]
         hosts = [{"paired": True, "name": ""} for _ in range(count)]
         if self.has(HOSTS_INFO):
@@ -451,6 +454,7 @@ class Mouse:
                             piece = self.call(HOSTS_INFO, 3, host, len(name))[2:]
                             name += piece[: length - len(name)]
                         hosts[host]["name"] = name.decode("utf-8", "replace").strip("\0 ")
+                    self.pairing_read = True
             except (HidppError, IndexError) as e:
                 log.debug("host names unavailable: %s", e)
         return current, hosts
