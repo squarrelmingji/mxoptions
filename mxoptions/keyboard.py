@@ -246,7 +246,7 @@ class KeyboardSide:
         self._journal = {}
         self._reporting = {}    # cid -> what the keyboard said of it last (see _reporting_of); missing: unknown
         self._active = set()    # keys diverted by this program now
-        self._block = None      # why no key is touched: "rivals" | "identity" | "journal" | "full"
+        self._block = None      # why no key, and no setting, is touched: "rivals" | "identity" | "journal" | "full"
         self._said = None       # the block last written to the log
         self._stalled = False   # the keyboard stopped answering during this round of changes
         self._pressed = set()
@@ -596,7 +596,8 @@ class KeyboardSide:
                 "settings": list(self._seen[2]), "controls": self._shown_controls()}
 
     def _shown_controls(self):
-        return {name: dict(control, busy=name in self._pending or name == self._committing,
+        return {name: dict(control, writable=control["writable"] and self._block is None,
+                           busy=name in self._pending or name == self._committing,
                            outcome=self._outcomes.get(name)) for name, control in self._controls.items()}
 
     # -- settings the keyboard keeps -----------------------------------------------
@@ -606,7 +607,8 @@ class KeyboardSide:
         engine: whatever does not fit a setting the keyboard has, and was read, is dropped."""
         codec = kbsettings.CODECS.get(name) if type(name) is str else None
         control = self._controls.get(name) if codec is not None else None
-        if control is None or not codec.valid(value) or not control["writable"] or control["value"] is None:
+        if (control is None or not codec.valid(value) or not control["writable"] or control["value"] is None
+                or self._block is not None):
             log.debug("keyboard setting change ignored")
             return
         self._pending[name] = value  # one asked for before, and not sent yet, is replaced
@@ -620,6 +622,14 @@ class KeyboardSide:
         a read when one is due; neither while the keyboard may be on its way elsewhere. inf: none to run."""
         at = 0.0 if self._pending and not (self._pressed or self._held) else self._settings_at
         return max(at, self._leaving) if at < float("inf") else at
+
+    def _settings_held(self):
+        """Whether no setting may be changed now: for the reasons no key may be (see _blocked, read afresh), shown
+        as the state's "reason". Then what was asked for and not sent yet is dropped: never sent later."""
+        self._block = self._blocked()
+        if self._block is not None:
+            self._pending.clear()
+        return self._block is not None
 
     def _read_one(self, name, codec, host=None):
         """A task: read setting ``name`` afresh into self._controls; returns (host, what was read). Where it fails,
@@ -668,7 +678,8 @@ class KeyboardSide:
         "not-applied" (it kept what it had), "restored" (it took another value, and the earlier one was sent back),
         "unconfirmed" (it did not say what it has now; read again after RECOVERY_RETRY). Until the setter is on
         its way, the task may be called off (see _want) and the value asked for stays to be sent; from then on it
-        is seen to its end."""
+        is seen to its end, unless no setting may be changed any more (see rivals_changed): then nothing more is
+        sent, as before the setter and before sending back what it had (see _settings_held)."""
         try:
             host, before = yield from self._read_one(name, codec)
         except HidppClosed:
@@ -686,6 +697,8 @@ class KeyboardSide:
         if target is None or target == before["value"]:
             self._pending.pop(name, None)
             return None
+        if self._settings_held():
+            return None
         if self._pressed or self._held or time.monotonic() < self._leaving:
             return None  # a key is down, or the keyboard is on its way: asked again once that is over
         del self._pending[name]  # from here on what is asked for after this is a change of its own
@@ -696,6 +709,8 @@ class KeyboardSide:
         if self._controls[name]["value"] == before["value"]:
             log.info("keyboard setting %s: the keyboard did not take the change", name)
             return "not-applied"
+        if self._settings_held():
+            return "unconfirmed"  # shown as the keyboard has it: nothing sent back
         log.warning("keyboard setting %s: the keyboard took another value; the earlier one is sent back", name)
         outcome = yield from self._send(name, codec, host, before["value"])
         return outcome or ("restored" if self._controls[name]["value"] == before["value"] else "unconfirmed")
@@ -1125,6 +1140,21 @@ class KeyboardSide:
         self._next_recovery = float("inf")
         self.engine._publish()
         self._tell_flow()
+
+    def rivals_changed(self):
+        """Other software for the device started or stopped (engine._rivals). Once a setting may not be changed, a
+        change of it not sent yet is called off; one that may be on its way already is read again, never sent
+        back or on (see _settings_held)."""
+        if self.device is None or not self.online or not self._settings_held():
+            return
+        if self._task is not None and self._task.__name__ == "_write_setting":
+            name, wish = self._committing, self._wish
+            self._stop_task()  # what it has not sent never goes; what was wished for after it still is
+            self._wish = wish
+            if name is not None:
+                self._outcomes[name] = "unconfirmed"
+                self._settings_at = 0.0
+            self._next_task()
 
     def _tell_flow(self):
         """Flow's side of the keyboard coming and going (flow_service.FlowService.on_engine, "keyboard"). An event

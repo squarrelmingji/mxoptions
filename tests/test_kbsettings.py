@@ -154,9 +154,9 @@ class Levels:
 class Base(unittest.TestCase):
     """A rig with an Fn keyboard on slot 1 and a mouse on slot 2, found and read."""
 
-    def make(self, kb=None, keys=None):
+    def make(self, kb=None, keys=None, **rig):
         self.dev = kb or fn_keyboard()
-        self.rig = Rig(self, {1: self.dev, 2: mouse_device()}, keys=keys).start()
+        self.rig = Rig(self, {1: self.dev, 2: mouse_device()}, keys=keys, **rig).start()
         return self.rig
 
     def hold(self, when):
@@ -645,6 +645,168 @@ class LastWins(Base):
         self.assertEqual(self.dev.setting_writes, [(HOSTS, b"\x00\x00"), (HOSTS, b"\x00\x01")])
         self.assertEqual(fn(rig)["value"], False)
         self.assertIsNone(fn(rig)["outcome"])
+
+
+class Guarded(Base):
+    """No setting is changed where no key may be (keyboard.KeyboardSide._blocked): other software for the device
+    running, a keyboard that does not say which one it is, a journal that cannot be read. It is still read."""
+
+    def rivals(self, *names):
+        """Other software is seen to start or stop, as the engine looks for it."""
+        self.rig.rivals = list(names)
+        self.rig.engine._look_for_rivals(time.monotonic())
+
+    def refused(self, rig, reason):
+        self.assertEqual(rig.state()["reason"], reason)
+        self.assertEqual(fn(rig), dict(fn(rig), value=False, writable=False, busy=False))  # read all the same
+        sent = len(rig.port.written)
+        for value in (True, False, True):
+            rig.engine.set_keyboard_setting("fn", value)
+            rig.engine._handle(rig.engine._queue.get(timeout=1.0))
+        rig.settle()
+        self.assertEqual(rig.kb._pending, {})
+        self.assertEqual(rig.port.written[sent:], [])  # not even asked
+        self.assertEqual(self.dev.setting_writes, [])
+
+    def test_never_on_a_keyboard_that_does_not_say_which_one_it_is(self):
+        rig = self.make(fn_keyboard(info=False))
+        self.assertEqual(len(packets(rig.port, self.dev, HOSTS, 0)), 1)
+        self.refused(rig, "identity")
+
+    def test_never_while_other_software_runs_and_again_once_it_has_stopped(self):
+        rig = self.make(rivals=["Solaar"])
+        self.refused(rig, "rivals")
+        self.rivals()
+        self.assertIsNone(rig.state()["reason"])
+        self.assertTrue(fn(rig)["writable"])  # without the keyboard having to be found again
+        rig.settle()
+        self.assertEqual(self.dev.setting_writes, [])  # nothing asked for while it ran is sent now
+        self.set(True)
+        self.assertEqual(self.dev.setting_writes, [(HOSTS, b"\x00\x00")])
+        self.assertEqual(fn(rig), dict(fn(rig), value=True, outcome=None))
+
+    def test_never_while_the_journal_cannot_be_read_and_again_once_it_can(self):
+        rig = self.make(journal="not a journal")
+        self.refused(rig, "journal")
+        os.remove(rig.journal)
+        rig.kb._next_recovery = 0.0  # its time come: the keys are tried again
+        rig.kb.tick(time.monotonic())
+        rig.settle()
+        self.assertIsNone(rig.state()["reason"])
+        self.assertTrue(fn(rig)["writable"])
+        self.set(True)
+        self.assertEqual(self.dev.setting_writes, [(HOSTS, b"\x00\x00")])
+
+    def test_other_software_seen_during_the_read_before_the_change_sends_nothing(self):
+        rig = self.make()
+        entered, release = self.hold(lambda request: request[0] is FnCodec.read)
+        self.set(True, settle=False)
+        self.assertTrue(self.reached(entered))
+        self.rivals("Solaar")
+        self.assertEqual(rig.kb._pending, {})
+        release.set()
+        rig.settle()
+        self.assertEqual(self.dev.setting_writes, [])
+        self.assertEqual(packets(rig.port, self.dev, HOSTS, 1), [])
+        self.assertEqual(fn(rig), dict(fn(rig), value=False, writable=False, busy=False, outcome=None))
+        self.rivals()
+        rig.settle()
+        self.assertEqual(self.dev.setting_writes, [])  # not sent once it has stopped either
+
+    def test_a_journal_gone_bad_during_the_read_before_the_change_sends_nothing(self):
+        rig = self.make()
+        entered, release = self.hold(lambda request: request[0] is FnCodec.read)
+        self.set(True, settle=False)
+        self.assertTrue(self.reached(entered))
+        with open(rig.journal, "w") as f:
+            f.write("not a journal")
+        release.set()
+        rig.settle()
+        self.assertEqual(self.dev.setting_writes, [])
+        self.assertEqual(rig.state()["reason"], "journal")
+        self.assertEqual(fn(rig), dict(fn(rig), value=False, writable=False, busy=False, outcome=None))
+        self.assertEqual(rig.kb._pending, {})
+
+    def test_a_setter_waiting_behind_the_mouse_is_called_off_once_other_software_is_seen(self):
+        rig = self.make()
+        mouse = rig.port.devices[2]
+        entered, release = self.hold(lambda request: request[0] is FnCodec.write)
+        self.set(True, settle=False)
+        self.assertTrue(self.reached(entered))  # on the keyboard's thread, not asked of the receiver yet
+        mouse.delay = 0.5  # the mouse's own request holds the receiver meanwhile
+        foreground = threading.Thread(target=rig.transport().request, args=(2, 0, 1, bytes([0, 0, 1])))
+        foreground.start()
+        time.sleep(0.05)
+        release.set()
+        time.sleep(0.1)
+        self.assertTrue(rig.transport()._busy)
+        self.assertIs(rig.kb._asked[0], FnCodec.write)  # waiting for its turn
+        rig.kb.device_action({"type": "host", "host": 1}, "press")  # waits for the change to be over
+        self.rivals("Solaar")
+        foreground.join()
+        rig.settle()
+        self.assertEqual(self.dev.setting_writes, [])
+        self.assertEqual(packets(rig.port, self.dev, HOSTS, 1), [])
+        self.assertEqual(self.dev.switched, [1])  # what was wished for after it still goes
+        self.assertEqual(fn(rig), dict(fn(rig), writable=False, busy=False, outcome="unconfirmed"))
+        self.assertEqual(rig.kb._settings_at, 0.0)  # read again: whether it went is for the keyboard to say
+
+    def taken(self, gone_bad):
+        """The made-up four-value codec: the keyboard takes 3 for 2; ``gone_bad`` makes changes not allowed while
+        the read back is on its way. Returns the rig, after."""
+        kb = keyboard_device(settings={0x7F01: [1]})
+        kb.taken[0x7F01] = [3]
+        rig = self.make(kb)
+        entered, release = self.hold(lambda request: request[0] is Levels.read and kb.setting_writes)
+        rig.kb.set_setting("level", 2)
+        self.assertTrue(self.reached(entered))
+        gone_bad(rig)
+        release.set()
+        rig.settle()
+        self.assertEqual(kb.setting_writes, [(0x7F01, b"\x02")])  # never the earlier value sent back
+        return rig
+
+    def test_other_software_seen_after_the_setter_nothing_is_sent_back(self):
+        with mock.patch.dict(kbsettings.CODECS, level=Levels):
+            rig = self.taken(lambda rig: self.rivals("Solaar"))
+            self.assertEqual(rig.state()["controls"]["level"], dict(rig.state()["controls"]["level"], value=3,
+                                                                    writable=False, busy=False, outcome="unconfirmed"))
+
+    def test_a_journal_gone_bad_after_the_setter_nothing_is_sent_back(self):
+        def gone_bad(rig):
+            with open(rig.journal, "w") as f:
+                f.write("not a journal")
+        with mock.patch.dict(kbsettings.CODECS, level=Levels):
+            rig = self.taken(gone_bad)
+            self.assertEqual(rig.state()["controls"]["level"], dict(rig.state()["controls"]["level"], value=3,
+                                                                    writable=False, busy=False, outcome="unconfirmed"))
+
+    def test_a_change_waiting_for_a_key_is_dropped_once_other_software_is_seen(self):
+        rig = self.make(keys={"0x0f01": COPY})
+        rig.keys_down(1, self.dev, 0x0F01)
+        self.set(True)
+        self.assertEqual(rig.kb._pending, {"fn": True})
+        self.rivals("Solaar")
+        self.rivals()
+        rig.keys_down(1, self.dev)
+        rig.settle()
+        self.assertEqual(self.dev.setting_writes, [])  # asked for before: never sent after
+        self.assertTrue(fn(rig)["writable"])
+        self.set(True)  # asked for afresh: sent
+        self.assertEqual(self.dev.setting_writes, [(HOSTS, b"\x00\x00")])
+
+    def test_other_software_seen_with_no_keyboard_or_no_change_under_way(self):
+        rig = self.make()
+        self.rivals("Solaar")
+        self.assertIsNone(rig.kb._task)
+        self.assertEqual(fn(rig), dict(fn(rig), value=False, writable=False))
+        self.rivals()
+        rig.link(1, False)
+        self.rivals("Solaar")
+        self.rivals()
+        rig.link(1, True)
+        rig.settle()
+        self.assertTrue(fn(rig)["writable"])
 
 
 class Mouse(Base):

@@ -379,6 +379,7 @@ class Engine:
         found = environment.rivals()
         if found != self._rivals:
             self._rivals = found
+            self.keyboard.rivals_changed()
             if found:
                 log.warning("%s is running too: it and this program will undo each other's settings of the mouse", " and ".join(found))
             self._publish()
