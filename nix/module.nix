@@ -41,6 +41,7 @@ in
     environment.systemPackages = [ package ];
 
     # $out/lib/udev/rules.d/70-mxoptions.rules: access to Logitech HID++ devices and to uinput.
+    # Its Bluetooth rule for devices still without a vendor runs $out/lib/udev/mxoptions-hidpp-check.py.
     services.udev.packages = [ cfg.package ];
     boot.kernelModules = [ "uinput" ];
 

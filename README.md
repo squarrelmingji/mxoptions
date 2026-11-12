@@ -318,8 +318,10 @@ it still runs, and starting it again from the menu opens the window.
 ## Permissions
 
 The app talks to the mouse through its `hidraw` device and sends key presses, clicks and scrolling
-through `/dev/uinput`. Neither is open to ordinary users by default. `data/70-mxoptions.rules`
-grants both to whoever is logged in at the computer:
+through `/dev/uinput`. Neither is open to ordinary users by default. `data/70-mxoptions.rules.in`
+grants both to whoever is logged in at the computer. A Bluetooth mouse that appears before BlueZ
+has read its vendor (the IDs are still 0000) gets access only when its report descriptor
+describes a HID++ mouse and no keyboard:
 
 ```sh
 sudo make udev

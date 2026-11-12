@@ -76,7 +76,11 @@ python3Packages.buildPythonApplication (finalAttrs: {
   postInstall = ''
     install -Dm644 data/mxoptions.desktop "$out/share/applications/mxoptions.desktop"
     install -Dm644 mxoptions/assets/icon.svg "$out/share/icons/hicolor/scalable/apps/mxoptions.svg"
-    install -Dm644 data/70-mxoptions.rules "$out/lib/udev/rules.d/70-mxoptions.rules"
+    install -Dm644 /dev/null "$out/lib/udev/rules.d/70-mxoptions.rules"
+    substitute data/70-mxoptions.rules.in "$out/lib/udev/rules.d/70-mxoptions.rules" \
+      --replace-fail "@UDEVPYTHON@" "${python3Packages.python.interpreter}" \
+      --replace-fail "@UDEVHELPER@" "$out/lib/udev/mxoptions-hidpp-check.py"
+    install -Dm644 mxoptions/hid_linux.py "$out/lib/udev/mxoptions-hidpp-check.py"
 
     install -Dm644 README.md "$out/share/doc/mxoptions/README.md"
     install -Dm644 docs/API.md "$out/share/doc/mxoptions/API.md"

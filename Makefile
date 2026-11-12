@@ -27,6 +27,9 @@ docdir = $(datadir)/doc/mxoptions
 licensedir = $(datadir)/licenses/mxoptions
 unitdir = $(PREFIX)/lib/systemd/user
 udevdir = /etc/udev/rules.d
+# the udev rules run a root-owned copy of mxoptions/hid_linux.py, installed next to rules.d, with this Python
+udevhelper = $(patsubst %/rules.d,%,$(udevdir))/mxoptions-hidpp-check.py
+udevpython = /usr/bin/python3
 # empty: leave the udev rules out (a per-user installation cannot place them)
 UDEV = yes
 
@@ -34,7 +37,14 @@ user_prefix = $(HOME)/.local
 user_unitdir = $(or $(XDG_CONFIG_HOME),$(HOME)/.config)/systemd/user
 python_path = $(shell command -v $(PYTHON))
 substitute = sed -e 's|@BINDIR@|$(bindir)|g' -e 's|@LIBDIR@|$(libdir)|g' -e 's|@DOCDIR@|$(docdir)|g' \
-	-e 's|@PYTHON@|$(python_path)|g'
+	-e 's|@PYTHON@|$(python_path)|g' -e 's|@UDEVHELPER@|$(udevhelper)|g' -e 's|@UDEVPYTHON@|$(udevpython)|g'
+
+define install_udev
+install -d "$(DESTDIR)$(udevdir)"
+$(substitute) data/70-mxoptions.rules.in > "$(DESTDIR)$(udevdir)/70-mxoptions.rules"
+chmod 644 "$(DESTDIR)$(udevdir)/70-mxoptions.rules"
+install -Dm644 mxoptions/hid_linux.py "$(DESTDIR)$(udevhelper)"
+endef
 
 .PHONY: all build test check wheel deb deb-test rpm dist aur run screenshots install install-user uninstall uninstall-user enable disable udev clean
 
@@ -106,7 +116,7 @@ install: build
 	install -Dm644 docs/API.md "$(DESTDIR)$(docdir)/API.md"
 	install -Dm644 LICENSE "$(DESTDIR)$(licensedir)/LICENSE"
 ifeq ($(UDEV),yes)
-	install -Dm644 data/70-mxoptions.rules "$(DESTDIR)$(udevdir)/70-mxoptions.rules"
+	$(install_udev)
 endif
 
 uninstall:
@@ -115,7 +125,7 @@ uninstall:
 		"$(DESTDIR)$(datadir)/applications/mxoptions.desktop" \
 		"$(DESTDIR)$(datadir)/icons/hicolor/scalable/apps/mxoptions.svg"
 ifeq ($(UDEV),yes)
-	rm -f "$(DESTDIR)$(udevdir)/70-mxoptions.rules"
+	rm -f "$(DESTDIR)$(udevdir)/70-mxoptions.rules" "$(DESTDIR)$(udevhelper)"
 endif
 
 install-user:
@@ -138,11 +148,14 @@ enable:
 disable:
 	-systemctl --user disable --now mxoptions.service
 
+# with DESTDIR set this only stages the files and leaves the running system alone
 udev:
-	install -Dm644 data/70-mxoptions.rules "$(DESTDIR)$(udevdir)/70-mxoptions.rules"
+	$(install_udev)
+ifeq ($(DESTDIR),)
 	-udevadm control --reload-rules
 	-udevadm trigger --subsystem-match=hidraw
 	-udevadm trigger --sysname-match=uinput
+endif
 
 # The AUR keeps every package in a git repository of its own; pushing to it publishes.
 aur:
