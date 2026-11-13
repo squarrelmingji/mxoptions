@@ -1,0 +1,199 @@
+{
+  "about": "Hardware checks a stable release needs (ops/ship/hwgate.py). Code merges never wait for them. A capability applies when one of its `present` probes matches the commit: a file glob, then a regex searched in each matching file. Every `require` check of an applying capability needs a `pass` for that build. A pull request that adds or changes a device capability, or a device-side file, updates this file in the same pull request.",
+  "paths": [
+    "mxoptions/actions.py",
+    "mxoptions/api.py",
+    "mxoptions/app.py",
+    "mxoptions/config.py",
+    "mxoptions/device.py",
+    "mxoptions/engine.py",
+    "mxoptions/flow_service.py",
+    "mxoptions/front.py",
+    "mxoptions/hid_linux.py",
+    "mxoptions/hid_windows.py",
+    "mxoptions/hidpp.py",
+    "mxoptions/kbsettings.py",
+    "mxoptions/keyboard*.py",
+    "mxoptions/paths.py",
+    "mxoptions/vinput*.py",
+    "mxoptions/windows.py",
+    "mxoptions/x11.py",
+    "mxoptions/ui/action_picker.py",
+    "mxoptions/ui/editors.py",
+    "mxoptions/ui/flow_page.py",
+    "mxoptions/ui/keyboard*.py",
+    "mxoptions/ui/main_window.py",
+    "mxoptions/ui/pages.py",
+    "mxoptions/ui/store.py",
+    "data/70-mxoptions.rules*",
+    "data/mxoptions.service.in"
+  ],
+  "ungated": [
+    "mxoptions/__init__.py",
+    "mxoptions/__main__.py",
+    "mxoptions/assets/*",
+    "mxoptions/clipboard.py",
+    "mxoptions/desktop.py",
+    "mxoptions/environment.py",
+    "mxoptions/firmware.py",
+    "mxoptions/flow.py",
+    "mxoptions/flow_edges.py",
+    "mxoptions/flow_files.py",
+    "mxoptions/flow_pairing.py",
+    "mxoptions/gestures.py",
+    "mxoptions/i18n.py",
+    "mxoptions/i18n_uk.py",
+    "mxoptions/keys.py",
+    "mxoptions/rawmouse_windows.py",
+    "mxoptions/rumble.py",
+    "mxoptions/rumble_windows.py",
+    "mxoptions/ui/__init__.py",
+    "mxoptions/ui/gestures_page.py",
+    "mxoptions/ui/icons.py",
+    "mxoptions/ui/mouse_*.py",
+    "mxoptions/ui/recorder.py",
+    "mxoptions/ui/ring*.py",
+    "mxoptions/ui/sounds.py",
+    "mxoptions/ui/theme.py",
+    "mxoptions/ui/tray_icon.py",
+    "mxoptions/ui/widgets.py",
+    "mxoptions/ui/*.qml",
+    "data/mxoptions.desktop",
+    "data/mxoptions.in"
+  ],
+  "checks": {
+    "shared-receiver": "Keyboard and mouse on one Bolt receiver: both found; a remapped key works during a mouse gesture.",
+    "mixed-connections": "Keyboard on Bluetooth with the mouse on Bolt, then both on Bluetooth: both found, remapped keys work.",
+    "service-stop-restores-keys": "Remap a key, then stop the user service: the key does its own function again.",
+    "crash-recovery": "Kill the app with SIGKILL while a key is remapped: key state noted; restart recovers it; state after a keyboard power cycle noted.",
+    "easy-switch-away": "Press the keyboard's Easy-Switch key to a computer without MX Options while a key is remapped: note whether the key works natively there or is dead.",
+    "sleep-wake": "Sleep and wake the computer: remapped keys work again.",
+    "receiver-replug": "Unplug and replug the receiver with both devices on it: both found again, remapped keys work.",
+    "keyboard-battery": "Keyboard battery level shown; the low-battery notice appears.",
+    "top-row-fn-modes": "Fn+Esc in both modes: note which control IDs a remapped top-row key reports.",
+    "bluetooth-zero-id-access": "Keyboard attached over Bluetooth with a zero product ID: note the access result; no udev rule change.",
+    "windows-keyboard": "Windows 11 with Logi Options+ stopped: keyboard found; remap, restore and held keys behave.",
+    "shared-receiver-mouse-latency": "Mouse request latency while the keyboard is probed on a shared receiver, measured from the debug log.",
+    "keyboard-identity": "Keyboard identity read with a non-zero unit ID; same over Bolt and Bluetooth and after a power cycle; differs between two units when two are available. Identifiers stay in private notes, never in the evidence record.",
+    "mouse-follows-keyboard": "Mouse-follows-keyboard on, press the keyboard's Easy-Switch key: the mouse moves to the same computer; latency noted; mouse-in-deep-sleep case noted; three-computer case.",
+    "keyboard-follow-held-key-check": "Keyboard follows the mouse over Flow: with no key held it follows; holding Shift, a letter key, or a media key not set to an app action, it stays; each direction and connection noted. From a Windows computer it stays (unsupported): there the keyboard's Easy-Switch key brings it back.",
+    "keyboard-follow-held-key-at-switch": "Hold a key physically during an Easy-Switch: note what the old and the new computer see.",
+    "keyboard-follow-two-computers": "Two Linux computers paired over Flow: the keyboard follows the mouse both ways, keys given back before the switch, no dead keys, 40 crossings in one session.",
+    "app-profiles-desktops": "Keyboard app profiles change keys for the app in front on KDE Wayland, X11, sway, Hyprland and Windows; GNOME shows the not-available message.",
+    "fn-lock-setting": "Toggle the Fn lock switch: the top row flips. The keyboard's own Fn-lock shortcut: the switch follows within a second. Easy-Switch away and back: setting kept per channel as the keyboard keeps it. Power cycle: kept. Toggle while holding F5 with the mouse, then release: no stuck key.",
+    "disable-keys-setting": "Disable and enable each advertised key; rapid changes preserve both choices. Check power cycle, a native modifier held during change, and a remapped key. Restore earlier disable setting first, then press and release any stuck modifier on original computer.",
+    "os-layout-setting": "Change layout on current channel and read it back; check keyboard shortcut, remapped keys and a held native modifier. Restore earlier layout first, then press and release affected modifier on original computer. Record other-channel behavior when available.",
+    "backlight-settings": "Exercise every enabled backlight control and each timer; read-only or unsupported controls stay disabled. Check keyboard brightness keys and notices, own-change suppression, power cycle and preserved settings. Record unsupported controls without claiming them implemented.",
+    "backlight-effect-ids-observed": "Choose each backlight effect with the keyboard's own effect key and run tools/hidpp_probe.py --json after each: the effect byte read back equals the ID this build names for the effect the keyboard shows, for every effect, the same over two full cycles. Any mismatch is a fail; effects then stay a hint.",
+    "lock-key-notices": "Turn lock-key notices on: Caps Lock and Num Lock toggles show the right notice; off shows nothing."
+  },
+  "groups": [
+    {
+      "id": "keyboard",
+      "present": [
+        "mxoptions/keyboard.py:^class KeyboardSide\\b"
+      ],
+      "require": [
+        "shared-receiver",
+        "mixed-connections",
+        "service-stop-restores-keys",
+        "crash-recovery",
+        "easy-switch-away",
+        "sleep-wake",
+        "receiver-replug",
+        "keyboard-battery",
+        "shared-receiver-mouse-latency",
+        "keyboard-identity"
+      ],
+      "record": [
+        "top-row-fn-modes",
+        "bluetooth-zero-id-access",
+        "windows-keyboard"
+      ]
+    },
+    {
+      "id": "mouse-follows-keyboard",
+      "present": [
+        "mxoptions/config.py:^\\s*\"mouse_follows_keyboard\":"
+      ],
+      "require": [
+        "mouse-follows-keyboard"
+      ]
+    },
+    {
+      "id": "keyboard-follows-mouse",
+      "present": [
+        "mxoptions/config.py:^\\s*\"keyboard_follows_mouse\":"
+      ],
+      "require": [
+        "keyboard-follow-held-key-check",
+        "keyboard-follow-held-key-at-switch",
+        "keyboard-follow-two-computers"
+      ]
+    },
+    {
+      "id": "keyboard-app-profiles",
+      "present": [
+        "mxoptions/config.py:^def _keyboard_profiles\\("
+      ],
+      "require": [
+        "app-profiles-desktops"
+      ]
+    },
+    {
+      "id": "fn-lock",
+      "present": [
+        "mxoptions/*.py:\\bdevice\\.FN_INVERSION(_HOSTS|_DEFAULT)?\\b"
+      ],
+      "require": [
+        "fn-lock-setting"
+      ]
+    },
+    {
+      "id": "disable-keys",
+      "present": [
+        "mxoptions/*.py:\\bdevice\\.DISABLE_KEYS(_BY_USAGE)?\\b"
+      ],
+      "require": [
+        "disable-keys-setting"
+      ]
+    },
+    {
+      "id": "os-layout",
+      "present": [
+        "mxoptions/*.py:\\bdevice\\.(DUAL|MULTI)_PLATFORM\\b"
+      ],
+      "require": [
+        "os-layout-setting"
+      ]
+    },
+    {
+      "id": "backlight",
+      "present": [
+        "mxoptions/*.py:\\bdevice\\.(BACKLIGHT_[123]|ILLUMINATION)\\b"
+      ],
+      "require": [
+        "backlight-settings"
+      ]
+    },
+    {
+      "id": "backlight-effects",
+      "present": [
+        "mxoptions/*.py:\\b(Breathing|Reaction)\\b"
+      ],
+      "require": [
+        "backlight-effect-ids-observed"
+      ]
+    },
+    {
+      "id": "lock-key-notices",
+      "present": [
+        "mxoptions/*.py:\\bdevice\\.LOCK_KEY_STATE\\b",
+        "mxoptions/config.py:\"lock_notices\""
+      ],
+      "require": [
+        "lock-key-notices"
+      ]
+    }
+  ]
+}
