@@ -820,6 +820,49 @@ STRINGS = {
     "does not change them yet.":
         "Клавіатура має підсвітку з власними налаштуваннями, які задають на самій клавіатурі, як описано в її "
         "посібнику. MX Options поки їх не змінює.",
+    "Backlight on": "Підсвітку ввімкнено",
+    "The keyboard keeps these settings itself; its own backlight keys change them too. MX Options does not store them.":
+        "Клавіатура зберігає ці налаштування сама; її власні клавіші підсвітки теж їх змінюють. MX Options їх не зберігає.",
+    "MX Options does not change the backlight of this keyboard; its own keys do.":
+        "MX Options не змінює підсвітку цієї клавіатури; це роблять її власні клавіші.",
+    "Brightness is set with the keyboard's keys just now. Choose Automatic or Fixed to set it here.":
+        "Зараз яскравість задано клавішами клавіатури. Виберіть «Авто» або «Стала», щоб задати її тут.",
+    "Brightness is set with the keyboard's keys.": "Яскравість задають клавішами клавіатури.",
+    "The keyboard uses a brightness setting MX Options does not know; it is left as it is.":
+        "Клавіатура використовує налаштування яскравості, якого MX Options не знає; його залишено як є.",
+    "Brightness and timing are set with the keyboard's keys; newer keyboard firmware may let MX Options set them too.":
+        "Яскравість і час задають клавішами клавіатури; новіша прошивка клавіатури може дозволити MX Options задавати "
+        "їх теж.",
+    "Fixed": "Стала",
+    "Automatic brightness": "Автоматична яскравість",
+    "Fixed brightness": "Стала яскравість",
+    "Brightness level": "Рівень яскравості",
+    "Backlight brightness level": "Рівень яскравості підсвітки",
+    "Dimmer": "Тьмяніше",
+    "Brighter": "Яскравіше",
+    "Steps 0 to {top}, as the keyboard counts them. In Automatic, the light around the keyboard sets the brightness.":
+        "Кроки від 0 до {top}, як їх лічить клавіатура. В режимі «Авто» яскравість задає світло навколо клавіатури.",
+    "Off after, hands away": "Вимкнення, руки далеко",
+    "Backlight off after, hands away": "Вимкнення підсвітки, руки далеко",
+    "How long the backlight stays on after you type, once your hands move away.":
+        "Скільки підсвітка світить після набору, коли руки відійшли від клавіатури.",
+    "Off after, hands near": "Вимкнення, руки поруч",
+    "Backlight off after, hands near": "Вимкнення підсвітки, руки поруч",
+    "How long the backlight stays on after you type, while your hands stay near the keyboard.":
+        "Скільки підсвітка світить після набору, поки руки лишаються поруч із клавіатурою.",
+    "Off after, plugged in": "Вимкнення, під час заряджання",
+    "Backlight off after, plugged in": "Вимкнення підсвітки під час заряджання",
+    "How long the backlight stays on after you type, while the keyboard is charging over USB.":
+        "Скільки підсвітка світить після набору, поки клавіатура заряджається через USB.",
+    "Not known": "Невідомо",
+    "{} h": "{} год",
+    "{} min": "{} хв",
+    "{} s": "{} с",
+    "Off at low battery": "Вимкнення при низькому заряді",
+    "Shown as the keyboard reports it. MX Options does not change this yet.":
+        "Показано так, як повідомляє клавіатура. MX Options поки цього не змінює.",
+    "Show a notice when the brightness changes on the keyboard": "Показувати сповіщення, коли яскравість змінюється на клавіатурі",
+    "Keyboard backlight: level {level} of {top}": "Підсвітка клавіатури: рівень {level} з {top}",
     "Operating system layout": "Розкладка для операційної системи",
     "The keyboard can be set up for the layout of another operating system, on the keyboard itself as its guide "
     "describes. MX Options does not change this yet.":

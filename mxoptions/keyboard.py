@@ -124,6 +124,16 @@ def low_battery(armed, battery):
     return False, armed
 
 
+def level_notice(seen, found):
+    """What to say now of a brightness the keyboard reported: (``seen``, None), or (the notice's number, (level, top))
+    once for each notice, and only while the keyboard is connected. ``seen``: the number last said (0 at first);
+    ``found``: the keyboard's state (KeyboardSide.state), or None."""
+    notice = found.get("notice") if found and found.get("connected") else None
+    if notice is None or notice["seq"] <= seen:
+        return seen, None
+    return notice["seq"], (notice["level"], notice["top"])
+
+
 def _set_reporting(dev, cid, divert):
     """Divert a key, or give it back: setCidReporting with the (temporary) divert bit and its "valid" bit alone,
     never the persistent ones. True if the keyboard echoed it back."""
@@ -262,6 +272,8 @@ class KeyboardSide:
         self._outcomes = {}     # name -> how the last change went, when not as asked (see _change)
         self._settings_at = float("inf")  # time.monotonic from which its settings are to be read again
         self._committing = None  # the setting whose new value is on its way: that task is not called off
+        self._notice_seq = 0    # notices of a brightness the keyboard reported, made so far (never counts down)
+        self._level_reset()
         self._seen = None       # (name, keys, settings) of the keyboard last connected, while it is away
         self._slots = {}        # transport -> {devidx: what is there, see device.probe_slot; "pending" while looked at}
         self._generation = 0    # results of looks started before the last change of this number are dropped
@@ -351,6 +363,7 @@ class KeyboardSide:
         self._battery, self._hosts, self._failed, self._leaving = battery, hosts, None, 0.0
         self._firmware, self._firmware_due = None, True
         self._controls, self._pending, self._outcomes, self._settings_at = {}, {}, {}, 0.0
+        self._level_reset()
         self._sent_at, self.link, self.last_drop = None, flow_link(identity), None
         log.info("found %s on %s slot %s", dev.name, transport.path, dev.devidx)
         self._tell_flow()
@@ -387,6 +400,8 @@ class KeyboardSide:
         elif feature == device.WIRELESS_DEVICE_STATUS and event == 0 and data[1] == 1:
             self._again(True)  # power-cycled: loaded again, and what its keys report read afresh
         elif any(feature in codec.features for codec in kbsettings.CODECS.values()):
+            if feature == device.BACKLIGHT_2 and event == 0:
+                self._level_event += 1  # its brightness changed, it says: a fresh read compares (see _brightness)
             self._settings_at = 0.0  # changed on the keyboard, maybe: read again, never taken from the report
             if self._task is None:
                 self._next_task()
@@ -593,7 +608,8 @@ class KeyboardSide:
                 "current_host": self._hosts[0], "hosts": copy.deepcopy(self._hosts[1]) if connected else [],
                 "keys": copy.deepcopy(self._seen[1]), "reason": self._block if dev is not None else None,
                 "failed": self._failed if connected else None, "firmware": self._firmware if connected else None,
-                "settings": list(self._seen[2]), "controls": self._shown_controls()}
+                "settings": list(self._seen[2]), "controls": self._shown_controls(),
+                "notice": dict(self._notice) if connected and self._notice else None}
 
     def _shown_controls(self):
         shown = {}
@@ -643,12 +659,87 @@ class KeyboardSide:
         try:
             if host is None and codec.needs_host(self.device):
                 host = yield (kbsettings.current_host, self._hosts[0])
+            events = self._level_event  # the brightness changes reported before this read (see _brightness)
             read = yield (codec.read, host)
-        except Exception:
+        except Exception as e:
             self._controls[name] = {"value": None, "default": None, "writable": False}
+            if name == kbsettings.BACKLIGHT:
+                self._level_read = None
+                if not isinstance(e, HidppClosed) and (self._level_own or self._level_event > self._level_handled):
+                    self._level_recheck()  # a report or a change of its own is still to be settled: read later
             raise
         self._controls[name] = dict(read, writable=read.get("writable", True) is True)  # where it says, it counts
+        if name == kbsettings.BACKLIGHT:
+            self._level_read = (read, events)
+            self._brightness(read, events)
         return host, read
+
+    # The brightness the keyboard reports changed (BACKLIGHT_2 event 0), told as a notice where the settings ask for
+    # one. The report only says that it changed: a fresh read says to what, and is compared with the level last
+    # settled (_level_seen). A report is settled (_level_handled reaching _level_event) only by a read made wholly
+    # after it that says the level for certain; until then it stays to be settled, whatever else is read or changed.
+    # From the moment this program sends a change of the backlight (_level_own) until a read after that change says
+    # the level for certain, what is reported is taken as that change, and settled without a word: what changed it
+    # cannot be told apart then, so a change made on the keyboard in that time, or reported before and not settled
+    # yet, may go unsaid; it never holds up the change. Nothing here says what changed it, only to what level.
+
+    def _level_reset(self):
+        self._level_seen = None   # the level last settled, None: none yet on this connection
+        self._level_event = 0     # brightness changes reported on this connection
+        self._level_handled = 0   # of those, settled
+        self._level_own = False   # a change of the backlight sent by this program is not settled yet
+        self._level_read = None   # (the last backlight read, _level_event before it), None: it failed
+        self._notice = None       # the notice last made: {"seq", "kind", "level", "top"}
+
+    @staticmethod
+    def _level_certain(read):
+        """Whether ``read`` says the level for certain."""
+        return read is not None and read["levels"] is not None and read["shown_level"] is not None
+
+    @classmethod
+    def _level_comparable(cls, read):
+        """Whether ``read`` says enough to compare the level: for certain, and a mode it knows while on."""
+        return cls._level_certain(read) and not (read["value"]["on"] and read["value"]["mode"] is None)
+
+    def _level_recheck(self):
+        """Have the backlight read again after RECOVERY_RETRY, unless a read is due before that."""
+        self._settings_at = min(self._settings_at, time.monotonic() + RECOVERY_RETRY)
+
+    def _brightness(self, read, events):
+        """A fresh backlight read ``read``, made after ``events`` reports: what it settles, and the notice it makes."""
+        if self._level_own:
+            if self._committing != kbsettings.BACKLIGHT:  # the change is over: a read now settles it, if it can
+                self._own_settled(read, events)
+            return
+        if self._level_event != events:
+            return  # reported again while this was read: the read due says more
+        if not self._level_comparable(read):
+            if events > self._level_handled:
+                self._level_recheck()
+            return
+        level, value = read["shown_level"], read["value"]
+        if (self._level_seen is not None and events > self._level_handled and level != self._level_seen
+                and value["on"] and value["mode"] in ("none", "keys", "manual")
+                and self.engine.cfg["keyboard"].get("notices") is True):
+            self._notice_seq += 1
+            self._notice = {"seq": self._notice_seq, "kind": "backlight", "level": level, "top": read["levels"] - 1}
+            self.engine._publish()
+        self._level_seen, self._level_handled = level, events
+
+    def _own_settled(self, read, events):
+        """The change this program sent is settled by ``read`` (made after ``events`` reports), without a word, if
+        it says the level for certain and nothing was reported meanwhile; otherwise read again later."""
+        if self._level_certain(read) and self._level_event == events:
+            self._level_seen, self._level_handled, self._level_own = read["shown_level"], events, False
+        else:
+            self._level_recheck()
+
+    def _level_again(self):
+        """Whether the backlight is to be read once more before its setter goes: a change was reported while it was
+        read, which a read wholly after it can still tell as a notice before this program's change hides it."""
+        read, events = self._level_read
+        return (not self._level_own and self._level_event != events and self._level_comparable(read)
+                and self.engine.cfg["keyboard"].get("notices") is True)
 
     def _read_settings(self):
         """A task: what the keyboard says of each setting it has that kbsettings knows. One left unanswered ends the
@@ -673,11 +764,13 @@ class KeyboardSide:
         self.engine._publish()
         try:
             self._outcomes[name] = yield from self._change(name, kbsettings.CODECS[name])
+            if self._committing == kbsettings.BACKLIGHT:  # sent: the last read settles it, if it can (_brightness)
+                self._own_settled(*(self._level_read or (None, None)))
         finally:
             self._committing = None
         self.engine._publish()
 
-    def _change(self, name, codec):
+    def _change(self, name, codec, again=True):
         """A task: read the setting; if it is not the value asked for (laid over that reading, where the setting
         has kbsettings' ``target``), and the keyboard lets it be changed, send that once and read it back. Where the
         keyboard then has something else again, send back what it had and read that. Returns None when the
@@ -687,7 +780,9 @@ class KeyboardSide:
         and, as read back, does not let the earlier be set or no longer has it: nothing sent back). Until the setter
         is on its way, the task may be called off (see _want) and the value asked for stays to be sent; from then on it
         is seen to its end, unless no setting may be changed any more (see rivals_changed): then nothing more is
-        sent, as before the setter and before sending back what it had (see _settings_held)."""
+        sent, as before the setter and before sending back what it had (see _settings_held). A setting with
+        kbsettings' ``fields`` is asked for some fields only: only they count, and what it had before is sent back
+        laid over what the keyboard has then. ``again``: the backlight may be read once more first (_level_again)."""
         try:
             host, before = yield from self._read_one(name, codec)
         except HidppClosed:
@@ -704,37 +799,54 @@ class KeyboardSide:
         request = self._pending.get(name)
         if request is None:
             return None
+        fields = getattr(codec, "fields", None)
+
+        def seen(read):  # what counts of a reading: the fields asked for, or the whole value
+            return fields(read, request) if fields else read["value"]
+        old = seen(before)
         try:  # what to send, from what was just read: a whole value laid over by what was asked of it, or it alone
             if not self._controls[name]["writable"]:
                 raise kbsettings.Unsupported("the keyboard does not let it be changed")
-            target = codec.target(before, request) if hasattr(codec, "target") else request
+            if fields and old == request:
+                target = None  # so already: nothing to send
+            else:
+                target = codec.target(before, request) if hasattr(codec, "target") else request
         except kbsettings.Unsupported:
             self._pending.pop(name, None)
             return "unsupported"
-        if target == before["value"]:
+        wanted = request if fields else target
+        if old == wanted:
             self._pending.pop(name, None)
             return None
         if self._settings_held():
             return None
         if self._pressed or self._held or time.monotonic() < self._leaving:
             return None  # a key is down, or the keyboard is on its way: asked again once that is over
+        if again and name == kbsettings.BACKLIGHT and self._level_again():
+            return (yield from self._change(name, codec, False))  # all of it once more, on that read
         del self._pending[name]  # from here on what is asked for after this is a change of its own
         self._committing = name
+        if name == kbsettings.BACKLIGHT:
+            self._level_own = True  # what the keyboard reports from now on may be this change (see _brightness)
         outcome = yield from self._send(name, codec, host, target)
-        if outcome is not None or self._controls[name]["value"] == target:
+        if outcome is not None or seen(self._controls[name]) == wanted:
             return outcome
-        if self._controls[name]["value"] == before["value"]:
+        if seen(self._controls[name]) == old:
             log.info("keyboard setting %s: the keyboard did not take the change", name)
             return "not-applied"
         if self._settings_held():
             return "unconfirmed"  # shown as the keyboard has it: nothing sent back
         now, allows = self._controls[name], getattr(codec, "allows", None)  # as read back: may it have the earlier?
-        if not now["writable"] or (allows is not None and not allows(now, before["value"])):
+        try:
+            if not now["writable"] or (allows is not None and not allows(now, old)):
+                raise kbsettings.Unsupported("the earlier value no longer")
+            back = codec.target(now, old) if fields else old  # laid over what it has now: nothing else changes
+        except kbsettings.Unsupported:
             log.warning("keyboard setting %s: the keyboard took another value, and no longer lets the earlier be", name)
             return "unconfirmed"  # shown as the keyboard has it: nothing sent back
         log.warning("keyboard setting %s: the keyboard took another value; the earlier one is sent back", name)
-        outcome = yield from self._send(name, codec, host, before["value"])
-        return outcome or ("restored" if self._controls[name]["value"] == before["value"] else "unconfirmed")
+        outcome = yield from self._send(name, codec, host, back)
+        return outcome or ("restored" if seen(self._controls[name]) == old else "unconfirmed")
 
     def _send(self, name, codec, host, value):
         """A task: send ``value`` and read the setting back into self._controls. "unconfirmed" when it could not be
@@ -1157,6 +1269,7 @@ class KeyboardSide:
         self._battery = self._firmware = None
         self._firmware_due = False
         self._controls, self._pending, self._outcomes, self._settings_at = {}, {}, {}, float("inf")
+        self._level_reset()
         self._block = self._failed = None
         self._next_recovery = float("inf")
         self.engine._publish()

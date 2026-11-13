@@ -307,6 +307,7 @@ def main(argv=None):
     )
 
     low = {"armed": True}
+    shown = {"notice": 0}  # the last notice of a brightness the keyboard reported that was said
 
     def tray_state(state):
         tray.setToolTip(_tray_tooltip(state))
@@ -316,6 +317,10 @@ def main(argv=None):
         if say and tray.isVisible():
             tray.showMessage(APP_NAME, _("The battery of {name} is low ({percent}%). Charge it soon.").format(
                 name=found["name"], percent=found["battery"][0]), QSystemTrayIcon.MessageIcon.Warning)
+        shown["notice"], level = keyboard.level_notice(shown["notice"], found)
+        if level and tray.isVisible():
+            tray.showMessage(APP_NAME, _("Keyboard backlight: level {level} of {top}").format(level=level[0], top=level[1]),
+                             QSystemTrayIcon.MessageIcon.Information)
 
     store.state_changed.connect(tray_state)
 

@@ -1064,7 +1064,8 @@ class ThreeServices(Services):
         for computer in (self.laptop, self.tower):
             self.assertEqual(computer.engine.asked("keyboard_follow"), [])
 
-    def test_a_third_pairing_is_not_taken(self):
+    def third_pairing(self, paired=lambda: None):
+        """A fourth computer pairs with the desk; ``paired`` runs once the fourth has it. Returns the fourth."""
         fourth = self.computer()
         fourth.flow.watch_offers(True)
         self.desk.flow.start_pairing()
@@ -1072,8 +1073,26 @@ class ThreeServices(Services):
         offer = fourth.flow.status()["offers"][0]
         fourth.flow.pair(offer["address"], offer["port"], self.desk.flow.status()["pairing"]["code"])
         self.assertTrue(wait(lambda: fourth.linked() or len(fourth.cfg["peers"]) == 1))
+        paired()
+        self.assertTrue(wait(lambda: self.desk.entry(1)["id"] == fourth.cfg["id"]))  # the desk may take it in later
         self.assertEqual(len(self.desk.cfg["peers"]), flow.MAX_PEERS)  # the desk keeps two: the oldest made room
         self.assertEqual(self.desk.entry(1)["id"], fourth.cfg["id"])
+        return fourth
+
+    def test_a_third_pairing_is_not_taken(self):
+        self.third_pairing()
+
+    def test_a_third_pairing_is_not_taken_when_the_desk_takes_it_in_last(self):
+        late, take_in = [], self.desk.flow._paired
+        self.desk.flow._paired = late.append  # the desk's side of the pairing, held until the fourth has its own
+
+        def then():
+            self.assertTrue(wait(lambda: late))
+            self.assertNotEqual(self.desk.entry(1)["id"], late[0]["id"])  # not taken in yet
+            take_in(late.pop())
+        fourth = self.third_pairing(then)
+        self.assertEqual(late, [])
+        self.assertTrue(fourth.cfg["peers"])
 
 
 if __name__ == "__main__":

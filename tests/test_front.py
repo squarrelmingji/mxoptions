@@ -416,9 +416,12 @@ class Settings(unittest.TestCase):
         store.remove_profile("app0")
         self.assertIsNone(store.profile("app0"))
         store.set_key("0x0f05", COPY)
-        store.restore_keyboard()
-        self.assertEqual(store.cfg["keyboard"], {"keys": {}, "profiles": []})
-        self.assertEqual(config.clean(copy.deepcopy(store.cfg))["keyboard"], store.cfg["keyboard"])
+        for notices in (False, True):  # the keys go back, never whether notices are shown
+            store.set("keyboard", "notices", notices)
+            store.set_key("0x0f05", COPY)
+            store.restore_keyboard()
+            self.assertEqual(store.cfg["keyboard"], {"keys": {}, "profiles": [], "notices": notices})
+            self.assertEqual(config.clean(copy.deepcopy(store.cfg)), store.cfg)
 
 
 class FakeFront(QObject):
@@ -508,6 +511,7 @@ class Page(unittest.TestCase):
         store._save_timer.timeout.disconnect()
         store.set_key("0x0f01", COPY)
         store.add_profile("kate")
+        store.set("keyboard", "notices", True)
         page = keyboard_page.KeyboardPage(store)
         self.addCleanup(page.deleteLater)
         asked = []
@@ -518,7 +522,8 @@ class Page(unittest.TestCase):
         self.assertIn("single apps", asked[0])
         with mock.patch.object(keyboard_page.QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Yes):
             page._reset()
-        self.assertEqual(store.cfg["keyboard"], {"keys": {}, "profiles": []})
+        self.assertEqual(store.cfg["keyboard"], {"keys": {}, "profiles": [], "notices": True})  # notices stay
+        self.assertEqual(config.clean(copy.deepcopy(store.cfg)), store.cfg)
 
 
 if __name__ == "__main__":

@@ -55,6 +55,11 @@ KEYBOARD = {
         "platform": {"value": 0, "choices": [{"index": 0, "os": ["windows", "android"]}, {"index": 1, "os": ["macos", "ios"]},
                                              {"index": 2, "os": ["linux", "chromeos"]}],
                      "writable": True, "busy": False, "outcome": None},
+        "backlight": {"value": {"on": True, "power_save": True, "mode": "manual", "level": 4, "hands_out": 60, "hands_in": 30,
+                                "powered": 300},
+                      "fields": ["on", "power_save", "mode", "level", "hands_out", "hands_in", "powered"],
+                      "can": ["on", "mode", "level", "hands_out", "hands_in", "powered"], "levels": 8, "shown_level": 4,
+                      "writable": True, "busy": False, "outcome": None},
     },
 }
 KEYBOARD_KEYS = {"0x0f01": {"type": "keys", "keys": ["KEY_LEFTCTRL", "KEY_C"]}, "0x0f02": {"type": "keys", "keys": ["KEY_LEFTCTRL", "KEY_V"]},

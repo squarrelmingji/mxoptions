@@ -324,8 +324,9 @@ DEFAULTS = {
     },
     # The keyboard: what its keys do, by key_id(control id). A key that is not listed does what it always does.
     # "profiles": [{"app", "name", "keys"}], the first one for the app in front changing what its keys do there
-    # (NATIVE: what the key always does); a key a profile does not list does what "keys" says.
-    "keyboard": {"keys": {}, "profiles": []},
+    # (NATIVE: what the key always does); a key a profile does not list does what "keys" says. "notices": say on
+    # screen what the keyboard reports it changed (its brightness), never what made it change.
+    "keyboard": {"keys": {}, "profiles": [], "notices": False},
 }
 
 
@@ -638,6 +639,7 @@ def _sanitize(cfg):
         _clamp(cfg, "haptics", "force", 0, 0xFFFF)
     cfg["keyboard"]["keys"] = _keyboard_keys(cfg["keyboard"].get("keys"))
     cfg["keyboard"]["profiles"] = _keyboard_profiles(cfg["keyboard"].get("profiles"))
+    cfg["keyboard"]["notices"] = cfg["keyboard"].get("notices") is True
     return cfg
 
 

@@ -6,14 +6,20 @@ Layouts are restated as facts from two public descriptions that agree: Solaar 1.
 (lib/logitech_receiver/settings_templates.py, its Fn swap settings and the way it finds the current host) and
 OpenLogi v0.9.0 (crates/openlogi-hidpp/src/feature/fn_inversion.rs, crates/openlogi-device/src/write/fn_lock.rs;
 for the keys turned off, feature/disable_keys.rs and write/disable_keys.rs; for the operating system layout,
-feature/multi_platform.rs, feature/dual_platform.rs and write/os_layout.rs). No code of either is used. Only answers that fit the layout exactly count; anything else is BadReply, and
+feature/multi_platform.rs, feature/dual_platform.rs and write/os_layout.rs; for the backlight, Solaar's
+hidpp20.py, settings_templates.py and notifications.py, and OpenLogi's feature/backlight.rs, write/backlight.rs and the
+answers it recorded from a keyboard). No code of either is used. Only answers that fit the layout exactly count; anything else is BadReply, and
 nothing is sent on the strength of it."""
 
+import struct
+
 from . import device
+from .hidpp import HidppFeatureError
 
 FN = "fn"
 DISABLE = "disable"
 PLATFORM = "platform"
+BACKLIGHT = "backlight"
 
 
 class Unsupported(Exception):
@@ -269,4 +275,140 @@ class PlatformCodec:
         return {"value": result["value"], "choices": [dict(choice, os=list(choice["os"])) for choice in result["choices"]]}
 
 
-CODECS = {FN: FnCodec, DISABLE: DisableCodec, PLATFORM: PlatformCodec}
+# BACKLIGHT_2 (0x1982): what is shown, in the order shown; the low battery switch only shown, as one source alone
+# says which bit it is
+FIELDS = ("on", "power_save", "mode", "level", "hands_out", "hands_in", "powered")
+REQUEST_KEYS = ("on", "mode", "level", "hands_out", "hands_in", "powered")
+MODES = {0: "none", 1: "auto", 2: "keys", 3: "manual"}  # options bits 3-4 (both sources)
+SET_MODES = {"auto": 1, "manual": 3}  # the only ones sent (both sources)
+WRITE_VERSIONS = (2, 3)  # those seen on keyboards: any other is only shown
+TIMED_VERSION = 3        # from which the level and the timers are there (both sources)
+MAX_LEVELS = 16          # a keyboard saying it has more levels is not believed
+UNIT = 5                 # s for each step of a timer (both sources)
+MAX_UNITS = 1440         # 2 h (both sources)
+TIMERS = (("hands_out", 6), ("hands_in", 8), ("powered", 10))  # offsets in function 0's answer, little-endian (both sources)
+
+
+class BacklightCodec:
+    """The backlight: on or off, its brightness set by the light around the keyboard ("auto") or fixed ("manual"),
+    the fixed level, and how long it stays on once the hands are away, near, or the keyboard is charging.
+
+    Root function 0 with the feature id answers its index (byte 0) and version (byte 2). Function 0 answers whether
+    it is on (byte 0: 0 or 1), options (byte 1: bits 3-4 the mode; bit 2 off at low battery, by one source only; bit 5
+    unexplained, so a mode with it set is not known), what the keyboard has (byte 2: bit 2 off at low battery, bits 3
+    and 5 auto and fixed), effects (3-4), the level (5) and four timers (6-13, in steps of 5 s; the last one is only
+    kept). Function 2 answers the number of levels (byte 0) and the level shown now (byte 1). Function 1 sets bytes
+    0, 1, the effect (2: 0xFF, none), level and timers, the rest as read. Level and timers need version 3. A change
+    asked for names fields ({field: value}); every other byte and bit goes back as a fresh read had it."""
+
+    name = BACKLIGHT
+    features = (device.BACKLIGHT_2,)
+
+    @staticmethod
+    def supported(dev):
+        return dev.has(device.BACKLIGHT_2)
+
+    @staticmethod
+    def needs_host(dev):
+        return False
+
+    @staticmethod
+    def valid(value):
+        def fits(key, field):
+            if key == "on":
+                return type(field) is bool
+            if key == "mode":
+                return type(field) is str and field in SET_MODES
+            if key == "level":
+                return type(field) is int and 0 <= field < MAX_LEVELS
+            return type(field) is int and UNIT <= field <= MAX_UNITS * UNIT and field % UNIT == 0
+        return (type(value) is dict and 1 <= len(value) <= len(REQUEST_KEYS)
+                and all(type(key) is str and key in REQUEST_KEYS and fits(key, field) for key, field in value.items()))
+
+    @staticmethod
+    def merge(old, new):
+        return {**(old or {}), **new}
+
+    @staticmethod
+    def read(dev, host):
+        """{"value": {field: value or None}, "fields": those shown, "can": those that may be asked for now,
+        "levels", "shown_level", "writable", "raw", "version"}. BadReply for an answer that does not fit; levels
+        not said (an error or a short answer of function 2) leave the level out."""
+        reply = dev.call(device.ROOT, 0, 0x19, 0x82)
+        if len(reply) < 3 or reply[0] != dev.features[device.BACKLIGHT_2]:
+            raise BadReply("not the feature asked about")
+        version = reply[2]
+        raw = dev.call(device.BACKLIGHT_2, 0)
+        if len(raw) < 14 or raw[0] not in (0, 1):
+            raise BadReply("short, or neither on nor off")
+        try:
+            info = dev.call(device.BACKLIGHT_2, 2)
+        except HidppFeatureError:
+            info = b""
+        options, caps, timed = raw[1], raw[2], version >= TIMED_VERSION
+        levels = info[0] if len(info) >= 2 and 2 <= info[0] <= MAX_LEVELS else None
+        value = dict.fromkeys(FIELDS)
+        value["on"] = raw[0] == 1
+        value["mode"] = None if options & 0x20 else MODES[options >> 3 & 3]
+        fields = ["on"]
+        if caps & 0x04:
+            value["power_save"] = bool(options & 0x04)
+            fields.append("power_save")
+        if caps & 0x08 and caps & 0x20:
+            fields.append("mode")
+        if timed and caps & 0x20 and levels is not None:
+            value["level"] = raw[5] if raw[5] < levels else None
+            fields.append("level")
+        for key, offset in TIMERS if timed else ():
+            units = struct.unpack_from("<H", raw, offset)[0]
+            value[key] = units * UNIT if 1 <= units <= MAX_UNITS else None
+            fields.append(key)
+        writable, mode = version in WRITE_VERSIONS, value["mode"]
+        if not writable:
+            can = []
+        elif mode == "keys":  # set with its keys just now: only Automatic or Fixed is asked for then
+            can = ["mode"] if "mode" in fields else []
+        else:
+            can = [key for key in REQUEST_KEYS if key in fields and value[key] is not None
+                   and (key != "level" or mode in ("auto", "manual", "none"))]
+        return {"value": value, "fields": fields, "can": can, "writable": writable, "raw": bytes(raw[:14]),
+                "version": version, "levels": levels, "shown_level": info[1] if levels and info[1] < levels else None}
+
+    @staticmethod
+    def fields(result, request):
+        """What ``result`` has of the fields ``request`` names."""
+        return {key: result["value"][key] for key in request}
+
+    @staticmethod
+    def target(before, request):
+        """The 12 bytes to send: ``before`` as read, with the fields asked for changed. Unsupported where the keyboard,
+        as read, does not let them be."""
+        raw, mode = before["raw"], request.get("mode", before["value"]["mode"])
+        if (not before["writable"] or any(key not in before["can"] or field is None for key, field in request.items())
+                or "mode" in request and request["mode"] not in SET_MODES
+                or "level" in request and (mode != "manual" or request["level"] >= before["levels"])):
+            raise Unsupported("not a backlight setting it lets be set so")
+        params = bytearray(raw[:2] + b"\xff" + raw[5:14])  # on, options, effect: none, level, the four timers
+        if "on" in request:
+            params[0] = 1 if request["on"] else 0
+        if "mode" in request:
+            params[1] = raw[1] & ~0x18 | SET_MODES[request["mode"]] << 3
+        if "level" in request:
+            params[3] = request["level"]
+        for key, offset in TIMERS:
+            if key in request:
+                struct.pack_into("<H", params, offset - 2, request[key] // UNIT)
+        return bytes(params)
+
+    @staticmethod
+    def write(dev, host, params):
+        dev.call(device.BACKLIGHT_2, 1, *params)
+
+    @staticmethod
+    def public(result):
+        """What is shown: no bytes, no version."""
+        return {"value": dict(result["value"]), "fields": list(result["fields"]), "can": list(result["can"]),
+                "levels": result["levels"], "shown_level": result["shown_level"]}
+
+
+CODECS = {FN: FnCodec, DISABLE: DisableCodec, PLATFORM: PlatformCodec, BACKLIGHT: BacklightCodec}

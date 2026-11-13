@@ -1911,5 +1911,1722 @@ class SettingsPage(unittest.TestCase):
             self.assertIn(text, i18n_uk.STRINGS)
 
 
+# -- the backlight (0x1982), and the notice of a brightness the keyboard reports ------------------------------------
+
+BL, Backlight = device.BACKLIGHT_2, kbsettings.BacklightCodec
+ROOT = device.ROOT
+
+
+def bl_config(on=1, options=0x19, caps=0x3D, level=4, timers=(12, 6, 60), fourth=0x0405):
+    """BACKLIGHT_2 function 0's answer: on, options (0x19: wow and a fixed level), what it has (0x3D: wow, off at low
+    battery, automatic, set with its keys, fixed), effects 0x007F, the level, three timers in steps of 5 s and a
+    fourth one."""
+    return bytes([on, options, caps, 0x7F, 0x00, level]) + struct.pack("<4H", *timers, fourth)
+
+
+def bl_info(levels=8, shown=4):
+    """BACKLIGHT_2 function 2's answer: the number of levels, the level shown now, a status and an effect."""
+    return bytes([levels, shown, 2, 0]) + bytes(8)
+
+
+V2_CONFIG = bytes([0x01, 0x05, 0x05, 0x7F, 0x00, 0x00]) + bytes(8)  # on, wow and low battery, no modes, all timers 0
+V2_INFO = bytes([8, 0, 4, 0]) + bytes(8)
+ALL_FIELDS = ["on", "power_save", "mode", "level", "hands_out", "hands_in", "powered"]
+ASKABLE = ["on", "mode", "level", "hands_out", "hands_in", "powered"]
+
+
+def backlight_keyboard(config=None, levels=None, version=3, settings=None, **kwargs):
+    """A synthetic keyboard with BACKLIGHT_2: function 0 answers ``config``, function 2 ``levels``."""
+    settings = dict(settings or {})
+    settings[BL] = {"config": bytearray(config or bl_config()), "info": bytearray(levels or bl_info())}
+    kb = keyboard_device(settings=settings, **kwargs)
+    kb.versions[BL] = version
+    return kb
+
+
+class BlStub(Stub):
+    """A device with BACKLIGHT_2 at index 11 for the codec alone."""
+
+    def __init__(self, config=None, info=None, version=3, root=None):
+        super().__init__({BL}, {(ROOT, 0): root if root is not None else bytes([11, 0, version]),
+                                (BL, 0): config or bl_config(), (BL, 2): info if info is not None else bl_info()})
+        self.features = {ROOT: 0, BL: 11}
+
+
+def read(config=None, info=None, version=3, **kwargs):
+    return Backlight.read(BlStub(config, info, version, **kwargs), None)
+
+
+class BacklightDecode(unittest.TestCase):
+    def test_an_older_keyboard_shows_on_and_low_battery_only(self):
+        dev = BlStub(V2_CONFIG, V2_INFO, version=2)
+        result = Backlight.read(dev, None)
+        self.assertEqual(dev.calls, [(ROOT, 0, b"\x19\x82"), (BL, 0, b""), (BL, 2, b"")])
+        self.assertEqual(result["value"], {"on": True, "power_save": True, "mode": "none", "level": None,
+                                           "hands_out": None, "hands_in": None, "powered": None})
+        self.assertEqual((result["fields"], result["can"], result["levels"], result["shown_level"], result["writable"]),
+                         (["on", "power_save"], ["on"], 8, 0, True))
+        self.assertEqual((result["raw"], result["version"]), (V2_CONFIG, 2))
+
+    def test_every_field_of_a_newer_keyboard(self):
+        result = read(bl_config(options=0x09), bl_info(shown=3))
+        self.assertEqual(result["value"], {"on": True, "power_save": False, "mode": "auto", "level": 4, "hands_out": 60,
+                                           "hands_in": 30, "powered": 300})
+        self.assertEqual((result["fields"], result["can"], result["levels"], result["shown_level"]),
+                         (ALL_FIELDS, ASKABLE, 8, 3))
+        self.assertEqual(read(bl_config(on=0, options=0x0D))["value"]["on"], False)
+        self.assertEqual(read(bl_config(options=0x0D))["value"]["power_save"], True)
+        self.assertEqual(read(bl_config(timers=(1, 1440, 7)))["value"], dict(read()["value"], hands_out=5, hands_in=7200,
+                                                                             powered=35))
+
+    def test_level_and_timers_only_from_version_3_and_changes_only_on_2_and_3(self):
+        result = read(version=2)
+        self.assertEqual((result["fields"], result["can"]), (["on", "power_save", "mode"], ["on", "mode"]))
+        self.assertIsNone(result["value"]["level"])
+        for version, fields in ((4, ALL_FIELDS), (1, ["on", "power_save", "mode"]), (0, ["on", "power_save", "mode"])):
+            with self.subTest(version=version):
+                result = read(version=version)
+                self.assertEqual((result["fields"], result["can"], result["writable"]), (fields, [], False))
+                self.assertEqual(result["value"]["on"], True)
+                with self.assertRaises(kbsettings.Unsupported):
+                    Backlight.target(result, {"on": False})
+        for root in (bytes([12, 0, 3]), bytes([11, 0])):  # not the feature asked about, too short
+            with self.subTest(root=root.hex()), self.assertRaises(kbsettings.BadReply):
+                read(root=root)
+
+    def test_what_the_keyboard_has_decides_what_is_shown(self):
+        for caps, fields in ((0x3D, ALL_FIELDS), (0x39, ["on", "mode", "level", "hands_out", "hands_in", "powered"]),
+                             (0x09, ["on", "hands_out", "hands_in", "powered"]),
+                             (0x21, ["on", "level", "hands_out", "hands_in", "powered"]),
+                             (0x28, ["on", "mode", "level", "hands_out", "hands_in", "powered"])):
+            with self.subTest(caps=hex(caps)):
+                self.assertEqual(read(bl_config(caps=caps))["fields"], fields)
+        for levels, shown in ((0, False), (1, False), (2, True), (16, True), (17, False), (255, False)):
+            with self.subTest(levels=levels):
+                result = read(bl_config(level=1), bl_info(levels=levels, shown=1))
+                self.assertEqual("level" in result["fields"], shown)
+                self.assertEqual("level" in result["can"], shown)
+                self.assertEqual(result["levels"], levels if shown else None)
+                self.assertEqual(result["shown_level"], 1 if shown else None)
+
+    def test_an_answer_that_does_not_fit_is_not_believed(self):
+        for config in (bl_config()[:13], bytes([2]) + bl_config()[1:], bytes([0xFF]) + bl_config()[1:]):
+            with self.subTest(config=config.hex()), self.assertRaises(kbsettings.BadReply):
+                read(config)
+        with self.assertRaises(hidpp.HidppFeatureError):
+            self._fails(BL, 0)
+        with self.assertRaises(hidpp.HidppTimeout):
+            self._fails(BL, 2, hidpp.HidppTimeout("no answer"))
+        for info in (hidpp.HidppFeatureError(5), b"\x08"):  # levels not said: no level, the rest as ever
+            with self.subTest(info=info):
+                dev = BlStub()
+                dev.answers[BL, 2] = info
+                result = Backlight.read(dev, None)
+                self.assertEqual((result["levels"], result["shown_level"]), (None, None))
+                self.assertNotIn("level", result["fields"])
+                self.assertEqual(result["can"], ["on", "mode", "hands_out", "hands_in", "powered"])
+        dev = BlStub()
+        dev.answers[BL, 2] = bytes([8, 8])  # shows a level past the 0-7 it has
+        result = Backlight.read(dev, None)
+        self.assertEqual((result["levels"], result["shown_level"]), (8, None))
+
+    def _fails(self, feature, function, error=None):
+        dev = BlStub()
+        dev.answers[feature, function] = error or hidpp.HidppFeatureError(5)
+        return Backlight.read(dev, None)
+
+    def test_a_value_it_cannot_say_is_unknown_and_the_rest_still_set(self):
+        for units in (0, 1441, 0xFFFF):
+            with self.subTest(units=units):
+                result = read(bl_config(timers=(units, 6, 60)))
+                self.assertIsNone(result["value"]["hands_out"])
+                self.assertIn("hands_out", result["fields"])
+                self.assertEqual(result["can"], ["on", "mode", "level", "hands_in", "powered"])
+        result = read(bl_config(level=8, timers=(0, 6, 60)), bl_info(levels=8))
+        self.assertIsNone(result["value"]["level"])
+        self.assertEqual(result["can"], ["on", "mode", "hands_in", "powered"])
+        self.assertEqual(Backlight.target(result, {"on": False}), bytes.fromhex("0019ff08000006003c000504"))
+
+    def test_each_change_sends_its_own_bytes_and_every_other_as_read(self):
+        before = read(bl_config(options=0xDF, caps=0x3D))  # every option bit but bit 5 set: a fixed level
+        self.assertEqual(before["value"]["mode"], "manual")
+        for request, params in (({"on": False}, "00dfff040c0006003c000504"),
+                                ({"mode": "auto"}, "01cfff040c0006003c000504"),
+                                ({"level": 6}, "01dfff060c0006003c000504"),
+                                ({"level": 0}, "01dfff000c0006003c000504"),
+                                ({"hands_out": 30}, "01dfff04060006003c000504"),
+                                ({"hands_in": 7200}, "01dfff040c00a0053c000504"),
+                                ({"powered": 5}, "01dfff040c00060001000504"),
+                                ({"on": True, "hands_in": 35, "powered": 600}, "01dfff040c0007007800" "0504")):
+            with self.subTest(request=request):
+                self.assertEqual(Backlight.target(before, request), bytes.fromhex(params))
+        automatic = read(bl_config(options=0xCF, level=5))
+        self.assertEqual(Backlight.target(automatic, {"on": False}), bytes.fromhex("00cfff050c0006003c000504"))
+        self.assertEqual(Backlight.target(automatic, {"mode": "manual"}), bytes.fromhex("01dfff050c0006003c000504"))
+        dev = Stub(set())
+        Backlight.write(dev, None, bytes.fromhex("01dfff050c0006003c000504"))
+        self.assertEqual(dev.calls, [(BL, 1, bytes.fromhex("01dfff050c0006003c000504"))])
+
+    def test_while_set_with_its_keys_only_automatic_or_fixed_is_sent(self):
+        keys = read(bl_config(options=0x11))  # wow, set with its keys
+        self.assertEqual((keys["value"]["mode"], keys["can"]), ("keys", ["mode"]))
+        for request in ({"on": False}, {"hands_out": 30}, {"level": 3}, {"mode": "manual", "level": 3}):
+            with self.subTest(request=request), self.assertRaises(kbsettings.Unsupported):
+                Backlight.target(keys, request)
+        self.assertEqual(Backlight.target(keys, {"mode": "auto"}), bytes.fromhex("0109ff040c0006003c000504"))
+        self.assertEqual(Backlight.target(keys, {"mode": "manual"}), bytes.fromhex("0119ff040c0006003c000504"))
+        self.assertEqual(read(bl_config(options=0x11, caps=0x15))["can"], [])  # no Automatic or Fixed to pick
+        unknown = read(bl_config(options=0x29))  # bit 5 set: a mode it does not know
+        self.assertIsNone(unknown["value"]["mode"])
+        self.assertEqual(unknown["can"], ["on", "hands_out", "hands_in", "powered"])
+        for request in ({"mode": "auto"}, {"level": 2}):
+            with self.subTest(request=request), self.assertRaises(kbsettings.Unsupported):
+                Backlight.target(unknown, request)
+        self.assertEqual(Backlight.target(unknown, {"on": False}), bytes.fromhex("0029ff040c0006003c000504"))
+        for mode in ("keys", "none", None):  # what a keyboard had, sent back: never a mode but these two
+            with self.subTest(mode=mode), self.assertRaises(kbsettings.Unsupported):
+                Backlight.target(read(), {"mode": mode})
+
+    def test_a_level_only_while_fixed_and_one_it_has(self):
+        automatic = read(bl_config(options=0x09))
+        with self.assertRaises(kbsettings.Unsupported):
+            Backlight.target(automatic, {"level": 5})
+        self.assertEqual(Backlight.target(automatic, {"mode": "manual", "level": 5}),
+                         bytes.fromhex("0119ff050c0006003c000504"))
+        for request in ({"level": 8}, {"level": 15}, {"mode": "auto", "level": 2}):
+            with self.subTest(request=request), self.assertRaises(kbsettings.Unsupported):
+                Backlight.target(read(), request)
+        with self.assertRaises(kbsettings.Unsupported):
+            Backlight.target(read(bl_config(options=0x01)), {"level": 2})  # mode 0: no fixed level
+        with self.assertRaises(kbsettings.Unsupported):
+            Backlight.target(dict(read(), writable=False), {"on": False})  # read-only: nothing, whatever it lets
+
+    def test_what_is_a_change(self):
+        for value in ({"on": True}, {"mode": "auto"}, {"mode": "manual"}, {"level": 0}, {"level": 15},
+                      {"hands_out": 5}, {"hands_in": 3600}, {"powered": 7200}, dict.fromkeys(["on"], False),
+                      {"on": False, "mode": "manual", "level": 3, "hands_out": 10, "hands_in": 15, "powered": 20}):
+            self.assertTrue(Backlight.valid(value), value)
+        for value in ({"level": True}, {"level": 2.0}, {"level": 16}, {"level": -1}, {}, {"power_save": True},
+                      {"on": 1}, {"on": "true"}, {"mode": "keys"}, {"mode": "none"}, {"mode": 1}, {"hands_in": 4},
+                      {"hands_in": 7201}, {"hands_in": 7}, {"hands_out": 60.0}, {"powered": 0}, {1: True}, [], None,
+                      True, {"on": True, "mode": "auto", "level": 1, "hands_out": 5, "hands_in": 5, "powered": 5,
+                             "power_save": True}):
+            self.assertFalse(Backlight.valid(value), value)
+        self.assertEqual(Backlight.merge({"mode": "manual"}, {"level": 5}), {"mode": "manual", "level": 5})
+        self.assertEqual(Backlight.merge(None, {"level": 5}), {"level": 5})
+        self.assertEqual(Backlight.merge({"level": 3}, {"level": 4}), {"level": 4})
+
+    def test_shown_without_bytes_or_version(self):
+        result = read(bl_config(options=0x09))
+        shown = Backlight.public(result)
+        self.assertEqual(set(shown), {"value", "fields", "can", "levels", "shown_level"})
+        self.assertEqual(json.loads(json.dumps(shown)), shown)
+        self.assertEqual(Backlight.fields(result, {"on": False, "hands_in": 5}), {"on": True, "hands_in": 30})
+
+
+def on_setter(kb, change, times=1):
+    """Have ``change(kb)`` run as the keyboard takes each of its next ``times`` backlight setters."""
+    answer, left = kb.answer, [times]
+
+    def answering(feat_idx, function, params):
+        reply = answer(feat_idx, function, params)
+        if feat_idx < len(kb.features) and kb.features[feat_idx] == BL and function == 1 and left[0]:
+            left[0] -= 1
+            change(kb)
+        return reply
+    kb.answer = answering
+
+
+def muted_once(kb):
+    """The backlight read after the next backlight setter gets no answer at all."""
+    answer, seen = kb.answer, {"setter": False, "muted": False}
+
+    def answering(feat_idx, function, params):
+        feature = kb.features[feat_idx] if feat_idx < len(kb.features) else None
+        if feature == ROOT and function == 0 and seen["setter"] and not seen["muted"]:
+            seen["muted"] = True
+            return None
+        reply = answer(feat_idx, function, params)
+        seen["setter"] = seen["setter"] or feature == BL and function == 1
+        return reply
+    kb.answer = answering
+
+
+class Later:
+    """time.monotonic as it runs, moved on at will: a deadline far off comes without being waited for."""
+
+    def __init__(self, test):
+        real, self.offset = time.monotonic, 0.0
+        patcher = mock.patch.object(time, "monotonic", lambda: real() + self.offset)
+        patcher.start()
+        test.addCleanup(patcher.stop)
+
+    def skip(self, seconds):
+        self.offset += seconds
+
+
+class BacklightBase(SettingsBase):
+    """A rig with a backlit keyboard (version 3, fixed level 4 of 0-7, timers 60 s, 30 s, 300 s) found and read."""
+
+    def make(self, kb=None, notices=True, **rig):
+        made = super().make(kb or backlight_keyboard(), **rig)
+        made.engine.cfg["keyboard"]["notices"] = notices
+        return made
+
+    def report(self, event=0):
+        """The keyboard reports a change of its backlight (event 0: of its brightness), handled at once. The level it
+        names is never believed."""
+        self.rig.port.notify(bytes([0x11, 1, self.dev.index(BL), event << 4]) + bytes([0, 7]).ljust(16, b"\0"))
+        self.rig.engine._handle(self.rig.engine._queue.get(timeout=2.0))
+
+    def shows(self, level):
+        """Its brightness changes on the keyboard (its keys, the light around it): function 2 says ``level`` now."""
+        self.dev.settings[BL]["info"][1] = level
+
+    def reads(self):
+        return len(packets(self.rig.port, self.dev, BL, 0))
+
+    def hold_nth(self, nth, when=lambda request: request[0] is Backlight.read):
+        """Hold back the ``nth`` request ``when`` picks from now on (see hold)."""
+        count = [0]
+
+        def picked(request):
+            if when(request):
+                count[0] += 1
+                return count[0] == nth
+            return False
+        return self.hold(picked)
+
+    def due_read(self):
+        """A read of the settings comes due, as after a report or RECOVERY_RETRY, and is started."""
+        self.rig.kb._settings_at = time.monotonic()
+        self.rig.kb.tick(time.monotonic())
+
+    def retried(self, start):
+        """A read comes due once RECOVERY_RETRY is over: not at once, and never not at all."""
+        at = self.rig.kb._settings_at
+        self.assertTrue(start + keyboard.RECOVERY_RETRY <= at <= time.monotonic() + keyboard.RECOVERY_RETRY, at)
+
+    def owned(self):
+        """(level settled, reports, of them settled, a change of this program's unsettled)"""
+        kb = self.rig.kb
+        return kb._level_seen, kb._level_event, kb._level_handled, kb._level_own
+
+    def notice(self):
+        return self.rig.state()["notice"]
+
+    def told(self, level, seq=1):
+        self.assertEqual(self.notice(), {"seq": seq, "kind": "backlight", "level": level, "top": 7})
+        self.assertEqual(self.rig.kb._notice_seq, seq)
+
+
+class BacklightChange(BacklightBase):
+    def test_read_when_found_then_changed_and_read_back(self):
+        rig = self.make()
+        self.assertEqual(control(rig, "backlight"), {
+            "value": {"on": True, "power_save": False, "mode": "manual", "level": 4, "hands_out": 60, "hands_in": 30,
+                      "powered": 300},
+            "fields": ALL_FIELDS, "can": ASKABLE, "levels": 8, "shown_level": 4, "writable": True, "busy": False,
+            "outcome": None})
+        reads = self.reads()
+        self.ask("backlight", {"level": 6})
+        self.assertEqual(self.setters(BL), [bytes.fromhex("0119ff060c0006003c000504")])
+        self.assertEqual(self.reads(), reads + 2)  # fresh before, read back after
+        self.assertEqual(control(rig, "backlight")["value"]["level"], 6)
+        self.assertIsNone(control(rig, "backlight")["outcome"])
+        self.ask("backlight", {"on": False, "powered": 600})
+        self.assertEqual(self.setters(BL)[-1], bytes.fromhex("0019ff060c00060078000504"))
+        self.assertEqual(control(rig, "backlight")["value"], dict(control(rig, "backlight")["value"], on=False, powered=600))
+        self.assertEqual(self.dev.settings[BL]["config"][2:5], bytearray([0x3D, 0x7F, 0x00]))  # never sent
+
+    def test_only_the_fields_asked_for_decide_how_it_went(self):
+        def elsewhere(kb):  # meanwhile: another brightness shown, other effects, another timer it was not asked about
+            kb.settings[BL]["info"][1] = 2
+            kb.settings[BL]["config"][3] = 0x01
+            kb.settings[BL]["config"][8:10] = struct.pack("<H", 9)
+        kb = backlight_keyboard()
+        on_setter(kb, elsewhere)
+        rig = self.make(kb)
+        self.ask("backlight", {"hands_out": 30})
+        self.assertEqual(self.setters(BL), [bytes.fromhex("0119ff04060006003c000504")])  # nothing sent back
+        shown = control(rig, "backlight")
+        self.assertEqual((shown["outcome"], shown["value"]["hands_out"], shown["value"]["hands_in"], shown["shown_level"]),
+                         (None, 30, 45, 2))
+
+    def test_what_it_had_goes_back_laid_over_what_it_has_now(self):
+        took = bytes.fromhex("0119ff06070006003c000504")  # 35 s, not 30, and its keys moved the level to 6 meanwhile
+        for taken, outcome, last in (([took], "restored", 60), ([took, took], "unconfirmed", 35)):
+            with self.subTest(outcome):
+                kb = backlight_keyboard()
+                kb.taken[BL] = list(taken)
+                rig = self.make(kb)
+                self.ask("backlight", {"hands_out": 30})
+                self.assertEqual(self.setters(BL), [bytes.fromhex("0119ff04060006003c000504"),
+                                                    bytes.fromhex("0119ff060c0006003c000504")])  # the level as it is now
+                self.assertEqual(control(rig, "backlight")["outcome"], outcome)
+                self.assertEqual(control(rig, "backlight")["value"]["hands_out"], last)
+                self.assertEqual(control(rig, "backlight")["value"]["level"], 6)
+                rig.stop()
+
+    def test_nothing_goes_back_where_the_read_back_does_not_let_it(self):
+        def keys(kb):  # took 35 s, not 30, and is set with its keys now: only Automatic or Fixed may be sent
+            kb.settings[BL]["config"][1], kb.settings[BL]["config"][6:8] = 0x11, b"\x07\x00"
+
+        def newer(kb):  # took 35 s, and says a version changes are not sent to
+            kb.versions[BL], kb.settings[BL]["config"][6:8] = 4, b"\x07\x00"
+
+        def no_timer(kb):  # that timer no longer known
+            kb.settings[BL]["config"][6:8] = b"\x00\x00"
+
+        for change in (keys, newer, no_timer):
+            with self.subTest(change.__name__):
+                kb = backlight_keyboard()
+                on_setter(kb, change)
+                rig = self.make(kb)
+                self.ask("backlight", {"hands_out": 30})
+                self.assertEqual(len(self.setters(BL)), 1)
+                self.assertEqual(control(rig, "backlight")["outcome"], "unconfirmed")
+                rig.stop()
+
+    def test_so_already_ignored_refused_or_unanswered(self):
+        rig = self.make()
+        self.ask("backlight", {"level": 4, "on": True})
+        self.assertEqual(self.setters(BL), [])
+        self.dev.ignore_writes = True
+        self.ask("backlight", {"level": 2})
+        self.assertEqual(control(rig, "backlight")["outcome"], "not-applied")
+        self.dev.ignore_writes = False
+        self.dev.failing[(BL, 1)] = 5  # refused: the read back says what it has
+        self.ask("backlight", {"level": 2})
+        self.assertEqual(control(rig, "backlight")["outcome"], "not-applied")
+        del self.dev.failing[(BL, 1)]
+        self.assertEqual(len(self.setters(BL)), 1)  # the refused one never reached the fake's list
+        rig.stop()
+        kb = backlight_keyboard()
+        on_setter(kb, lambda kb: setattr(kb, "silent", True))
+        rig = self.make(kb)
+        start = time.monotonic()
+        self.ask("backlight", {"level": 2})
+        self.assertEqual((control(rig, "backlight")["outcome"], control(rig, "backlight")["value"]), ("unconfirmed", None))
+        self.assertEqual(len(self.setters(BL)), 1)  # never a second, blind one
+        self.retried(start)
+        kb.silent = False
+        self.due_read()
+        rig.settle()
+        self.assertEqual(control(rig, "backlight")["value"]["level"], 2)
+        self.assertEqual(len(self.setters(BL)), 1)
+
+    def test_changes_asked_before_the_setter_go_as_one_and_after_it_on_a_fresh_read(self):
+        rig = self.make()
+        entered, release = self.hold(lambda request: request[0] is Backlight.read)
+        self.ask("backlight", {"level": 3}, settle=False)
+        self.assertTrue(self.reached(entered))
+        self.ask("backlight", {"level": 5}, settle=False)
+        self.ask("backlight", {"level": 4, "hands_in": 10}, settle=False)
+        self.ask("backlight", {"level": 6}, settle=False)
+        self.assertEqual(rig.kb._pending, {"backlight": {"level": 6, "hands_in": 10}})
+        release.set()
+        rig.settle()
+        self.assertEqual(self.setters(BL), [bytes.fromhex("0119ff060c0002003c000504")])
+        rig.stop()
+        rig = self.make(backlight_keyboard(bl_config(options=0x09)))
+        entered, release = self.hold(lambda request: request[0] is Backlight.read)
+        self.ask("backlight", {"mode": "manual"}, settle=False)
+        self.assertTrue(self.reached(entered))
+        self.ask("backlight", {"level": 5}, settle=False)
+        release.set()
+        rig.settle()
+        self.assertEqual(self.setters(BL), [bytes.fromhex("0119ff050c0006003c000504")])
+        entered, release = self.hold(lambda request: request[0] is Backlight.write)
+        on_setter(self.dev, lambda kb: kb.settings[BL]["config"].__setitem__(slice(12, 14), b"\x09\x09"))
+        self.ask("backlight", {"level": 2}, settle=False)
+        self.assertTrue(self.reached(entered))
+        self.ask("backlight", {"hands_in": 15}, settle=False)  # too late for the first: a change of its own
+        reads = self.reads()
+        release.set()
+        rig.settle()
+        self.assertEqual(self.setters(BL)[1:], [bytes.fromhex("0119ff020c0006003c000504"),
+                                                bytes.fromhex("0119ff020c0003003c000909")])
+        self.assertEqual(self.reads(), reads + 3)  # read back, then afresh before the second
+
+    def test_what_is_not_a_change_of_its_backlight_is_dropped(self):
+        rig = self.make(backlight_keyboard(bl_config(options=0x11)))  # set with its keys
+        for value in ({"level": 2.0}, {"power_save": False}, {"mode": "keys"}, {}, [1], None):
+            rig.kb.set_setting("backlight", value)
+        self.assertEqual(rig.kb._pending, {})
+        self.ask("backlight", {"on": False})
+        self.ask("backlight", {"hands_out": 30})
+        self.ask("backlight", {"level": 2})
+        self.assertEqual(control(rig, "backlight")["outcome"], "unsupported")
+        self.assertEqual(self.setters(BL), [])
+        self.ask("backlight", {"mode": "auto"})
+        self.assertEqual(self.setters(BL), [bytes.fromhex("0109ff040c0006003c000504")])
+        rig.stop()
+        for kb in (backlight_keyboard(version=1), backlight_keyboard(bytes([2]) + bl_config()[1:])):
+            rig = self.make(kb)
+            self.assertFalse(control(rig, "backlight")["writable"])
+            self.ask("backlight", {"on": False})
+            self.assertEqual(kb.setting_writes, [])
+            rig.stop()
+        rig = self.make(keyboard_device())  # no backlight
+        self.ask("backlight", {"on": False})
+        self.assertNotIn("backlight", rig.state()["controls"])
+
+
+class BacklightGuarded(BacklightBase):
+    def rivals(self, *names):
+        self.rig.rivals = list(names)
+        self.rig.engine._look_for_rivals(time.monotonic())
+
+    def test_never_where_no_key_may_be_changed_and_not_later_either(self):
+        for kwargs, reason in ((dict(rivals=["Solaar"]), "rivals"), (dict(journal="not a journal"), "journal")):
+            with self.subTest(reason):
+                rig = self.make(**kwargs)
+                self.assertEqual(rig.state()["reason"], reason)
+                self.assertFalse(control(rig, "backlight")["writable"])
+                self.assertEqual(control(rig, "backlight")["value"]["level"], 4)  # read all the same
+                self.ask("backlight", {"level": 2})
+                self.assertEqual((rig.kb._pending, self.setters(BL)), ({}, []))
+                rig.stop()
+        rig = self.make(backlight_keyboard(info=False))
+        self.assertEqual(rig.state()["reason"], "identity")
+        self.ask("backlight", {"level": 2})
+        self.assertEqual(self.setters(BL), [])
+        rig.stop()
+        rig = self.make()
+        entered, release = self.hold(lambda request: request[0] is Backlight.read)
+        self.ask("backlight", {"level": 2}, settle=False)
+        self.assertTrue(self.reached(entered))
+        self.rivals("Solaar")  # seen during the read before the change
+        self.assertEqual(rig.kb._pending, {})
+        release.set()
+        rig.settle()
+        self.rivals()  # gone again: what was asked is not brought back
+        rig.settle()
+        self.assertEqual(self.setters(BL), [])
+        self.assertTrue(control(rig, "backlight")["writable"])
+
+    def test_a_setter_waiting_behind_the_mouse_is_called_off_once_other_software_is_seen(self):
+        rig = self.make()
+        mouse = rig.port.devices[2]
+        entered, release = self.hold(lambda request: request[0] is Backlight.write)
+        self.ask("backlight", {"level": 2}, settle=False)
+        self.assertTrue(self.reached(entered))
+        self.assertTrue(rig.kb._level_own)
+        mouse.delay = 0.5
+        foreground = threading.Thread(target=rig.transport().request, args=(2, 0, 1, bytes([0, 0, 1])))
+        foreground.start()
+        time.sleep(0.05)
+        release.set()
+        time.sleep(0.1)
+        self.assertIs(rig.kb._asked[0], Backlight.write)
+        self.rivals("Solaar")
+        foreground.join()
+        rig.settle()
+        self.assertEqual(self.setters(BL), [])
+        self.assertEqual(control(rig, "backlight"), dict(control(rig, "backlight"), writable=False, outcome="unconfirmed"))
+
+    def test_other_software_after_the_setter_nothing_is_sent_back(self):
+        kb = backlight_keyboard()
+        kb.taken[BL] = [bytes.fromhex("0119ff030c0006003c000504")]  # took level 3, not 2
+        rig = self.make(kb)
+        entered, release = self.hold(lambda request: request[0] is Backlight.read and kb.setting_writes)
+        self.ask("backlight", {"level": 2}, settle=False)
+        self.assertTrue(self.reached(entered))
+        self.rivals("Solaar")
+        release.set()
+        rig.settle()
+        self.assertEqual(len(self.setters(BL)), 1)  # never the earlier level sent back
+        self.assertEqual(control(rig, "backlight"), dict(control(rig, "backlight"), writable=False, outcome="unconfirmed"))
+        self.assertEqual(control(rig, "backlight")["value"]["level"], 3)
+        kb2 = backlight_keyboard()
+        kb2.taken[BL] = [bytes.fromhex("0119ff030c0006003c000504")]
+        rig.stop()
+        rig = self.make(kb2)
+        entered, release = self.hold(lambda request: request[0] is Backlight.write and kb2.setting_writes)
+        self.ask("backlight", {"level": 2}, settle=False)
+        self.assertTrue(self.reached(entered))  # the earlier level, waiting to go back ...
+        self.rivals("Solaar")  # ... is never sent once other software is seen
+        release.set()
+        rig.settle()
+        self.assertEqual(len(kb2.setting_writes), 1)
+
+    def test_gone_replaced_or_exiting_never_sends_or_sends_back(self):
+        rig = self.make()
+        entered, release = self.hold(lambda request: request[0] is Backlight.read)
+        self.ask("backlight", {"level": 2}, settle=False)
+        self.assertTrue(self.reached(entered))
+        rig.link(1, False)
+        release.set()
+        self.drain()
+        rig.link(1, True)
+        rig.settle()
+        self.assertEqual(self.dev.setting_writes, [])
+        rig.stop()
+        kb = backlight_keyboard()
+        kb.taken[BL] = [bytes.fromhex("0119ff030c0006003c000504")]
+        rig = self.make(kb)
+        entered, release = self.hold(lambda request: request[0] is Backlight.read and kb.setting_writes)
+        self.ask("backlight", {"level": 2}, settle=False)
+        self.assertTrue(self.reached(entered))
+        rig.link(1, False)
+        release.set()
+        self.drain()
+        self.assertEqual(len(kb.setting_writes), 1)  # nothing sent back
+        rig.stop()
+        rig = self.make(backlight_keyboard(), keys={"0x0f01": COPY})
+        rig.keys_down(1, self.dev, 0x0F01)
+        self.ask("backlight", {"level": 2})
+        rig.link(1, False)
+        other = rig.port.devices[1] = backlight_keyboard(unit=UNIT_B)
+        rig.link(1, True)
+        rig.settle()
+        rig.keys_down(1, other)
+        rig.settle()
+        self.assertEqual(other.setting_writes, [])
+        rig.stop()
+        rig = self.make(backlight_keyboard(), keys={"0x0f01": COPY})
+        rig.keys_down(1, self.dev, 0x0F01)
+        self.ask("backlight", {"level": 2})
+        start = time.monotonic()
+        rig.kb.shutdown()
+        self.assertLess(time.monotonic() - start, keyboard.SHUTDOWN_BUDGET)
+        self.assertEqual(self.dev.setting_writes, [])
+
+    def test_easy_switch_goes_first_and_a_key_down_holds_the_change(self):
+        rig = self.make()
+        entered, release = self.hold(lambda request: request[0] is Backlight.read)
+        self.ask("backlight", {"level": 2}, settle=False)
+        self.assertTrue(self.reached(entered))
+        rig.kb.device_action({"type": "host", "host": 1}, "press")
+        self.assertEqual(rig.kb._pending, {"backlight": {"level": 2}})
+        release.set()
+        rig.settle()
+        self.assertEqual(self.dev.switched, [1])
+        self.assertEqual(self.setters(BL), [])  # not while the keyboard may be on its way
+        rig.stop()
+        rig = self.make(keys={"0x0f01": COPY})
+        rig.keys_down(1, self.dev, 0x0F01)
+        self.ask("backlight", {"level": 2})
+        self.assertEqual(self.setters(BL), [])
+        rig.keys_down(1, self.dev)
+        rig.settle()
+        self.assertEqual(self.setters(BL), [bytes.fromhex("0119ff020c0006003c000504")])
+
+    def test_the_mouse_is_heard_while_the_backlight_is_slow(self):
+        rig = self.make()
+        mouse = rig.port.devices[2]
+        rig.engine.cfg["buttons"]["back"] = actions.keys("LEFTSHIFT")
+        self.dev.delays = dict.fromkeys((ROOT, BL), 0.2)
+        for start_it in (self.due_read, lambda: self.ask("backlight", {"level": 2}, settle=False)):
+            start_it()
+            for _ in range(3):
+                time.sleep(0.05)
+                self.assertIsNotNone(rig.kb._asked)  # the keyboard is still being waited for ...
+                rig.mouse_actions.ran.clear()
+                start = time.monotonic()
+                rig.port.notify(bytes([0x11, 2, mouse.index(device.REPROG_CONTROLS_V4), 0])
+                                + struct.pack("!HHHH", 0x0053, 0, 0, 0).ljust(16, b"\0"))
+                while not rig.mouse_actions.ran:  # ... and the mouse is heard meanwhile
+                    rig.engine._handle(rig.engine._queue.get(timeout=1.0))
+                self.assertLess(time.monotonic() - start, 0.1)
+                rig.port.notify(bytes([0x11, 2, mouse.index(device.REPROG_CONTROLS_V4), 0]) + bytes(16))
+            rig.settle()
+        self.assertEqual(control(rig, "backlight")["value"]["level"], 2)
+        index = self.dev.index(BL)
+        writers = {w for p, w in zip(rig.port.written, rig.port.writers)
+                   if p[1] == 1 and (p[2] == index or p[2] == 0 and p[4:6] == b"\x19\x82")}
+        self.assertEqual(writers, {"keyboard"})
+
+
+class BacklightKept(BacklightBase):
+    def test_reported_changes_are_read_not_believed_and_a_burst_is_one_read(self):
+        rig = self.make()
+        reads = self.reads()
+        self.shows(2)
+        self.dev.settings[BL]["config"][5] = 2
+        self.report()
+        rig.settle()
+        self.assertEqual(self.reads(), reads + 1)
+        self.assertEqual((control(rig, "backlight")["value"]["level"], control(rig, "backlight")["shown_level"]), (2, 2))
+        self.report(event=1)  # another of its reports: read again, no change of brightness said
+        self.assertEqual(rig.kb._level_event, 1)
+        rig.settle()
+        self.assertEqual(self.reads(), reads + 2)
+        entered, release = self.hold(lambda request: request[0] is Backlight.read)
+        for _ in range(5):
+            self.report()
+            if not entered.is_set():
+                self.assertTrue(self.reached(entered))
+        release.set()
+        rig.settle()
+        self.assertEqual(self.reads(), reads + 4)  # the one under way, and one more after the burst
+        self.assertEqual(self.setters(BL), [])
+
+    def test_nothing_is_put_back_or_kept_on_this_computer(self):
+        with mock.patch.object(config, "save", side_effect=AssertionError("saved")), \
+                mock.patch.object(config, "write_durable", side_effect=AssertionError("written")):
+            rig = self.make()
+            before, exported = copy.deepcopy(rig.engine.cfg), config.export_data(rig.engine.cfg)
+            self.ask("backlight", {"level": 6, "hands_in": 3600})
+            writes = list(self.dev.setting_writes)
+            self.dev.settings[BL]["config"][:] = bl_config(level=1)
+            rig.link(1, False)
+            rig.link(1, True)
+            rig.settle()
+            new = copy.deepcopy(rig.engine.cfg)
+            new["keyboard"]["keys"] = {"0x0f01": COPY}
+            rig.engine._apply_config(new)
+            rig.kb.front_changed("kate")
+            rig.settle()
+            self.assertEqual(self.dev.setting_writes, writes)
+            self.assertEqual(control(rig, "backlight")["value"]["level"], 1)  # what the keyboard says
+            self.assertEqual(config.export_data(before), exported)
+            for text in ("backlight", "hands_in", "3600"):
+                self.assertNotIn(text, json.dumps(rig.engine.cfg))
+
+    def test_state_is_plain_json_and_logs_tell_no_bytes_or_levels(self):
+        def plain(value):
+            if isinstance(value, dict):
+                return all(type(k) is str and plain(v) for k, v in value.items())
+            if isinstance(value, list):
+                return all(plain(v) for v in value)
+            return value is None or type(value) in (str, int, bool)
+        with self.assertLogs("mxoptions", logging.DEBUG) as logs:
+            kb = backlight_keyboard()
+            kb.taken[BL] = [bytes.fromhex("0119ff030c0006003c000504")] * 2
+            rig = self.make(kb)
+            rig.engine.cfg["keyboard"]["notices"] = True
+            self.ask("backlight", {"level": 6})
+            kb.ignore_writes = True
+            self.ask("backlight", {"hands_out": 5})
+            self.shows(5)
+            self.report()
+            rig.settle()
+            rig.kb.set_setting("backlight", {"level": "x"})
+        state = rig.state()
+        self.assertTrue(plain(state["controls"]) and plain(state["notice"]))
+        self.assertEqual(json.loads(json.dumps(state["controls"])), state["controls"])
+        self.assertEqual(set(state["controls"]["backlight"]), {"value", "fields", "can", "levels", "shown_level",
+                                                               "writable", "busy", "outcome"})
+        text, shown = "\n".join(logs.output), json.dumps(state)
+        for private in (identity(UNIT_A), UNIT_A.hex(), "5e015e02", rig.kb.link, "raw", "version", "\\x", "0119ff"):
+            self.assertNotIn(private, shown)
+        lines = [line for line in logs.output if "setting" in line]
+        self.assertTrue(lines)
+        for line in lines:
+            self.assertNotRegex(line, r"\d|\\x|level")
+        self.assertIn("keyboard setting backlight: the keyboard did not take the change", text)
+        self.assertNotIn("0119ff", text)
+
+
+class BrightnessNotice(BacklightBase):
+    """A brightness the keyboard reports changed is told once, with its level, where the settings ask for it."""
+
+    def test_none_for_what_is_found_and_one_for_a_reported_change_in_each_mode_but_automatic(self):
+        for options, told in ((0x19, True), (0x01, True), (0x11, True), (0x09, False), (0x29, False)):
+            with self.subTest(options=hex(options)):
+                rig = self.make(backlight_keyboard(bl_config(options=options)))
+                self.assertEqual(self.owned(), (4 if options != 0x29 else None, 0, 0, False))  # found: no notice
+                self.assertIsNone(self.notice())
+                self.shows(6)
+                self.report()
+                rig.settle()
+                if told:
+                    self.told(6)
+                    self.assertEqual(self.owned(), (6, 1, 1, False))
+                else:  # Automatic: the light around it; a mode it does not know: compared once it is known
+                    self.assertIsNone(self.notice())
+                self.assertEqual(self.setters(BL), [])
+                rig.stop()
+
+    def test_none_for_the_same_level_off_or_with_notices_off_and_none_later_for_those(self):
+        rig = self.make()
+        self.report()
+        rig.settle()
+        self.assertIsNone(self.notice())
+        self.assertEqual(self.owned(), (4, 1, 1, False))
+        self.dev.settings[BL]["config"][0] = 0  # turned off on the keyboard
+        self.shows(0)
+        self.report()
+        rig.settle()
+        self.assertIsNone(self.notice())
+        self.assertEqual(self.owned(), (0, 2, 2, False))  # settled without a word
+        self.dev.settings[BL]["config"][0] = 1
+        rig.engine.cfg["keyboard"]["notices"] = False
+        self.shows(3)
+        self.report()
+        rig.settle()
+        self.assertIsNone(self.notice())
+        self.assertEqual(self.owned(), (3, 3, 3, False))
+        new = copy.deepcopy(rig.engine.cfg)
+        new["keyboard"]["notices"] = True
+        reads = self.reads()
+        rig.engine._apply_config(new)  # turned on: nothing said of what was settled before, nothing read or sent
+        rig.settle()
+        self.assertEqual((self.notice(), self.reads(), self.setters(BL)), (None, reads, []))
+        self.shows(5)
+        self.report()
+        rig.settle()
+        self.told(5)
+
+    def test_a_burst_is_told_once_with_the_level_it_ends_at(self):
+        rig = self.make()
+        entered, release = self.hold(lambda request: request[0] is Backlight.read)
+        for level in (5, 6, 7, 6, 2):
+            self.shows(level)
+            self.report()
+            if not entered.is_set():
+                self.assertTrue(self.reached(entered))
+        release.set()
+        rig.settle()
+        self.told(2)
+        for _ in range(3):  # the same level reported again and again
+            self.report()
+            rig.settle()
+        self.told(2)
+
+    def test_a_new_connection_starts_afresh_and_the_number_goes_on(self):
+        rig = self.make()
+        self.shows(6)
+        self.report()
+        rig.settle()
+        self.told(6)
+        entered, release = self.hold(lambda request: request[0] is Backlight.read)
+        self.shows(1)
+        self.report()
+        self.assertTrue(self.reached(entered))
+        rig.link(1, False)  # gone while that is read: its answer is not taken
+        self.assertIsNone(self.notice())
+        self.assertEqual(self.owned(), (None, 0, 0, False))
+        release.set()
+        self.drain()
+        self.assertEqual(rig.kb._notice_seq, 1)
+        for kb in (self.dev, backlight_keyboard(levels=bl_info(shown=1), unit=UNIT_B)):
+            rig.port.devices[1] = kb
+            rig.link(1, True)
+            rig.settle()
+            self.assertIsNone(self.notice())  # found: no notice, whatever it shows
+            self.assertEqual(rig.kb._level_seen, 1)
+            kb.settings[BL]["info"][1] = 3
+            rig.note(1, kb, BL, b"\x00\x07")
+            rig.settle()
+            self.assertEqual(self.notice()["seq"], rig.kb._notice_seq)
+            self.assertEqual(self.notice()["level"], 3)
+            rig.link(1, False)
+            self.assertIsNone(self.notice())
+        self.assertEqual(rig.kb._notice_seq, 3)
+
+    def test_none_for_a_change_it_did_not_report(self):
+        rig = self.make()
+        self.shows(6)
+        self.due_read()  # read for another reason: what it says now is settled, never told
+        rig.settle()
+        self.assertIsNone(self.notice())
+        self.assertEqual(self.owned(), (6, 0, 0, False))
+
+    def test_each_notice_is_said_once_and_only_while_connected(self):
+        found = {"connected": True, "notice": {"seq": 2, "kind": "backlight", "level": 3, "top": 7}}
+        self.assertEqual(keyboard.level_notice(0, None), (0, None))
+        self.assertEqual(keyboard.level_notice(0, {"connected": True, "notice": None}), (0, None))
+        self.assertEqual(keyboard.level_notice(0, found), (2, (3, 7)))
+        self.assertEqual(keyboard.level_notice(2, found), (2, None))
+        self.assertEqual(keyboard.level_notice(1, dict(found, connected=False)), (1, None))
+        self.assertEqual(keyboard.level_notice(2, dict(found, notice=dict(found["notice"], seq=3, level=0))), (3, (0, 7)))
+
+
+class BrightnessReports(BacklightBase):
+    """A report of a change of brightness is settled only by a read that says the level for certain, made wholly after
+    it: never by one under way when it came, one that failed or was called off, or another setting's change."""
+
+    def test_a_report_during_a_read_is_settled_by_the_read_after_it(self):
+        rig = self.make()
+        first, release_first = self.hold_nth(1)
+        second, release_second = self.hold_nth(2)
+        self.due_read()  # a read nothing was reported for
+        self.assertTrue(self.reached(first))
+        self.shows(6)
+        self.report()  # while it is read: the answer says 6 already
+        release_first.set()
+        self.assertTrue(self.reached(second))  # one read more, due
+        self.assertEqual(control(rig, "backlight")["shown_level"], 6)
+        self.assertEqual(self.owned(), (4, 1, 0, False))
+        self.assertIsNone(self.notice())
+        release_second.set()
+        rig.settle()
+        self.told(6)
+        self.assertEqual(self.owned(), (6, 1, 1, False))
+        self.due_read()
+        rig.settle()
+        self.told(6)
+
+    def test_a_read_that_fails_settles_nothing_and_is_not_tried_at_once(self):
+        rig = self.make()
+        self.shows(6)
+        self.dev.silent = True
+        start = time.monotonic()
+        self.report()
+        rig.settle()
+        self.assertEqual(self.owned(), (4, 1, 0, False))
+        self.retried(start)
+        self.assertIsNone(rig.kb._task)
+        self.assertGreater(rig.kb.due(time.monotonic()), keyboard.RECOVERY_RETRY - 5.0)
+        self.dev.silent = False
+        self.due_read()
+        rig.settle()
+        self.told(6)
+        self.assertEqual(self.owned(), (6, 1, 1, False))
+        self.due_read()
+        rig.settle()
+        self.told(6)
+
+    def test_a_read_called_off_by_the_keys_or_easy_switch_settles_nothing(self):
+        for wish in ("configure", "host"):
+            with self.subTest(wish):
+                rig = self.make()
+                entered, release = self.hold(lambda request: request[0] is Backlight.read)
+                self.shows(6)
+                self.report()
+                self.assertTrue(self.reached(entered))
+                if wish == "configure":
+                    rig.kb.configure()
+                else:
+                    rig.kb.device_action({"type": "host", "host": 1}, "press")
+                    self.assertEqual(rig.kb._task.__name__, "_switch")
+                release.set()
+                rig.settle()
+                if wish == "host":  # it stayed: once the switch's grace is over, it is read again
+                    self.assertEqual(self.dev.switched, [1])
+                    self.assertEqual(self.owned(), (4, 1, 0, False))
+                    rig.kb._leaving = 0.0
+                    rig.kb._next_recovery = time.monotonic()
+                    rig.kb.tick(time.monotonic())
+                    rig.settle()
+                self.told(6)
+                self.assertEqual(self.owned(), (6, 1, 1, False))
+                rig.stop()
+        rig = self.make()
+        self.shows(6)
+        self.dev.silent = True
+        self.report()
+        rig.settle()
+        rig.link(1, False)  # gone for real: nothing of it is kept
+        self.dev.silent = False
+        rig.link(1, True)
+        rig.settle()
+        self.assertEqual(self.owned(), (6, 0, 0, False))
+        self.assertIsNone(self.notice())
+
+    def test_a_report_during_another_setting_s_change_is_told_after_it(self):
+        for name, value, codec in (("fn", True, FnCodec), ("disable", {"caps_lock": True}, DisableCodec),
+                                   ("platform", 2, PlatformCodec)):
+            with self.subTest(name):
+                kb = backlight_keyboard(hosts=(3, 0), settings={
+                    device.HOSTS_INFO: 0, HOSTS: {0: [1, 1], 1: [0, 1], 2: [1, 1]},
+                    DK: {"caps": 0x1F, "current": 0}, MP: multi()})
+                rig = self.make(kb)
+                entered, release = self.hold(lambda request, codec=codec: request[0] is codec.write)
+                self.ask(name, value, settle=False)
+                self.assertTrue(self.reached(entered))
+                self.shows(6)
+                self.report()
+                release.set()
+                rig.settle()
+                self.assertEqual(len(kb.setting_writes), 1)
+                self.told(6)
+                self.assertEqual(self.owned(), (6, 1, 1, False))
+                rig.stop()
+
+    def test_what_is_not_said_for_certain_keeps_the_report_until_a_read_that_is(self):
+        def unknown_mode(kb):
+            kb.settings[BL]["config"][1] = 0x39
+
+        def known_mode(kb):
+            kb.settings[BL]["config"][1] = 0x19
+
+        def no_levels(kb):
+            kb.failing[(BL, 2)] = 5
+
+        def levels(kb):
+            kb.failing.pop((BL, 2), None)
+
+        def too_many(kb):
+            kb.settings[BL]["info"][0] = 17
+
+        def eight(kb):
+            kb.settings[BL]["info"][0] = 8
+
+        for spoil, mend in ((unknown_mode, known_mode), (no_levels, levels), (too_many, eight)):
+            with self.subTest(spoil.__name__):
+                rig = self.make()
+                spoil(self.dev)
+                self.shows(6)
+                start = time.monotonic()
+                self.report()
+                rig.settle()
+                self.assertEqual(self.owned(), (4, 1, 0, False))
+                self.assertIsNone(self.notice())
+                self.retried(start)  # not at once
+                self.due_read()
+                rig.settle()
+                self.assertEqual(self.owned(), (4, 1, 0, False))
+                mend(self.dev)
+                self.due_read()
+                rig.settle()
+                self.told(6)  # compared with what was settled before
+                self.assertEqual(self.setters(BL), [])
+                rig.stop()
+
+
+class BrightnessReadFails(BacklightBase):
+    """A read that fails (an answer that does not fit, an error of the feature) leaves a report, or a change of this
+    program's, to be settled by a read RECOVERY_RETRY later: as time goes on, never stranded, never a setter again."""
+
+    def malformed(self):
+        config, was = self.dev.settings[BL]["config"], self.dev.settings[BL]["config"][0]
+        config[0] = 2  # neither on nor off
+
+        def mend():
+            config[0] = was
+        return mend
+
+    def refused(self):
+        self.dev.failing[(BL, 0)] = 5
+
+        def mend():
+            del self.dev.failing[(BL, 0)]
+        return mend
+
+    def later(self, clock):
+        """RECOVERY_RETRY goes by, and the keyboard's clock ticks."""
+        clock.skip(keyboard.RECOVERY_RETRY + 1)
+        self.rig.kb.tick(time.monotonic())
+        self.rig.settle()
+
+    def test_a_report_read_wrongly_is_settled_later(self):
+        for fail in (self.malformed, self.refused):
+            with self.subTest(fail.__name__):
+                rig = self.make()
+                clock = Later(self)
+                self.shows(6)
+                mend = fail()
+                start = time.monotonic()
+                self.report()
+                rig.settle()
+                self.assertEqual(self.owned(), (4, 1, 0, False))
+                self.assertIsNone(self.notice())
+                self.retried(start)
+                self.later(clock)  # still failing: tried again later still
+                self.assertEqual(self.owned(), (4, 1, 0, False))
+                self.retried(start + keyboard.RECOVERY_RETRY + 1)
+                mend()
+                self.later(clock)
+                self.told(6)
+                self.assertEqual(self.owned(), (6, 1, 1, False))
+                self.assertEqual(rig.kb._settings_at, float("inf"))  # settled: nothing more to read
+                self.assertEqual(self.setters(BL), [])
+                rig.stop()
+
+    def test_its_own_change_read_wrongly_is_settled_later(self):
+        for fail in (self.malformed, self.refused):
+            with self.subTest(fail.__name__):
+                rig = self.make()
+                clock = Later(self)
+                self.dev.settings[BL]["info"][0] = 17  # the level not said: the read back settles nothing
+                start = time.monotonic()
+                self.ask("backlight", {"on": False})
+                self.assertEqual(self.owned(), (4, 0, 0, True))
+                self.retried(start)
+                self.dev.settings[BL]["info"][0] = 8
+                mend = fail()
+                self.later(clock)
+                self.assertEqual(self.owned(), (4, 0, 0, True))
+                self.retried(start + keyboard.RECOVERY_RETRY + 1)
+                mend()
+                self.later(clock)
+                self.assertEqual(self.owned(), (4, 0, 0, False))
+                self.assertIsNone(self.notice())
+                self.assertEqual(rig.kb._settings_at, float("inf"))
+                self.assertEqual(len(self.setters(BL)), 1)  # never sent again
+                self.dev.settings[BL]["config"][0] = 1  # on again, brighter, on the keyboard after it: told
+                self.shows(6)
+                self.report()
+                rig.settle()
+                self.told(6)
+                rig.stop()
+
+
+class BrightnessOwnChange(BacklightBase):
+    """What the keyboard reports while this program changes its backlight is settled without a word, by the first
+    read after the change that says the level for certain; it never holds the change up, nor sends it again."""
+
+    def test_a_report_during_the_setter_is_settled_by_the_read_back(self):
+        rig = self.make()
+        entered, release = self.hold(lambda request: request[0] is Backlight.write)
+        self.ask("backlight", {"level": 6}, settle=False)
+        self.assertTrue(self.reached(entered))
+        self.assertTrue(rig.kb._level_own)
+        self.report()
+        release.set()
+        rig.settle()
+        self.assertIsNone(self.notice())
+        self.assertEqual(self.owned(), (6, 1, 1, False))
+        self.assertEqual(len(self.setters(BL)), 1)
+
+    def test_a_report_during_the_read_back_waits_for_one_read_more(self):
+        rig = self.make()
+        after = lambda request: request[0] is Backlight.read and self.dev.setting_writes  # noqa: E731
+        first, release_first = self.hold_nth(1, after)
+        second, release_second = self.hold_nth(2, after)
+        self.ask("backlight", {"level": 6}, settle=False)
+        self.assertTrue(self.reached(first))
+        self.report()  # the answer says 6 already
+        release_first.set()
+        self.assertTrue(self.reached(second))
+        self.assertEqual(self.owned(), (4, 1, 0, True))
+        self.assertIsNone(control(rig, "backlight")["outcome"])  # the change itself is confirmed
+        release_second.set()
+        rig.settle()
+        self.assertIsNone(self.notice())
+        self.assertEqual(self.owned(), (6, 1, 1, False))
+        self.report()  # the same level later: nothing
+        rig.settle()
+        self.assertIsNone(self.notice())
+        self.shows(5)  # another one later: told
+        self.report()
+        rig.settle()
+        self.told(5)
+
+    def test_no_read_back_keeps_it_unsettled_until_a_read_later_and_nothing_is_sent_again(self):
+        kb = backlight_keyboard()
+        muted_once(kb)
+        rig = self.make(kb)
+        start = time.monotonic()
+        self.ask("backlight", {"level": 6})
+        self.assertEqual(control(rig, "backlight")["outcome"], "unconfirmed")
+        self.assertEqual(self.owned(), (4, 0, 0, True))
+        self.retried(start)
+        self.report()  # reported meanwhile: still this change, as far as can be told
+        rig.settle()
+        self.assertEqual(self.owned(), (6, 1, 1, False))
+        self.assertIsNone(self.notice())
+        self.assertEqual(len(self.setters(BL)), 1)
+
+    def test_the_read_before_sending_back_settles_nothing(self):
+        kb = backlight_keyboard()
+        kb.taken[BL] = [bytes.fromhex("0119ff020c0006003c000504")]  # took level 2, not 6
+        rig = self.make(kb)
+        entered, release = self.hold(lambda request: request[0] is Backlight.write and kb.setting_writes)
+        self.ask("backlight", {"level": 6}, settle=False)
+        self.assertTrue(self.reached(entered))  # level 4 about to go back
+        self.assertEqual(self.owned(), (4, 0, 0, True))
+        self.assertEqual(control(rig, "backlight")["shown_level"], 2)
+        release.set()
+        rig.settle()
+        self.assertEqual(control(rig, "backlight")["outcome"], "restored")
+        self.assertEqual(self.owned(), (4, 0, 0, False))
+        self.assertIsNone(self.notice())
+        self.assertEqual(self.setters(BL), [bytes.fromhex("0119ff060c0006003c000504"),
+                                            bytes.fromhex("0119ff040c0006003c000504")])
+
+    def test_called_off_after_the_setter_it_is_settled_by_the_read_that_follows(self):
+        rig = self.make()
+        entered, release = self.hold(lambda request: request[0] is Backlight.read and self.dev.setting_writes)
+        self.ask("backlight", {"level": 6}, settle=False)
+        self.assertTrue(self.reached(entered))
+        self.rig.rivals = ["Solaar"]
+        rig.engine._look_for_rivals(time.monotonic())
+        self.assertTrue(rig.kb._level_own)
+        release.set()
+        rig.settle()
+        self.assertEqual(control(rig, "backlight")["outcome"], "unconfirmed")
+        self.assertEqual(self.owned(), (6, 0, 0, False))
+        self.assertIsNone(self.notice())
+        self.assertEqual(len(self.setters(BL)), 1)
+
+    def test_a_change_on_the_keyboard_while_this_one_is_unsettled_goes_unsaid(self):
+        rig = self.make()
+        entered, release = self.hold(lambda request: request[0] is Backlight.read and self.dev.setting_writes)
+        self.ask("backlight", {"hands_out": 30}, settle=False)
+        self.assertTrue(self.reached(entered))
+        self.shows(2)  # its keys, meanwhile: cannot be told apart from this program's change
+        self.report()
+        release.set()
+        rig.settle()
+        self.assertIsNone(control(rig, "backlight")["outcome"])
+        self.assertIsNone(self.notice())
+        self.assertEqual(self.owned(), (2, 1, 1, False))
+        self.report()  # once settled, the same level says nothing, and another one is told
+        rig.settle()
+        self.assertIsNone(self.notice())
+        self.shows(3)
+        self.report()
+        rig.settle()
+        self.told(3)
+
+
+class BrightnessBeforeTheSetter(BacklightBase):
+    """A report while the backlight is read before its setter gets one read more, so that it can still be told."""
+
+    def test_reported_during_the_read_before_it_is_told_before_the_setter_goes(self):
+        rig = self.make()
+        first, release_first = self.hold_nth(1)
+        second, release_second = self.hold_nth(2)
+        sending, release_sending = self.hold(lambda request: request[0] is Backlight.write)
+        reads = self.reads()
+        self.ask("backlight", {"hands_out": 30}, settle=False)
+        self.assertTrue(self.reached(first))
+        self.shows(6)
+        self.report()
+        release_first.set()
+        self.assertTrue(self.reached(second))  # one read more
+        self.assertIsNone(self.notice())
+        self.dev.settings[BL]["config"][5] = 6  # what only that one sees
+        release_second.set()
+        self.assertTrue(self.reached(sending))
+        self.told(6)  # before the setter goes
+        self.assertEqual(self.reads(), reads + 2)
+        self.assertEqual(self.dev.setting_writes, [])
+        release_sending.set()
+        rig.settle()
+        self.assertEqual(self.setters(BL), [bytes.fromhex("0119ff06060006003c000504")])  # laid over the last read
+        self.told(6)
+        self.assertEqual(self.owned(), (6, 1, 1, False))
+
+    def test_still_not_certain_then_the_change_goes_and_its_read_back_settles_both(self):
+        def no_levels(kb):
+            kb.failing[(BL, 2)] = 5
+
+        def unknown_mode(kb):
+            kb.settings[BL]["config"][1] = 0x39
+
+        for spoil in (no_levels, unknown_mode, None):
+            with self.subTest(spoil.__name__ if spoil else "reported again"):
+                rig = self.make()
+                first, release_first = self.hold_nth(1)
+                second, release_second = self.hold_nth(2)
+                self.ask("backlight", {"on": False} if spoil is unknown_mode else {"hands_out": 30}, settle=False)
+                self.assertTrue(self.reached(first))
+                self.shows(6)
+                self.report()
+                release_first.set()
+                self.assertTrue(self.reached(second))  # the one read more
+                if spoil:
+                    spoil(self.dev)
+                else:
+                    self.report()  # reported again while that is read
+                release_second.set()
+                for _ in range(20):
+                    if self.dev.setting_writes:
+                        break
+                    self.drain()
+                self.assertEqual(len(self.setters(BL)), 1)  # sent all the same, after two reads, never three
+                if spoil is no_levels:
+                    self.dev.failing.pop((BL, 2))
+                rig.settle()
+                if rig.kb._level_own:  # not settled by its read back: by the read after RECOVERY_RETRY
+                    self.due_read()
+                    rig.settle()
+                self.assertIsNone(self.notice())  # 6 went unsaid: taken as part of this program's change
+                self.assertEqual(self.owned()[1:], (rig.kb._level_event, rig.kb._level_event, False))
+                self.assertEqual(len(self.setters(BL)), 1)
+                rig.stop()
+
+    def test_the_read_more_that_fails_sends_nothing(self):
+        rig = self.make()
+        first, release_first = self.hold_nth(1)
+        second, release_second = self.hold_nth(2)
+        start = time.monotonic()
+        self.ask("backlight", {"hands_out": 30}, settle=False)
+        self.assertTrue(self.reached(first))
+        self.shows(6)
+        self.report()
+        release_first.set()
+        self.assertTrue(self.reached(second))
+        self.dev.silent = True
+        release_second.set()
+        rig.settle()
+        self.assertEqual(self.setters(BL), [])
+        self.assertEqual(control(rig, "backlight")["outcome"], "unknown")
+        self.assertEqual((rig.kb._pending, self.owned()), ({}, (4, 1, 0, False)))
+        self.retried(start)
+
+    def test_without_notices_or_while_its_own_change_is_unsettled_no_read_more(self):
+        for notices in (False, True):
+            with self.subTest(notices=notices):
+                kb = backlight_keyboard()
+                if notices:  # its first change stays unsettled: no levels said as it is read back
+                    on_setter(kb, lambda kb: kb.failing.__setitem__((BL, 2), 5))
+                rig = self.make(kb, notices=notices)
+                if notices:
+                    self.ask("backlight", {"hands_in": 10})
+                    self.assertTrue(rig.kb._level_own)
+                    kb.failing.pop((BL, 2))
+                entered, release = self.hold(lambda request: request[0] is Backlight.read)
+                sending, release_sending = self.hold(lambda request: request[0] is Backlight.write)
+                reads = self.reads()
+                self.ask("backlight", {"hands_out": 30}, settle=False)
+                self.assertTrue(self.reached(entered))
+                self.shows(6)
+                self.report()
+                release.set()
+                self.assertTrue(self.reached(sending))
+                self.assertEqual(self.reads(), reads + 1)  # straight on to the setter
+                release_sending.set()
+                rig.settle()
+                self.assertIsNone(self.notice())
+                self.assertFalse(rig.kb._level_own)
+                rig.stop()
+
+
+class BrightnessNeverHoldsUpAChange(BacklightBase):
+    """Whatever the brightness reads say, or do not, every change the keyboard lets be made goes, once."""
+
+    def test_changes_go_while_the_levels_are_never_said(self):
+        for spoil in ("error", "too many", "too few", "unknown mode"):
+            for notices in (True, False):
+                with self.subTest(spoil, notices=notices):
+                    kb = backlight_keyboard()
+                    rig = self.make(kb, notices=notices)
+                    if spoil == "error":
+                        kb.failing[(BL, 2)] = 5
+                    elif spoil == "unknown mode":
+                        kb.settings[BL]["config"][1] = 0x39
+                    else:
+                        kb.settings[BL]["info"][0] = 17 if spoil == "too many" else 1
+                    self.shows(6)
+                    self.report()  # waiting to be settled, and never is while this lasts
+                    rig.settle()
+                    self.assertEqual(self.owned()[:3], (4, 1, 0))
+                    options = "39" if spoil == "unknown mode" else "19"
+                    for request, params in (({"on": False}, "00" + options + "ff040c0006003c000504"),
+                                            ({"on": True}, "01" + options + "ff040c0006003c000504"),
+                                            ({"hands_out": 5}, "01" + options + "ff04010006003c000504"),
+                                            ({"hands_in": 7200}, "01" + options + "ff040100a0053c000504"),
+                                            ({"powered": 900}, "01" + options + "ff040100a005b4000504")):
+                        reads, sent = self.reads(), len(self.setters(BL))
+                        self.ask("backlight", request)
+                        self.assertEqual(self.setters(BL)[sent:], [bytes.fromhex(params)])
+                        self.assertIsNone(control(rig, "backlight")["outcome"])
+                        self.assertEqual(self.reads(), reads + 2)  # no read for the notice's sake
+                        self.assertEqual(rig.kb._pending, {})
+                    self.ask("backlight", {"level": 2})  # where no level is known, or the mode is not: refused
+                    self.assertEqual(control(rig, "backlight")["outcome"], "unsupported")
+                    if spoil != "unknown mode":
+                        self.ask("backlight", {"mode": "auto"})
+                        self.assertIsNone(control(rig, "backlight")["outcome"])
+                    else:
+                        self.ask("backlight", {"mode": "auto"})
+                        self.assertEqual(control(rig, "backlight")["outcome"], "unsupported")
+                    sent = len(self.setters(BL))
+                    rig.settle()
+                    self.assertEqual(rig.kb._level_own, spoil != "unknown mode")  # with levels said, it settles
+                    self.assertIsNone(self.notice())
+                    self.assertEqual(len(self.setters(BL)), sent)  # nothing more of its own accord
+                    rig.stop()
+
+    def test_a_whole_read_that_fails_still_sends_nothing(self):
+        kb = backlight_keyboard()
+        rig = self.make(kb)
+        kb.failing[(BL, 2)] = 5
+        self.shows(6)
+        self.report()
+        rig.settle()
+        kb.settings[BL]["config"][0] = 2  # not a reading that fits
+        self.ask("backlight", {"on": False})
+        self.assertEqual((control(rig, "backlight")["outcome"], self.setters(BL)), ("unknown", []))
+        kb.settings[BL]["config"][0] = 1
+        kb.silent = True
+        self.ask("backlight", {"on": False})
+        self.assertEqual((control(rig, "backlight")["outcome"], self.setters(BL)), ("unknown", []))
+        self.assertEqual(self.owned(), (4, 1, 0, False))
+
+    def test_unsettled_for_a_long_time_it_is_read_once_each_retry_and_never_sent_again(self):
+        later = Later(self)
+        kb = backlight_keyboard()
+        rig = self.make(kb)
+        kb.failing[(BL, 2)] = 5
+        self.shows(6)
+        self.report()
+        rig.settle()
+        self.ask("backlight", {"hands_out": 30})
+        self.assertEqual(self.owned(), (4, 1, 0, True))
+        for _ in range(4):
+            reads = self.reads()
+            later.skip(keyboard.RECOVERY_RETRY - 1)
+            for _ in range(5):  # before the retry: nothing
+                rig.kb.tick(time.monotonic())
+                rig.settle()
+            self.assertEqual(self.reads(), reads)
+            later.skip(2)
+            for _ in range(5):
+                rig.kb.tick(time.monotonic())
+                rig.settle()
+            self.assertEqual(self.reads(), reads + 1)  # once each retry
+        kb.failing.pop((BL, 2))
+        later.skip(keyboard.RECOVERY_RETRY + 1)
+        rig.kb.tick(time.monotonic())
+        rig.settle()
+        self.assertEqual(self.owned(), (4, 1, 1, False))  # its fixed level 4, as sent again with the timer
+        self.assertIsNone(self.notice())  # 6 went unsaid with this program's change
+        self.assertEqual(len(self.setters(BL)), 1)
+        reads = self.reads()
+        later.skip(keyboard.RECOVERY_RETRY * 3)
+        rig.kb.tick(time.monotonic())
+        rig.settle()
+        self.assertEqual(self.reads(), reads)  # settled: no more reads
+        self.shows(3)
+        self.report()
+        rig.settle()
+        self.told(3)
+
+    def test_a_second_change_goes_while_the_first_is_unsettled_and_neither_is_sent_again(self):
+        for first_back in ("no levels", "no answer"):
+            with self.subTest(first_back):
+                kb = backlight_keyboard()
+                if first_back == "no levels":
+                    on_setter(kb, lambda kb: kb.failing.__setitem__((BL, 2), 5))
+                else:
+                    muted_once(kb)
+                rig = self.make(kb)
+                entered, release = self.hold(lambda request: request[0] is Backlight.write)
+                self.ask("backlight", {"level": 6}, settle=False)
+                self.assertTrue(self.reached(entered))
+                self.ask("backlight", {"hands_in": 10}, settle=False)  # asked after the first setter
+                release.set()
+                rig.settle()
+                self.assertEqual(self.setters(BL), [bytes.fromhex("0119ff060c0006003c000504"),
+                                                    bytes.fromhex("0119ff060c0002003c000504")])
+                self.assertIsNone(control(rig, "backlight")["outcome"])
+                if first_back == "no levels":
+                    self.assertTrue(rig.kb._level_own)
+                    kb.failing.pop((BL, 2))
+                    self.due_read()
+                    rig.settle()
+                self.assertEqual(self.owned(), (6, 0, 0, False))
+                self.assertIsNone(self.notice())
+                self.assertEqual(len(self.setters(BL)), 2)
+                self.shows(1)
+                self.report()
+                rig.settle()
+                self.told(1)
+                rig.stop()
+
+    def test_a_change_that_is_not_sent_leaves_the_report_as_it_was(self):
+        def equal(rig):
+            self.ask("backlight", {"hands_out": 60})
+
+        def refused(rig):
+            self.ask("backlight", {"level": 9})
+
+        def blocked(rig):
+            entered, release = self.hold(lambda request: request[0] is Backlight.read)
+            self.ask("backlight", {"hands_out": 30}, settle=False)
+            self.assertTrue(self.reached(entered))
+            self.rig.rivals = ["Solaar"]
+            rig.engine._look_for_rivals(time.monotonic())
+            release.set()
+            rig.settle()
+            self.rig.rivals = []
+            rig.engine._look_for_rivals(time.monotonic())
+
+        def called_off(rig):
+            entered, release = self.hold(lambda request: request[0] is Backlight.read)
+            self.ask("backlight", {"hands_out": 30}, settle=False)
+            self.assertTrue(self.reached(entered))
+            rig.link(1, False)
+            release.set()
+            self.drain()
+            rig.link(1, True)
+            rig.settle()
+
+        for attempt in (equal, refused, blocked, called_off):
+            with self.subTest(attempt.__name__):
+                kb = backlight_keyboard()
+                rig = self.make(kb)
+                kb.failing[(BL, 2)] = 5
+                self.shows(6)
+                self.report()
+                rig.settle()
+                attempt(rig)
+                self.assertEqual(self.setters(BL), [])
+                self.assertFalse(rig.kb._level_own)
+                kb.failing.pop((BL, 2))
+                self.due_read()
+                rig.settle()
+                if attempt is called_off:  # a new connection: nothing kept, nothing said
+                    self.assertEqual((self.owned(), self.notice()), ((6, 0, 0, False), None))
+                else:
+                    self.told(6)  # the report is still told, compared with what was settled before
+                self.assertEqual(self.setters(BL), [])
+                rig.stop()
+        kb = backlight_keyboard()
+        muted_once(kb)
+        rig = self.make(kb)
+        self.ask("backlight", {"level": 6})
+        self.assertTrue(rig.kb._level_own)
+        kb.failing[(BL, 2)] = 5
+        self.ask("backlight", {"level": 6})  # so already: its own change stays unsettled, nothing sent
+        self.assertTrue(rig.kb._level_own)
+        self.assertEqual(len(self.setters(BL)), 1)
+
+
+V2_SHOWN = {"value": {"on": True, "power_save": True, "mode": "none", "level": None, "hands_out": None, "hands_in": None,
+                      "powered": None},
+            "fields": ["on", "power_save"], "can": ["on"], "levels": 8, "shown_level": 0}
+V3_SHOWN = {"value": {"on": True, "power_save": False, "mode": "manual", "level": 4, "hands_out": 60, "hands_in": 30,
+                      "powered": 300},
+            "fields": ALL_FIELDS, "can": ASKABLE, "levels": 8, "shown_level": 4}
+
+
+class BacklightPage(unittest.TestCase):
+    """The backlight rows of the Keyboard page (Qt offscreen)."""
+
+    def setUp(self):
+        Page.setUp(self)
+        self.row, self.switch = self.page.settings_rows["backlight"], self.page.backlight_switch
+        self.rows = self.page.backlight_rows
+
+    def buttons(self):
+        from PySide6.QtWidgets import QPushButton
+        return self.page.brightness.findChildren(QPushButton)
+
+    def show(self, control=V3_SHOWN, connected=True, reason=None, **changes):
+        controls = {}
+        if control is not None:
+            control = copy.deepcopy(control)
+            control["value"] = dict(control["value"], **changes.pop("value", {})) if control.get("value") else None
+            controls["backlight"] = dict({"writable": True, "busy": False, "outcome": None}, **control)
+            controls["backlight"].update(changes)
+        found = {"connected": connected, "known": True, "name": "Synthetic keyboard", "battery": None, "current_host": 0,
+                 "hosts": [], "keys": [], "reason": reason, "failed": None, "firmware": None, "settings": ["backlight"],
+                 "controls": controls, "notice": None}
+        self.store.update_state(dict(self.store.state, keyboard=found))
+
+    def shown_rows(self):
+        return [key for key, row in self.rows.items() if not row.isHidden()]
+
+    def test_rows_for_what_the_keyboard_has(self):
+        self.show(None)
+        self.assertTrue(self.switch.isHidden())
+        self.assertEqual(self.shown_rows(), [])
+        self.assertIn("MX Options does not change them yet", self.row.note.text())
+        self.show(V2_SHOWN)
+        self.assertFalse(self.switch.isHidden())
+        self.assertEqual(self.shown_rows(), ["power_save", "notices"])
+        self.show()
+        self.assertEqual(self.shown_rows(), ["mode", "level", "hands_out", "hands_in", "powered", "power_save", "notices"])
+        self.show(dict(V3_SHOWN, fields=["on", "hands_out"], levels=None))
+        self.assertEqual(self.shown_rows(), ["hands_out"])
+        self.show({"value": None}, writable=False, outcome="unknown")
+        self.assertEqual(self.shown_rows(), [])
+        self.assertEqual(self.row.note.text(), "The keyboard did not say how this is set.")
+        self.show(connected=False)
+        self.assertEqual(self.shown_rows(), [])
+        self.assertTrue(self.switch.isHidden())
+        self.assertEqual(self.calls, [])
+
+    def test_changeable_as_the_keyboard_lets_it_be(self):
+        page = self.page
+        boxes = list(page.timer_boxes.values())
+        self.show()
+        self.assertTrue(all(widget.isEnabled() for widget in [self.switch, page.brightness, page.level] + boxes))
+        self.assertFalse(page.power_save.isEnabled())  # shown only
+        self.show(value={"mode": "auto"})
+        self.assertFalse(page.level.isEnabled())  # set by the light around it
+        self.assertTrue(page.brightness.isEnabled())
+        self.show(busy=True)
+        self.assertFalse(any(widget.isEnabled() for widget in [self.switch, page.brightness] + boxes))
+        self.assertTrue(page.level.isEnabled())  # keeps the keyboard's focus; a move is laid over the change asked
+        for changes in ({"writable": False}, {"writable": False, "reason": "rivals"}):
+            with self.subTest(changes):
+                self.show(**changes)
+                self.assertFalse(any(widget.isEnabled() for widget in [self.switch, page.brightness, page.level] + boxes))
+        self.show(can=["on", "hands_in"])
+        self.assertEqual([widget.isEnabled() for widget in [self.switch, page.brightness, page.level] + boxes],
+                         [True, False, False, False, True, False])
+        self.show(value={"mode": "keys"}, can=["mode"])
+        self.assertEqual([widget.isEnabled() for widget in [self.switch, page.brightness, page.level] + boxes],
+                         [False, True, False, False, False, False])
+        self.assertFalse(any(button.isChecked() for button in self.buttons()))
+        self.assertEqual(self.calls, [])
+
+    def test_one_request_for_each_choice_and_none_on_refresh(self):
+        page = self.page
+        self.show()
+        self.switch.click()
+        self.buttons()[0].click()
+        box = page.timer_boxes["hands_out"]
+        self.assertEqual(box.itemData(box.currentIndex()), 60)
+        box.activated.emit(box.findData(30))
+        box.activated.emit(box.findData(60))  # the one it has: nothing to ask
+        self.assertEqual(self.calls, [("backlight", {"on": False}), ("backlight", {"mode": "auto"}),
+                                      ("backlight", {"hands_out": 30})])
+        self.show(busy=True)
+        self.assertFalse(self.switch.isChecked())  # what was asked for, until the keyboard answers
+        self.show(value={"on": False, "mode": "auto", "hands_out": 30, "level": 2})
+        self.show(value={"level": 6, "hands_in": 3600})
+        self.assertEqual((page.level.value(), page.timer_boxes["hands_in"].currentData()), (6, 3600))
+        self.assertTrue(self.switch.isChecked())
+        self.assertEqual(len(self.calls), 3)  # following the keyboard asks nothing
+
+    def test_the_slider_asks_for_whole_levels_from_its_keys_at_once_and_from_a_drag_once_let_go(self):
+        from PySide6.QtCore import QPoint, Qt
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QStyle, QStyleOptionSlider
+        page, slider = self.page, self.page.level.slider
+        emitted = []
+        page.level.changed.connect(lambda value: emitted.append(("changed", value)))
+        page.level.released.connect(lambda value: emitted.append(("released", value)))
+        self.show()
+        self.assertEqual((slider.minimum(), slider.maximum(), page.level.value()), (0, 7, 4))
+        slider.setFocus()
+        QTest.keyClick(slider, Qt.Key.Key_Right)
+        QTest.keyClick(slider, Qt.Key.Key_PageDown)
+        self.app.processEvents()
+        self.assertEqual(emitted, [("changed", 5.0), ("changed", 4.0)])
+        self.assertTrue(all(type(value) is float for _kind, value in emitted))  # what the widget says ...
+        self.assertEqual(self.calls, [("backlight", {"level": 5})])  # ... and only a whole level goes; 4 it has
+        option = QStyleOptionSlider()
+        slider.initStyleOption(option)
+        handle = slider.style().subControlRect(QStyle.ComplexControl.CC_Slider, option,
+                                               QStyle.SubControl.SC_SliderHandle, slider).center()
+        emitted.clear()
+        QTest.mousePress(slider, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, handle)
+        QTest.mouseMove(slider, QPoint(slider.width() - 2, handle.y()))
+        self.app.processEvents()
+        self.assertTrue(slider.isSliderDown())
+        self.assertEqual(len(self.calls), 1)  # nothing while dragged ...
+        self.show(value={"level": 2})  # ... nor moved back by what the keyboard says meanwhile
+        self.assertEqual(page.level.value(), 7)
+        QTest.mouseRelease(slider, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
+                           QPoint(slider.width() - 2, handle.y()))
+        self.app.processEvents()
+        self.assertEqual(emitted[-1], ("released", 7.0))
+        self.assertEqual(self.calls[1:], [("backlight", {"level": 7})])
+        for _name, payload in self.calls:
+            self.assertIs(type(payload["level"]), int)
+            self.assertTrue(Backlight.valid(payload))
+        self.assertFalse(Backlight.valid({"level": 5.0}))
+        self.show(value={"level": 7})
+        QTest.keyClick(slider, Qt.Key.Key_Left)
+        QTest.keyClick(slider, Qt.Key.Key_Right)  # back to the level the keyboard has: nothing to ask
+        self.show(value={"level": 6}, busy=True)  # while a change is under way, the last move counts
+        self.assertEqual(page.level.value(), 7)
+        QTest.keyClick(slider, Qt.Key.Key_Left)
+        self.assertEqual(self.calls[2:], [("backlight", {"level": 6}), ("backlight", {"level": 6})])
+        kb = backlight_keyboard()  # what the page asks, the engine takes and sends
+        rig = Rig(self, {1: kb, 2: mouse_device()}).start()
+        for _name, payload in self.calls:
+            rig.kb.set_setting("backlight", payload)
+            rig.settle()
+        self.assertEqual([params[3] for _feature, params in kb.setting_writes], [5, 7, 6])
+
+    def test_timer_choices_and_values_it_has_of_its_own(self):
+        page = self.page
+        self.show(value={"hands_out": 35, "hands_in": 3665})
+        box = page.timer_boxes["hands_out"]
+        labels = [box.itemText(i) for i in range(box.count())]
+        self.assertEqual(labels, ["5 s", "10 s", "15 s", "30 s", "35 s", "1 min", "2 min", "5 min", "10 min", "15 min",
+                                  "30 min", "1 h", "2 h"])
+        self.assertEqual(box.currentText(), "35 s")
+        self.assertEqual(page.timer_boxes["hands_in"].currentText(), "1 h 1 min 5 s")
+        self.assertEqual(page.timer_boxes["powered"].currentText(), "5 min")
+        self.show(value={"powered": None}, can=["on", "mode", "level", "hands_out", "hands_in"])
+        powered = page.timer_boxes["powered"]
+        self.assertEqual(([powered.itemText(i) for i in range(powered.count())], powered.isEnabled()), (["Not known"], False))
+        powered.activated.emit(0)
+        self.assertEqual(self.calls, [])
+
+    def test_a_note_for_each_state(self):
+        notes = self.pages.BACKLIGHT_NOTES
+        for changes, note in (({}, ""), ({"writable": False}, notes["read-only"]),
+                              ({"writable": False, "reason": "rivals"}, ""),
+                              ({"value": {"mode": "keys"}, "can": ["mode"]}, notes["keys"]),
+                              ({"value": {"mode": "keys"}, "can": [], "fields": ["on", "power_save"]}, notes["keys-only"]),
+                              ({"value": {"mode": None}, "can": ["on", "hands_out", "hands_in", "powered"]},
+                               notes["mode-unknown"]),
+                              ({"fields": ["on", "power_save", "mode"], "can": ["on", "mode"]}, notes["untimed"]),
+                              ({"outcome": "restored"}, self.pages.OUTCOMES["restored"]),
+                              ({"value": {"mode": "keys"}, "outcome": "unsupported"}, self.pages.OUTCOMES["unsupported"])):
+            with self.subTest(changes):
+                self.show(**copy.deepcopy(changes))
+                self.assertEqual(self.row.note.text(), note)
+                self.assertEqual(self.row.note.isHidden(), not note)
+        self.show()
+        self.assertEqual(self.row.info.text(), self.pages.BACKLIGHT_HINT)
+        self.assertEqual(self.page.level.info.text(), self.pages.LEVEL_HINT.format(top=7))
+        self.show(levels=16)
+        self.assertEqual(self.page.level.info.text(), self.pages.LEVEL_HINT.format(top=15))
+        self.assertEqual(self.page.level.slider.maximum(), 15)
+
+    def test_names_for_assistive_technology_and_every_word_translated(self):
+        page = self.page
+        self.show()
+        self.assertEqual(self.switch.accessibleName(), "Backlight on")
+        self.assertEqual(page.brightness.accessibleName(), "Brightness")
+        self.assertEqual([button.accessibleName() for button in self.buttons()],
+                         ["Automatic brightness", "Fixed brightness"])
+        self.assertEqual(page.level.slider.accessibleName(), "Backlight brightness level")
+        self.assertEqual([box.accessibleName() for box in page.timer_boxes.values()],
+                         ["Backlight off after, hands away", "Backlight off after, hands near",
+                          "Backlight off after, plugged in"])
+        for key, box in page.timer_boxes.items():
+            self.assertIs(self.rows[key].title.buddy(), box)
+        self.assertEqual(page.power_save.accessibleName(), "Off at low battery")
+        self.assertEqual(page.notices.accessibleName(), "Show a notice when the brightness changes on the keyboard")
+        from mxoptions import i18n_uk
+        words = [*self.pages.BACKLIGHT_NOTES.values(), self.pages.BACKLIGHT_HINT, self.pages.LEVEL_HINT,
+                 self.pages.POWER_SAVE_HINT, *(text for row in self.pages.TIMER_ROWS for text in row[1:]), "Backlight on",
+                 "Automatic", "Fixed", "Brightness", "Automatic brightness", "Fixed brightness", "Brightness level",
+                 "Backlight brightness level", "Dimmer", "Brighter", "Not known", "Off at low battery",
+                 "Show a notice when the brightness changes on the keyboard", "{} h", "{} min", "{} s",
+                 "Keyboard backlight: level {level} of {top}"]
+        for text in words:
+            self.assertIn(text, i18n_uk.STRINGS)
+        for text in words + ["Backlight", "Keyboard settings"]:  # no protocol words in what is shown
+            self.assertNotRegex(text + i18n_uk.STRINGS[text], r"0x|1982|\bV\d|\bbit|\bunits?\b|\bbyte")
+
+    def test_the_notice_switch_is_a_setting_of_this_program_only(self):
+        self.show()
+        self.assertFalse(self.page.notices.isChecked())
+        self.page.notices.click()
+        self.assertIs(self.store.cfg["keyboard"]["notices"], True)
+        self.show()
+        self.assertTrue(self.page.notices.isChecked())
+        self.store.set("keyboard", "notices", False)  # changed elsewhere (a settings file): followed
+        self.assertFalse(self.page.notices.isChecked())
+        self.assertEqual(self.calls, [])  # the keyboard is never asked
+
+    def test_durations_in_words_keep_every_second(self):
+        from mxoptions import i18n
+        cases = ((5, "5 s", "5 с"), (60, "1 min", "1 хв"), (90, "1 min 30 s", "1 хв 30 с"), (3600, "1 h", "1 год"),
+                 (3605, "1 h 5 s", "1 год 5 с"), (3660, "1 h 1 min", "1 год 1 хв"),
+                 (3665, "1 h 1 min 5 s", "1 год 1 хв 5 с"), (5400, "1 h 30 min", "1 год 30 хв"), (7200, "2 h", "2 год"))
+        self.assertEqual([self.pages.duration_text(seconds) for seconds, _en, _uk in cases], [en for _s, en, _uk in cases])
+        self.addCleanup(i18n.setup, "en")
+        i18n.setup("uk")
+        self.assertEqual([self.pages.duration_text(seconds) for seconds, _en, _uk in cases], [uk for _s, _en, uk in cases])
+        self.assertEqual(len({self.pages.duration_text(seconds) for seconds, _en, _uk in cases}), len(cases))
+
+    def test_tab_reaches_every_control(self):
+        from PySide6.QtCore import Qt
+        page = self.page
+        self.show()
+        wanted = [self.switch, *self.buttons(), page.level.slider,
+                  *page.timer_boxes.values(), page.notices]
+        reached, widget = [], self.switch
+        for _ in range(500):
+            if widget.isVisibleTo(page) and widget.isEnabled() and widget.focusPolicy() in (
+                    Qt.FocusPolicy.TabFocus, Qt.FocusPolicy.StrongFocus, Qt.FocusPolicy.WheelFocus):
+                reached.append(widget)
+            widget = widget.nextInFocusChain()
+            if widget is self.switch:
+                break
+        for control in wanted:
+            self.assertIn(control, reached)
+        self.assertEqual(sorted(reached.index(control) for control in wanted), [reached.index(c) for c in wanted])
+
+
 if __name__ == "__main__":
     unittest.main()

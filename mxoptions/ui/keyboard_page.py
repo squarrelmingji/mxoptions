@@ -11,7 +11,7 @@ from ..i18n import _
 from . import theme
 from .action_picker import ActionPicker
 from .pages import FirmwareQuery, ScrollPage, _header
-from .widgets import Card, Row, Switch, hint_label
+from .widgets import Card, Row, Segmented, SliderRow, Switch, hint_label
 
 # What a key may not do: what only makes sense on the mouse (catalogue ids, see config.KEYBOARD_ACTIONS)
 KEYBOARD_EXCLUDE = ("gestures", "ring", "wheel_mode", "dpi_cycle", "dpi_shift", "flow")
@@ -75,6 +75,29 @@ OS_NAMES = {"windows": "Windows", "macos": "macOS", "linux": "Linux", "chromeos"
             "ios": "iOS", "webos": "webOS", "windows_embedded": "Windows Embedded", "tizen": "Tizen"}
 PLATFORM_HINT = ("The layout the keyboard uses for the operating system on this Easy-Switch channel; each channel keeps "
                  "its own. The keyboard's own shortcut for it, as its guide describes, changes it too.")
+BACKLIGHT_HINT = ("The keyboard keeps these settings itself; its own backlight keys change them too. MX Options does not "
+                  "store them.")
+# What the Backlight row says while nothing else does (KeyboardPage._show_backlight), the first that applies
+BACKLIGHT_NOTES = {
+    "read-only": "MX Options does not change the backlight of this keyboard; its own keys do.",
+    "keys": "Brightness is set with the keyboard's keys just now. Choose Automatic or Fixed to set it here.",
+    "keys-only": "Brightness is set with the keyboard's keys.",
+    "mode-unknown": "The keyboard uses a brightness setting MX Options does not know; it is left as it is.",
+    "untimed": "Brightness and timing are set with the keyboard's keys; newer keyboard firmware may let MX Options set "
+               "them too.",
+}
+LEVEL_HINT = "Steps 0 to {top}, as the keyboard counts them. In Automatic, the light around the keyboard sets the brightness."
+POWER_SAVE_HINT = "Shown as the keyboard reports it. MX Options does not change this yet."
+# The backlight's timers (kbsettings.TIMERS): the title of each one's row, its name for assistive technology, its hint
+TIMER_ROWS = (
+    ("hands_out", "Off after, hands away", "Backlight off after, hands away",
+     "How long the backlight stays on after you type, once your hands move away."),
+    ("hands_in", "Off after, hands near", "Backlight off after, hands near",
+     "How long the backlight stays on after you type, while your hands stay near the keyboard."),
+    ("powered", "Off after, plugged in", "Backlight off after, plugged in",
+     "How long the backlight stays on after you type, while the keyboard is charging over USB."),
+)
+TIMER_STOPS = (5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200)  # s
 CAP_W, CAP_H, CAP_GAP, PAD = 152, 54, 8, 18
 CHARGING = (device.BATTERY_CHARGING, device.BATTERY_ALMOST_FULL, device.BATTERY_SLOW_CHARGE)
 
@@ -85,6 +108,14 @@ def layout_labels(choices):
               for choice in choices]
     return [label + " · " + _("Layout {}").format(choice["index"] + 1) if labels.count(label) > 1 else label
             for label, choice in zip(labels, choices)]
+
+
+def duration_text(seconds):
+    """A time in whole seconds in words: hours, minutes and seconds, each left out only where it is 0."""
+    hours, rest = divmod(seconds, 3600)
+    minutes, seconds = divmod(rest, 60)
+    return " ".join(unit.format(count) for count, unit in ((hours, _("{} h")), (minutes, _("{} min")), (seconds, _("{} s")))
+                    if count)
 
 
 def battery_text(battery):
@@ -496,7 +527,10 @@ class KeyboardPage(ScrollPage):
         self.platform_box.setAccessibleName(_("Operating system layout"))
         self.platform_box.activated.connect(self._platform_chosen)
         self._choices = []  # the layouts in self.platform_box, as the keyboard offers them
-        controls = {"fn": self.fn_switch, "platform": self.platform_box}
+        self.backlight_switch = Switch()
+        self.backlight_switch.setAccessibleName(_("Backlight on"))
+        self.backlight_switch.toggled.connect(lambda on: self._backlight_asks({"on": on}))
+        controls = {"fn": self.fn_switch, "platform": self.platform_box, "backlight": self.backlight_switch}
         self.settings_rows, self.disable_switches, self.disable_rows = {}, {}, {}
         for name, (title, text) in SETTINGS.items():
             self.settings_rows[name] = card.add(Row(_(title), None, controls.get(name), note=_(text)))
@@ -506,6 +540,8 @@ class KeyboardPage(ScrollPage):
                     switch.setAccessibleName(_("Turn off the {} key").format(cap))
                     switch.toggled.connect(lambda on, key=key: self.store.engine.set_keyboard_setting("disable", {key: on}))
                     self.disable_rows[key] = card.add(Row(_(label), None, switch))
+            if name == "backlight":
+                self._add_backlight(card)
         self.settings_rows["platform"].title.setBuddy(self.platform_box)
         self.settings_card = card
         self.body.addWidget(card)
@@ -526,7 +562,58 @@ class KeyboardPage(ScrollPage):
         self.finish()
 
         store.state_changed.connect(self._state)
+        store.changed.connect(lambda: self.notices.set_checked_silently(self.store.cfg["keyboard"].get("notices") is True))
         self._state(store.state)
+
+    def _add_backlight(self, card):
+        """The rows under the Backlight row: brightness, its level, the timers, low battery, the notice."""
+        self.backlight_rows = {}
+        self.brightness = Segmented([("auto", _("Automatic")), ("manual", _("Fixed"))])
+        self.brightness.setAccessibleName(_("Brightness"))
+        for button, name in zip(self.brightness.findChildren(QPushButton), (_("Automatic brightness"), _("Fixed brightness"))):
+            button.setAccessibleName(name)
+        self.brightness.selected.connect(lambda mode: self._backlight_asks({"mode": mode}))
+        self.backlight_rows["mode"] = card.add(Row(_("Brightness"), None, self.brightness))
+        self.level = SliderRow(_("Brightness level"), 0, 7, 1, low_label=_("Dimmer"), high_label=_("Brighter"))
+        self.level.slider.setAccessibleName(_("Backlight brightness level"))
+        # the arrow and Page keys, or a click beside the handle, ask at once; a drag only once let go
+        self.level.changed.connect(lambda value: None if self.level.slider.isSliderDown() else self._level_chosen(value))
+        self.level.released.connect(self._level_chosen)
+        self._levels = None  # the number of levels the slider has
+        self.backlight_rows["level"] = card.add(self.level)
+        self.timer_boxes = {}
+        for key, title, name, hint in TIMER_ROWS:
+            box = self.timer_boxes[key] = QComboBox()
+            box.setAccessibleName(_(name))
+            box.activated.connect(lambda position, key=key: self._timer_chosen(key, position))
+            self.backlight_rows[key] = card.add(Row(_(title), _(hint), box))
+            self.backlight_rows[key].title.setBuddy(box)
+        self.power_save = Switch()
+        self.power_save.setAccessibleName(_("Off at low battery"))
+        self.power_save.setEnabled(False)  # shown only
+        self.backlight_rows["power_save"] = card.add(Row(_("Off at low battery"), _(POWER_SAVE_HINT), self.power_save))
+        title = _("Show a notice when the brightness changes on the keyboard")
+        self.notices = Switch()
+        self.notices.setAccessibleName(title)
+        self.notices.toggled.connect(lambda on: self.store.set("keyboard", "notices", on))
+        self.backlight_rows["notices"] = card.add(Row(title, None, self.notices))
+
+    def _backlight(self):
+        return ((self.store.state.get("keyboard") or {}).get("controls") or {}).get("backlight") or {}
+
+    def _backlight_asks(self, change):
+        self.store.engine.set_keyboard_setting("backlight", change)
+
+    def _level_chosen(self, position):
+        control = self._backlight()
+        level = int(position)  # the slider says a float; the keyboard takes whole levels only
+        if level != (control.get("value") or {}).get("level") or control.get("busy"):  # busy: the last one counts
+            self._backlight_asks({"level": level})
+
+    def _timer_chosen(self, key, position):
+        seconds = self.timer_boxes[key].itemData(position)
+        if seconds is not None and seconds != (self._backlight().get("value") or {}).get(key):
+            self._backlight_asks({key: seconds})
 
     def _show_note(self, name, control, hint, otherwise=""):
         """The note and hint of setting ``name``'s row: its general words while MX Options cannot change it, else how
@@ -572,6 +659,62 @@ class KeyboardPage(ScrollPage):
             if not control.get("busy"):
                 switch.set_checked_silently(key in off)
             switch.setEnabled(self._changeable(control))
+
+    def _show_backlight(self, control, shown, blocked):
+        """The Backlight row and those under it, each where the keyboard has it, changeable as it lets it be. The slider
+        stays where it is moved while the change is under way, and can still be moved; it asks for whole levels."""
+        value, fields = (control or {}).get("value") or {}, (control or {}).get("fields") or []
+        can = (control or {}).get("can") or [] if (control or {}).get("writable") else []
+        mode, busy, levels = value.get("mode"), bool((control or {}).get("busy")), (control or {}).get("levels")
+        note = ""
+        if not value:
+            pass
+        elif not control.get("writable") and not blocked:
+            note = "read-only"
+        elif mode == "keys":
+            note = "keys" if "mode" in fields else "keys-only"
+        elif mode is None:
+            note = "mode-unknown"
+        elif not {"level", "hands_out", "hands_in", "powered"} & set(fields):
+            note = "untimed"
+        self.backlight_switch.setVisible(control is not None)
+        self._show_note("backlight", control, BACKLIGHT_HINT, _(BACKLIGHT_NOTES[note]) if note else "")
+        for key, row in self.backlight_rows.items():
+            here = key in fields if key != "notices" else bool(value) and ("level" in fields or levels is not None)
+            self.settings_card.set_row_visible(row, shown and here)
+        if control is None:
+            return
+        self.notices.set_checked_silently(self.store.cfg["keyboard"].get("notices") is True)
+        if not busy:
+            self.backlight_switch.set_checked_silently(bool(value.get("on")))
+            self.brightness.set_value(mode)  # none chosen while set with its keys, or not known
+        self.backlight_switch.setEnabled(self._changeable(control) and "on" in can)
+        self.brightness.setEnabled(self._changeable(control) and "mode" in can)
+        self.power_save.set_checked_silently(bool(value.get("power_save")))
+        if levels and levels != self._levels:
+            self._levels = levels
+            self.level.set_range(0, levels - 1, 1)
+            self.level.info.set_text(_(LEVEL_HINT).format(top=levels - 1))
+        if not busy and not self.level.slider.isSliderDown() and value.get("level") is not None:
+            self.level.set_value(value["level"])
+        self.level.setEnabled(bool(control.get("writable")) and "level" in can and mode == "manual")
+        for key, box in self.timer_boxes.items():
+            seconds = value.get(key)
+            if seconds is None:
+                items = [(_("Not known"), None)]
+            else:
+                items = [(duration_text(stop), stop) for stop in sorted(set(TIMER_STOPS) | {seconds})]
+            if [(box.itemText(i), box.itemData(i)) for i in range(box.count())] != items:
+                box.blockSignals(True)
+                box.clear()
+                for text, stop in items:
+                    box.addItem(text, stop)
+                box.blockSignals(False)
+            if not busy:
+                box.blockSignals(True)
+                box.setCurrentIndex(box.findData(seconds) if seconds is not None else 0)
+                box.blockSignals(False)
+            box.setEnabled(self._changeable(control) and key in can)
 
     def _show_platform(self, control, blocked):
         """The layout for this computer's Easy-Switch channel, picked from those the keyboard offers."""
@@ -656,6 +799,7 @@ class KeyboardPage(ScrollPage):
         controls = (found.get("controls") or {}) if connected else {}
         self._show_fn(controls.get("fn"))
         self._show_disable(controls.get("disable"), "disable" in settings)
+        self._show_backlight(controls.get("backlight"), "backlight" in settings, bool(found.get("reason")))
         self._show_platform(controls.get("platform"), bool(found.get("reason")))
         battery = found.get("battery") if connected else None
         self.battery.setText(battery_text(battery) if battery else _("Connected") if connected else _("Not connected"))

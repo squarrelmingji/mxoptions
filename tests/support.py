@@ -116,7 +116,11 @@ class FakeDevice:
     FN_INVERSION_DEFAULT: [state, default], FN_INVERSION: [state], HOSTS_INFO: current host it says}, each
     answered (functions 0 and 1) and listed; also DISABLE_KEYS: {"caps": bits, "current": bits} (functions 0, 1, 2),
     MULTI_PLATFORM: {"info": function 0's answer, "descriptors": [function 1's answers]} (functions 0, 1, 3; 3
-    leaves the platform in byte 6) and DUAL_PLATFORM: [platform] (function 0)."""
+    leaves the platform in byte 6), DUAL_PLATFORM: [platform] (function 0) and BACKLIGHT_2: {"config": function 0's
+    14 bytes, "info": function 2's answer} (function 1 takes 12 bytes, laid into the config as both sources read it:
+    bytes 0, 1 and the level and timers, never the capabilities or effects; a fixed level is then the one function
+    2 says is shown). ``versions``: {feature id: version},
+    as Root function 0 answers it in byte 2 (0 for any other)."""
 
     def __init__(self, name="Synthetic keyboard", kind=device.KIND_KEYBOARD, controls=(), unit=b"\x5e\x01\x5e\x02",
                  model=b"\x0a\x0b\x0c\x0d\x0e\x0f", info=True, battery=(80, device.BATTERY_DISCHARGING), hosts=(3, 0),
@@ -149,6 +153,7 @@ class FakeDevice:
         self.ignore_writes = False  # a setter is answered, but changes nothing
         self.taken = {}          # feature id -> [state, ...]: what the next setters leave instead of what they send
         self.replies = {}        # (feature id, function) -> payload answered instead
+        self.versions = {}       # feature id -> version, as Root function 0 says it
 
     def index(self, feature):
         return self.features.index(feature)
@@ -168,7 +173,7 @@ class FakeDevice:
             if function == 1:
                 return bytes([4, 2, params[2]])
             wanted = struct.unpack("!H", params[:2])[0]
-            return bytes([self.features.index(wanted), 0, 0]) if wanted in self.features else bytes(3)
+            return bytes([self.features.index(wanted), 0, self.versions.get(wanted, 0)]) if wanted in self.features else bytes(3)
         if feature == device.FEATURE_SET:
             if function == 0:
                 return bytes([len(self.features) - 1])
@@ -234,6 +239,19 @@ class FakeDevice:
                 info[6] = self.taken[feature].pop(0) if self.taken.get(feature) else params[1]
                 value["info"] = bytes(info)
             return bytes(params[:2])
+        if feature == device.BACKLIGHT_2:
+            if function in (0, 2):
+                return bytes(value["config" if function == 0 else "info"])
+            if function != 1:
+                return 7
+            self.setting_writes.append((feature, bytes(params[:12])))
+            if not self.ignore_writes:
+                params = self.taken[feature].pop(0) if self.taken.get(feature) else bytes(params[:12])
+                config = value["config"]
+                config[0:2], config[5:14] = params[0:2], params[3:12]
+                if params[1] >> 3 & 3 == 3 and len(value["info"]) > 1:  # a fixed level is the one shown
+                    value["info"][1] = params[3]
+            return bytes()
         if function not in (0, 1):
             return 7
         if feature == device.FN_INVERSION_HOSTS:

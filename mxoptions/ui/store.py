@@ -113,8 +113,8 @@ class Store(QObject):
         return True
 
     def restore_keyboard(self):
-        """Every key does what it always does, in every app: no profile is left either."""
-        self.set_section("keyboard", {"keys": {}, "profiles": []})
+        """Every key does what it always does, in every app: no profile is left either. Notices stay as they are."""
+        self.set_section("keyboard", dict(self.cfg["keyboard"], keys={}, profiles=[]))
 
     def set_section(self, section, values):
         if self.cfg[section] != values:
