@@ -116,6 +116,25 @@ class Editor(unittest.TestCase):
             self.assertTrue(config.macro_step(step))
         self.assertEqual(set(editors.STEP_LABELS), set(actions.MACRO_STEPS))
 
+    def test_press_again_comes_back_as_it_went_in_and_is_left_out_when_off(self):
+        old = {"type": "macro", "name": "m", "repeat": True, "steps": STEPS}
+        stoppable = dict(old, stop_on_press=True)
+        made = self.dialog(stoppable)
+        self.assertTrue(made.again.isChecked())
+        self.assertEqual(made.action(), stoppable)
+        made.again.setChecked(False)
+        self.assertEqual(made.action(), old)
+        for action in (old, dict(old, stop_on_press=False), dict(old, stop_on_press="yes")):
+            with self.subTest(action=action):
+                made = self.dialog(action)
+                self.assertFalse(made.again.isChecked())
+                self.assertEqual(made.action(), old)
+                made.again.setChecked(True)
+                self.assertEqual(made.action(), stoppable)
+
+    def test_the_press_again_switch_has_a_name_for_screen_readers(self):
+        self.assertEqual(self.dialog({"type": "macro", "steps": []}).again.accessibleName(), editors._("Press again to stop"))
+
 
 if __name__ == "__main__":
     unittest.main()

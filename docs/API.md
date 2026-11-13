@@ -273,6 +273,17 @@ Macro steps, for a button or a key:
 
 An action or haptic step that is not complete is kept in the settings of a button but skipped when its macro plays.
 
+A macro with `"stop_on_press": true` on a mouse button or a key stops when that same button or key
+is pressed again while the macro plays or waits in the queue: dropped while queued, ended before its
+next step, a wait cut short. That press starts nothing; the press after it starts the macro again. A
+step already under way finishes, and a command the macro started keeps running. The macro counts as
+playing until it is quite over, the short pause after its last step included: a press just as it
+ends may only stop it. Only presses of the button or key that started it count: another button or
+key with an equal macro, a gesture, a ring bubble and `Trigger` start it as before, queued behind.
+Without the field, or with `false`, a press while it plays queues it once more, as before. Under
+`keyboard` and `mouse.profiles` the field is `true` or `false`. Versions before it keep the field
+but ignore it, and their macro editor drops it when the macro is saved there.
+
 ## Example: a Python client
 
 Needs `dbus-python` and PyGObject.

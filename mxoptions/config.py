@@ -477,7 +477,8 @@ def keyboard_action(action):
     if kind == "macro":
         steps = action.get("steps")
         return (isinstance(steps, list) and 0 < len(steps) <= MAX_MACRO_STEPS and _text(action.get("name", ""), empty=True)
-                and isinstance(action.get("repeat", False), bool) and all(macro_step(step) for step in steps))
+                and isinstance(action.get("repeat", False), bool) and isinstance(action.get("stop_on_press", False), bool)
+                and all(macro_step(step) for step in steps))
     if kind == "host":
         host = action.get("host")
         return type(host) is int and 0 <= host <= 15

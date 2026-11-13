@@ -1692,5 +1692,94 @@ class ThumbWheelPage(unittest.TestCase):
         self.assertTrue(page.apps.isVisible())
 
 
+from tests.test_keyboard import Gate  # noqa: E402
+
+
+def stoppable(*steps, repeat=False):
+    return dict(macro(*steps, repeat=repeat), stop_on_press=True)
+
+
+class PressAgainButtons(unittest.TestCase):
+    """A button pressed again stops the macro with "stop_on_press" it started; gestures, ring bubbles and Trigger
+    queue it as before, and so does a value that is not true. Real Executor, played by a Gate."""
+
+    copy_settings, press = MacrosPerApp.copy_settings, MacrosPerApp.press
+
+    def made(self, profiles=(), **buttons):
+        made = make(self, profiles, buttons=buttons)
+        return made, Gate(self, made.executor)
+
+    def test_a_button_pressed_again_stops_its_macro(self):
+        made, gate = self.made(back=stoppable("KEY_A", "KEY_B"))
+        self.press(made, BACK)
+        gate.playing()
+        self.press(made, BACK)
+        self.assertEqual(gate.drained(), ["KEY_A"])
+        self.assertEqual(held(made), set())
+
+    def test_equal_copies_and_an_app_with_an_equal_macro_keep_it_stoppable(self):
+        made, gate = self.made([profile(KATE, back=stoppable("KEY_A", "KEY_B"))], back=stoppable("KEY_A", "KEY_B"))
+        self.press(made, BACK)
+        gate.playing()
+        self.copy_settings(made)
+        self.copy_settings(made)
+        front(made, KATE)
+        self.press(made, BACK)
+        self.assertEqual(gate.drained(), ["KEY_A"])
+
+    def test_gestures_ring_bubbles_and_trigger_queue_it_as_before(self):
+        def gesture(made):
+            self.press(made, GESTURE)
+
+        def bubble(made):
+            made.ring_action(stoppable("KEY_A", "KEY_B"), None)
+            drain(made)
+
+        def trigger(made):
+            made.trigger_action(stoppable("KEY_A", "KEY_B"))
+            drain(made)
+        for run in (gesture, bubble, trigger):
+            with self.subTest(run=run.__name__):
+                gestures = dict(config.default_gestures(), tap=stoppable("KEY_A", "KEY_B"))
+                made, gate = self.made(gesture=gestures)
+                run(made)
+                gate.playing()
+                run(made)
+                self.assertEqual(gate.drained(), ["KEY_A", "KEY_B"] * 2)
+
+    def test_a_value_that_is_not_true_queues(self):
+        for value in ("yes", 1):
+            with self.subTest(value=value):
+                made, gate = self.made(back=dict(macro("KEY_A", "KEY_B"), stop_on_press=value))
+                self.press(made, BACK)
+                gate.playing()
+                self.press(made, BACK)
+                self.assertEqual(gate.drained(), ["KEY_A", "KEY_B"] * 2)
+
+    def test_a_reset_forgets_it(self):
+        made, gate = self.made(back=stoppable("KEY_A", "KEY_B"))
+        self.press(made, BACK)
+        gate.playing()
+        made._reset_input_state()
+        self.press(made, BACK)
+        self.assertEqual(gate.drained(), ["KEY_A", "KEY_A", "KEY_B"])
+
+    def test_the_mouse_and_the_keyboard_keep_their_macros_apart(self):
+        made, mouse = self.made()
+        keys = actions.Executor(made.vinput, lambda *_args: None, owner="keyboard")
+        board = Gate(self, keys)
+        shared = stoppable("KEY_A", "KEY_B")
+        made.executor.press(shared)
+        made.executor.release(shared)
+        mouse.playing()
+        keys.press(shared)  # not playing on the keyboard: it starts there
+        keys.release(shared)
+        board.playing()
+        keys.press(shared)  # stops the keyboard's only
+        keys.release(shared)
+        self.assertEqual(board.drained(), ["KEY_A"])
+        self.assertEqual(mouse.drained(), ["KEY_A", "KEY_B"])
+
+
 if __name__ == "__main__":
     unittest.main()

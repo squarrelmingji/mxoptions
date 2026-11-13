@@ -9,7 +9,8 @@ An action is a plain JSON-able dict:
     {"type": "desktop", "do": "overview"}    what the desktop does in its own way (environment.py): only named here
     {"type": "command", "command": "..."}    shell command
     {"type": "script", "name": n, "script": "..."}    multi-line script (bash unless it has a #! line)
-    {"type": "macro", "name": n, "repeat": bool, "steps": [...]}   sequence of steps, see MACRO_STEPS
+    {"type": "macro", "name": n, "repeat": bool, "steps": [...]}   sequence of steps, see MACRO_STEPS; with
+                                             "stop_on_press": true a press of its button or key while it plays stops it
     {"type": "wheel_mode"}                   toggle ratchet / free spin
     {"type": "dpi_cycle"}                    toggle between the two pointer speeds
     {"type": "dpi_shift"}                    precision speed while held
@@ -528,6 +529,9 @@ class Executor:
         elif kind == "hook":
             self.hook(action.get("name", ""), "press")
         elif kind == "macro":
+            if action.get("stop_on_press") is True and id(action) in self._sources:
+                self.cancel(action)  # pressed again while queued or playing: it stops, and nothing new starts
+                return
             held = threading.Event()
             held.set()
             self._macro_holds[id(action)] = held

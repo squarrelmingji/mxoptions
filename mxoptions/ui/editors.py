@@ -288,6 +288,21 @@ class MacroDialog(_Dialog):
         repeat.addWidget(self.repeat)
         self.body.addLayout(repeat)
 
+        again = QHBoxLayout()
+        again_text = QVBoxLayout()
+        again_text.setSpacing(1)
+        title = QLabel(_("Press again to stop"))
+        title.setObjectName("rowTitle")
+        again_text.addWidget(title)
+        again_text.addWidget(hint_label(_("Pressing its mouse button or key again while it plays stops it, instead of "
+                                          "playing it once more. Not for gestures, Actions Ring bubbles or other programs.")))
+        again.addLayout(again_text, 1)
+        self.again = Switch()
+        self.again.setAccessibleName(_("Press again to stop"))
+        self.again.set_checked_silently(action.get("stop_on_press") is True)
+        again.addWidget(self.again)
+        self.body.addLayout(again)
+
         self.add_buttons(_("Test in 3 s"))
         self.test.clicked.connect(self._test)
         self._rows = []
@@ -336,9 +351,12 @@ class MacroDialog(_Dialog):
         QTimer.singleShot(3200, self, lambda: self.test.setEnabled(True))  # dropped if the dialog closes
 
     def action(self):
-        return {
+        made = {
             "type": "macro",
             "name": self.name.text().strip(),
             "repeat": self.repeat.isChecked(),
             "steps": [step for step in (row.step() for row in self._rows) if step is not None],
         }
+        if self.again.isChecked():
+            made["stop_on_press"] = True  # left out when off: macros saved before stay as they were
+        return made

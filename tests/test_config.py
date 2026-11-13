@@ -521,5 +521,47 @@ class MacroSteps(unittest.TestCase):
         self.assertEqual((cleaned["buttons"]["back"], cleaned["keyboard"]["keys"]), (old, {"0x00c7": old}))
 
 
+class StopOnPress(unittest.TestCase):
+    """A macro's "stop_on_press": true or false where keys and profiles are checked, kept everywhere a macro is."""
+
+    MACRO = {"type": "macro", "name": "m", "repeat": False, "steps": [{"do": "keys", "keys": ["KEY_A"]}]}
+    load = Migration.load
+
+    def stoppable(self, value=True):
+        return dict(copy.deepcopy(self.MACRO), stop_on_press=value)
+
+    def test_a_key_takes_true_or_false_only(self):
+        self.assertTrue(config.keyboard_action(copy.deepcopy(self.MACRO)))
+        for value in (True, False):
+            with self.subTest(value=value):
+                self.assertTrue(config.keyboard_action(self.stoppable(value)))
+        for value in ("yes", 1, 0, None, [True]):
+            with self.subTest(value=value):
+                self.assertFalse(config.keyboard_action(self.stoppable(value)))
+                self.assertEqual(config.clean({"keyboard": {"keys": {"0x0f01": self.stoppable(value)}}})["keyboard"]["keys"], {})
+                profile = {"app": "org.kde.kate", "name": "Kate", "buttons": {"back": self.stoppable(value)}, "ring": None}
+                self.assertEqual(config.mouse_profile(profile)["buttons"], {})
+
+    def test_the_field_survives_cleaning_export_and_import(self):
+        cfg = copy.deepcopy(config.DEFAULTS)
+        cfg["buttons"]["back"] = self.stoppable()
+        cfg["buttons"]["gesture"]["tap"] = self.stoppable()
+        cfg["keyboard"]["keys"] = {"0x0f01": self.stoppable()}
+        cfg["keyboard"]["profiles"] = [{"app": "kate", "name": "Kate", "keys": {"0x0f01": self.stoppable()}}]
+        cfg["mouse"]["profiles"] = [{"app": "org.kde.kate", "name": "Kate", "buttons": {"back": self.stoppable()}, "ring": None}]
+        cfg["ring"]["bubbles"][0]["action"] = self.stoppable()
+        cleaned = config.clean(copy.deepcopy(cfg))
+        self.assertEqual(cleaned, cfg)
+        self.assertEqual(config.import_data(config.export_data(cleaned), cleaned), cleaned)
+
+    def test_macros_saved_before_come_back_without_it(self):
+        stored = copy.deepcopy(config.DEFAULTS)
+        stored["buttons"]["back"] = copy.deepcopy(self.MACRO)
+        stored["keyboard"]["keys"] = {"0x0f01": copy.deepcopy(self.MACRO)}
+        loaded, saved = self.load(stored)
+        self.assertEqual((loaded["buttons"]["back"], loaded["keyboard"]["keys"]), (self.MACRO, {"0x0f01": self.MACRO}))
+        self.assertEqual(saved, stored)
+
+
 if __name__ == "__main__":
     unittest.main()

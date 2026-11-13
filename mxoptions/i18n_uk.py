@@ -322,6 +322,9 @@ STRINGS = {
     "No steps yet. Add the first one below.": "Кроків ще немає. Додайте перший нижче.",
     "Repeat while the button is held": "Повторювати, поки кнопку затиснуто",
     "Only applies when the macro is assigned to a mouse button.": "Діє лише коли макрос призначено на кнопку миші.",
+    "Press again to stop": "Зупиняти повторним натисканням",
+    "Pressing its mouse button or key again while it plays stops it, instead of playing it once more. Not for gestures, Actions Ring bubbles or other programs.":
+        "Повторне натискання його кнопки миші чи клавіші, поки він виконується, зупиняє його замість повторного запуску. Не діє для жестів, бульбашок кільця дій та інших програм.",
     "Keys": "Клавіші",
     "Text": "Текст",
     "Wait": "Пауза",

@@ -2377,5 +2377,125 @@ class MacroSources(unittest.TestCase):
         self.assertTrue(rig.key(0x0F01)["active"])
 
 
+def stoppable(*names, repeat=False):
+    return dict(macro(*names, repeat=repeat), stop_on_press=True)
+
+
+class PressAgain(unittest.TestCase):
+    """A macro with "stop_on_press" stops when its key is pressed again while it plays or waits, and nothing new
+    starts; the next press starts it again. Without the field a press queues it once more, as before."""
+
+    macro_rig, tap, apply, save, change = (MacroSources.macro_rig, MacroSources.tap, MacroSources.apply,
+                                           MacroSources.save, MacroSources.change)
+
+    def test_pressed_again_while_it_plays_it_stops_before_its_next_step(self):
+        rig = self.macro_rig({"0x0f01": stoppable("KEY_A", "KEY_B")})
+        self.tap(rig)
+        self.gate.playing()
+        self.tap(rig)
+        self.assertEqual(rig.kb.executor.macros._queue.qsize(), 0)
+        self.assertEqual(self.gate.drained(), ["KEY_A"])
+
+    def test_pressed_again_while_queued_it_never_plays(self):
+        rig = self.macro_rig({"0x0f01": stoppable("KEY_C"), "0x0f02": macro("KEY_A", "KEY_B")})
+        self.tap(rig, 0x0F02)
+        self.gate.playing()
+        self.tap(rig)
+        self.tap(rig)
+        self.assertEqual(self.gate.drained(), ["KEY_A", "KEY_B"])
+
+    def test_a_third_press_starts_it_anew(self):
+        rig = self.macro_rig({"0x0f01": stoppable("KEY_A", "KEY_B")})
+        self.tap(rig)
+        self.gate.playing()
+        self.tap(rig)
+        self.tap(rig)
+        self.assertEqual(self.gate.drained(), ["KEY_A", "KEY_A", "KEY_B"])
+
+    def test_a_press_after_it_played_to_its_end_starts_it_again(self):
+        rig = self.macro_rig({"0x0f01": stoppable("KEY_C")})
+        self.tap(rig)
+        self.assertEqual(self.gate.drained(), ["KEY_C"])
+        self.tap(rig)
+        self.assertEqual(self.gate.drained(), ["KEY_C", "KEY_C"])
+
+    def test_without_the_field_or_with_false_presses_queue_as_before(self):
+        for value in (None, False):
+            with self.subTest(value=value):
+                action = macro("KEY_A", "KEY_B")
+                if value is not None:
+                    action["stop_on_press"] = value
+                rig = self.macro_rig({"0x0f01": action})
+                self.tap(rig)
+                self.gate.playing()
+                self.tap(rig)
+                self.assertEqual(self.gate.drained(), ["KEY_A", "KEY_B"] * 2)
+
+    def test_another_key_with_an_equal_macro_neither_stops_it_nor_is_stopped(self):
+        rig = self.macro_rig({"0x0f01": stoppable("KEY_A", "KEY_B"), "0x0f02": stoppable("KEY_A", "KEY_B")})
+        self.tap(rig)
+        self.gate.playing()
+        self.tap(rig, 0x0F02)  # queued behind it
+        self.tap(rig)  # stops the first key's only
+        self.assertEqual(self.gate.drained(), ["KEY_A", "KEY_A", "KEY_B"])
+
+    def test_a_press_the_full_queue_turned_away_does_not_count_as_playing(self):
+        rig = self.macro_rig({"0x0f01": stoppable("KEY_C"), "0x0f02": macro("KEY_A", "KEY_B")})
+        self.tap(rig, 0x0F02)
+        self.gate.playing()
+        for _ in range(4):
+            self.tap(rig, 0x0F02)
+        self.assertEqual(rig.kb.executor.macros._queue.qsize(), 4)
+        self.tap(rig)  # turned away
+        self.assertEqual(self.gate.drained(), ["KEY_A", "KEY_B"] * 5)
+        self.tap(rig)
+        self.assertEqual(self.gate.drained(), ["KEY_A", "KEY_B"] * 5 + ["KEY_C"])
+
+    def test_equal_saves_between_presses_keep_it_stoppable(self):
+        rig = self.macro_rig({"0x0f01": stoppable("KEY_A", "KEY_B")})
+        self.tap(rig)
+        self.gate.playing()
+        self.save(rig)
+        self.save(rig)
+        self.tap(rig)
+        self.assertEqual(self.gate.drained(), ["KEY_A"])
+
+    def test_switching_the_field_off_stops_it_and_later_presses_queue(self):
+        rig = self.macro_rig({"0x0f01": stoppable("KEY_A", "KEY_B")})
+        self.tap(rig)
+        self.gate.playing()
+        self.change(rig, action=macro("KEY_A", "KEY_B"))
+        self.assertEqual(self.gate.drained(), ["KEY_A"])
+        self.gate.open.clear()
+        self.gate.entered.clear()
+        self.gate.ran.clear()
+        self.tap(rig)
+        self.gate.playing()
+        self.tap(rig)
+        self.assertEqual(self.gate.drained(), ["KEY_A", "KEY_B"] * 2)
+
+    def test_an_app_with_an_equal_macro_keeps_it_stoppable(self):
+        rig = self.macro_rig({"0x0f01": stoppable("KEY_A", "KEY_B")},
+                             [profile("editor", {"0x0f01": stoppable("KEY_A", "KEY_B")})])
+        front(rig, "editor")
+        self.tap(rig)
+        self.gate.playing()
+        front(rig, "browser")
+        self.tap(rig)
+        self.assertEqual(self.gate.drained(), ["KEY_A"])
+
+    def test_after_the_keyboard_went_away_and_back_a_press_starts_it(self):
+        rig = self.macro_rig({"0x0f01": stoppable("KEY_A", "KEY_B")})
+        self.tap(rig)
+        self.gate.playing()
+        rig.link(1, False)  # its macros reset, their sources dropped
+        self.assertIsNone(rig.kb.device)
+        rig.link(1, True)
+        rig.settle()
+        self.assertIsNotNone(rig.kb.device)
+        self.tap(rig)
+        self.assertEqual(self.gate.drained(), ["KEY_A", "KEY_A", "KEY_B"])
+
+
 if __name__ == "__main__":
     unittest.main()

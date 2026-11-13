@@ -179,6 +179,21 @@ class Settings(unittest.TestCase):
         self.assertEqual(self.keys(), {})
         self.assertIsNone(self.store.state["keyboard"])
 
+    def test_a_key_macro_with_a_stop_value_not_true_or_false_is_refused(self):
+        stoppable = {"type": "macro", "name": "m", "repeat": False, "steps": [{"do": "keys", "keys": ["KEY_A"]}],
+                     "stop_on_press": True}
+        self.api.Set("keyboard.keys", json.dumps({"0x00c7": self.COPY}))
+        before = copy.deepcopy(self.store.cfg)
+        for value in ("yes", 1, None):
+            with self.subTest(value=value):
+                wrong = dict(stoppable, stop_on_press=value)
+                self.assertFalse(self.api.Set("keyboard.keys", json.dumps({"0x00c7": wrong})))
+                self.assertFalse(self.api.Set("keyboard.keys.0x00c7", json.dumps(wrong)))
+                self.assertFalse(self.store.set_key("0x00c7", wrong))
+                self.assertEqual(self.store.cfg, before)
+        self.assertTrue(self.api.Set("keyboard.keys.0x00c7", json.dumps(stoppable)))
+        self.assertEqual(json.loads(self.api.Get("keyboard.keys.0x00c7")), stoppable)
+
 
 class KeyChooser(unittest.TestCase):
     """The keys on the Keys page, picked and given an action with the keyboard alone."""
