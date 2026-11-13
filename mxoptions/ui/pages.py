@@ -428,12 +428,14 @@ class PointScrollPage(ScrollPage):
 
         # thumb wheel
         card = Card(_("Thumb wheel"))
+        self.apps = card.add(AppChooser(store, _("Settings for")))  # whose function is shown: the rest is for all apps
+        self.apps.when_chosen = lambda app: _(
+            "While {} is in front. \"As in all apps\": the function set for all apps. Direction, speed and steps are "
+            "the same in every app.").format(app)
         self.thumb_function = QComboBox()
         for key in config.THUMB_FUNCTIONS:
             self.thumb_function.addItem(_(THUMB_LABELS[key]), key)
-        self.thumb_function.activated.connect(
-            lambda index: self.store.set("thumbwheel", "function", self.thumb_function.itemData(index))
-        )
+        self.thumb_function.activated.connect(self._thumb_chosen)
         card.add(Row(_("Function"), None, self.thumb_function))
         self.thumb_invert = Switch()
         self.thumb_invert.toggled.connect(lambda on: self.store.set("thumbwheel", "invert", on))
@@ -452,8 +454,22 @@ class PointScrollPage(ScrollPage):
         self.finish()
 
         store.changed.connect(self._refresh)
+        store.mouse_app_changed.connect(self._app_changed)
         store.state_changed.connect(self._state)
         self._refresh()
+
+    def _app_changed(self):
+        self.apps.refresh()  # the list first: a page may be refreshed before its chooser
+        self._refresh()
+
+    def _thumb_chosen(self, index):
+        """A thumb wheel function picked: the chosen app's own (None: as in all apps), or the one for all apps."""
+        function = self.thumb_function.itemData(index)
+        profile = chosen_profile(self.store)
+        if profile is not None:
+            self.store.set_profile_thumb(profile["app"], function)
+        else:
+            self.store.set("thumbwheel", "function", function)
 
     # -- the mode switch click ----------------------------------------------------
 
@@ -500,8 +516,11 @@ class PointScrollPage(ScrollPage):
         for slider, key in ((self.click_pitch, "pitch"), (self.click_length, "length")):
             slider.set_value(click[key])
             slider.setEnabled(heard and click["sound"] != "custom")  # a file of the user's own is played as it is
+        profile = chosen_profile(self.store)
+        own = config.app_thumb_function(cfg, profile["app"]) if profile is not None else None
+        shown = own or cfg["thumbwheel"]["function"]  # what the thumb wheel does where the page looks
         self.thumb_ticks.set_checked_silently(cfg["thumbwheel"]["ticks"])
-        self.thumb_ticks_row.setEnabled(cfg["thumbwheel"]["function"] != "hscroll" and cfg["haptics"]["enabled"])
+        self.thumb_ticks_row.setEnabled(shown != "hscroll" and cfg["haptics"]["enabled"])
         self.dpi.set_value(cfg["pointer"]["dpi"])
         self.alt_dpi.set_value(cfg["pointer"]["alt_dpi"])
         self.precision_dpi.set_value(cfg["pointer"]["precision_dpi"])
@@ -517,7 +536,13 @@ class PointScrollPage(ScrollPage):
         self.wheel_speed.set_value(wheel["speed"])
         self.wheel_speed.setEnabled(wheel["smooth"])
         thumb = cfg["thumbwheel"]
-        self.thumb_function.setCurrentIndex(max(0, self.thumb_function.findData(thumb["function"])))
+        inherit = self.thumb_function.itemData(0) is None  # "As in all apps" offered: only while an app is chosen
+        if profile is not None and not inherit:
+            self.thumb_function.insertItem(0, _("As in all apps"), None)
+        elif profile is None and inherit:
+            self.thumb_function.removeItem(0)
+        self.thumb_function.setCurrentIndex(
+            0 if profile is not None and own is None else max(0, self.thumb_function.findData(own or thumb["function"])))
         self.thumb_invert.set_checked_silently(thumb["invert"])
         self.thumb_speed.set_value(thumb["speed"])
 

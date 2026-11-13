@@ -69,8 +69,11 @@ THUMB_STEPS = {
 }
 
 
-def _wire(cfg, section):
-    """What of ``section`` goes to the mouse: battery saving is the program's alone and is never sent."""
+def _wire(cfg, section, app=None):
+    """What of ``section`` goes to the mouse while ``app`` is in front: battery saving is the program's alone and is
+    never sent; the thumb wheel has the app's own function, if it has one."""
+    if section == "thumbwheel":
+        return config.thumbwheel(cfg, app)
     part = cfg.get(section)
     if section == "haptics" and isinstance(part, dict):
         part = {key: value for key, value in part.items() if key != "battery_saving"}
@@ -454,16 +457,24 @@ class Engine:
                 self._mouse_front(app)
 
     def _mouse_front(self, app):
-        """``app`` is in front now: the buttons and the ring do what its mouse profile says. Only the buttons that
-        change and report otherwise are written to the mouse."""
+        """``app`` is in front now: the buttons, the ring and the thumb wheel do what its mouse profile says. Only the
+        buttons that change and report otherwise are written to the mouse, the thumb wheel only when it changes
+        between going to the program and not."""
         if app == self._app:
             return
+        thumb_before = config.thumbwheel(self.cfg, self._app)
         self._app = app
         old = self._effective_buttons()
         changed = self._remap_buttons(old)
         writes = [key for key in changed if self._reporting(old[key]) != self._reporting(self._buttons[key])]
-        if writes and self.mouse and self.online:
-            self._apply(["buttons"], keys=writes)
+        sections = ["buttons"] if writes else []
+        thumb = config.thumbwheel(self.cfg, app)
+        if thumb != thumb_before:
+            self._thumb.update(acc=0.0, fraction=0.0)  # a step begun in the app before is not finished in this one
+            if self._thumb_diverted(thumb) != self._thumb_diverted(thumb_before):
+                sections.append("thumbwheel")
+        if sections and self.mouse and self.online:
+            self._apply(sections, keys=writes)
         self._ring_check()
         log.debug("the app in front changed")
 
@@ -691,9 +702,11 @@ class Engine:
         self._publish()
 
     def _apply_config(self, cfg):
-        changed = [s for s in SECTIONS if s != "buttons" and _wire(cfg, s) != _wire(self.cfg, s)]
+        changed = [s for s in SECTIONS if s != "buttons" and _wire(cfg, s, self._app) != _wire(self.cfg, s, self._app)]
         if "pointer" in changed:
             self._dpi_override = None  # the user moved the slider: that wins
+        if "thumbwheel" in changed:
+            self._thumb.update(acc=0.0, fraction=0.0)  # online or not: no step begun under the old function finishes
         self._effective_buttons()  # settings changed in place (not through set_config) taken first: no change here
         old, self.cfg = self.cfg, cfg
         if self._remap_buttons(self._effective_buttons()):  # what the buttons do here, the app in front's profile too
@@ -794,8 +807,8 @@ class Engine:
             mouse.set_wheel_mode(diverted, diverted, wheel["natural"] and not diverted and mouse.wheel["has_invert"])
             self._wheel_fraction = 0.0
 
-    def _thumb_diverted(self):
-        thumb = self.cfg["thumbwheel"]
+    def _thumb_diverted(self, thumb):
+        """Whether the thumb wheel goes to the program with the thumb wheel settings ``thumb`` (config.thumbwheel)."""
         if thumb["function"] == "hscroll":
             return bool(self.vinput) and abs(thumb["speed"] - 1.0) > 0.01
         return thumb["function"] == "desktops" or bool(self.vinput)
@@ -803,8 +816,9 @@ class Engine:
     def _apply_thumbwheel(self):
         if not self.mouse.thumbwheel:
             return
-        diverted = self._thumb_diverted()
-        self.mouse.set_thumbwheel(diverted, self.cfg["thumbwheel"]["invert"] and not diverted)
+        thumb = config.thumbwheel(self.cfg, self._app)
+        diverted = self._thumb_diverted(thumb)
+        self.mouse.set_thumbwheel(diverted, thumb["invert"] and not diverted)
         self._thumb.update(acc=0.0, fraction=0.0)
 
     def _apply_haptics(self):
@@ -1318,7 +1332,7 @@ class Engine:
         self.vinput.scroll(whole)
 
     def _on_thumbwheel(self, rotation):
-        thumb, state = self.cfg["thumbwheel"], self._thumb
+        thumb, state = config.thumbwheel(self.cfg, self._app), self._thumb
         info = self.mouse.thumbwheel
         # clicks > 0: rolled up, the direction that scrolls right
         clicks = rotation * info["direction"] * info["native_res"] / info["diverted_res"] * (-1 if thumb["invert"] else 1)

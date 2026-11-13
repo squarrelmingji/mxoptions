@@ -115,7 +115,7 @@ class Store(QObject):
         return True
 
     def set_mouse_app(self, app):
-        """Show the mouse settings of ``app`` on the Buttons and Ring pages (None: of all apps)."""
+        """Show the mouse settings of ``app`` on the Buttons, Ring and Point & Scroll pages (None: of all apps)."""
         if app != self.mouse_app:
             self.mouse_app = app
             self.mouse_app_changed.emit()
@@ -138,9 +138,34 @@ class Store(QObject):
         kept = [profile for profile in profiles if profile["app"] != app]
         if len(kept) != len(profiles):
             self.cfg["mouse"]["profiles"] = kept
+            self.cfg["mouse"]["thumbwheel"] = [entry for entry in self.cfg["mouse"]["thumbwheel"] if entry["app"] != app]
             self._push()
         if self.mouse_app == app:
             self.set_mouse_app(None)
+
+    def set_profile_thumb(self, app, function):
+        """The thumb wheel function while ``app`` is in front: one of config.THUMB_FUNCTIONS, or None for the one of
+        all apps. False, and nothing changed, for an app without a profile or a function the settings would not keep."""
+        if self.mouse_profile(app) is None:
+            return False
+        entries = self.cfg["mouse"]["thumbwheel"]
+        entry = next((entry for entry in entries if entry["app"] == app), None)
+        if function is None:
+            if entry is not None:
+                entries.remove(entry)
+                self._push()
+            return True
+        if not (isinstance(function, str) and function in config.THUMB_FUNCTIONS):
+            log.warning("thumb wheel function refused")
+            return False
+        if entry is None:
+            entries.append({"app": app, "function": function})
+        elif entry["function"] != function:
+            entry["function"] = function
+        else:
+            return True
+        self._push()
+        return True
 
     def set_profile_button(self, app, key, action):
         """What button ``key`` does while ``app`` is in front: an action, config.NATIVE for its own function, or None

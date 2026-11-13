@@ -989,4 +989,8 @@ STRINGS = {
     "Use the ring for all apps": "Використовувати кільце для всіх програм",
     "Use the ring for all apps in {}? Its own ring goes.": "Використовувати в {} кільце для всіх програм? Власне кільце зникне.",
     "Size and style are shared by all apps.": "Розмір і вигляд спільні для всіх програм.",
+    "While {} is in front. \"As in all apps\": the function set for all apps. Direction, speed and steps are the "
+    "same in every app.":
+        "Поки попереду {}. «Як в усіх програмах»: функція, задана для всіх програм. Напрямок, швидкість і кроки "
+        "однакові в усіх програмах.",
 }

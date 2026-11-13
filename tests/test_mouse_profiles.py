@@ -194,7 +194,7 @@ class Settings(unittest.TestCase):
                        gesture={"type": "ring"}, smartshift={"type": "none"})
         self.assertEqual(self.clean([kate]), [kate])
         self.assertEqual(self.clean([profile(KONSOLE)]), [profile(KONSOLE)])
-        self.assertEqual(config.clean(copy.deepcopy(config.DEFAULTS))["mouse"], {"profiles": []})
+        self.assertEqual(config.clean(copy.deepcopy(config.DEFAULTS))["mouse"], {"profiles": [], "thumbwheel": []})
 
     def test_a_profile_that_is_not_one_is_dropped_whole(self):
         good = profile(KATE, back=COPY)
@@ -1131,6 +1131,565 @@ class Wiring(unittest.TestCase):
                 cfg = {"keyboard": {"profiles": keyboard}, "mouse": {"profiles": mouse}}
                 store = mock.Mock(cfg=cfg)
                 self.assertIs(eval(code, {"bool": bool}, {"cfg": cfg, "store": store}), expected)
+
+
+from mxoptions import device, vinput  # noqa: E402
+
+DOLPHIN = "org.kde.dolphin"
+STEP_UP = -6  # one click of the thumb wheel rolled up (this mouse reports rolling up as negative, 20/120 resolution)
+TAB, TAB_BACK = engine.THUMB_STEPS["tabs"][1:]
+DESKTOP_RIGHT = engine.THUMB_STEPS["desktops"][1]
+
+
+def own(app, function):
+    return {"app": app, "function": function}
+
+
+class ThumbMouse(Mouse):
+    """Writes the thumb wheel's reporting into the same log as the buttons': ("thumb", diverted, inverted)."""
+
+    def __init__(self):
+        super().__init__()
+        self.thumb_fail = False
+
+    def set_thumbwheel(self, diverted, invert):
+        if self.thumb_fail:
+            self.thumb_fail = False
+            raise hidpp.HidppError("asleep")
+        self.log.append(("thumb", diverted, invert))
+
+
+class Wheels(support.FakeInput):
+    """The virtual input, with what is scrolled sideways and up or down."""
+
+    def __init__(self):
+        super().__init__()
+        self.sideways, self.scrolled = [], []
+
+    def hscroll(self, value):
+        self.sideways.append(value)
+
+    def scroll(self, value):
+        self.scrolled.append(value)
+
+
+def thumb_engine(test, profiles=(), entries=(), **sections):
+    """An engine whose mouse and virtual input write down what the thumb wheel does; ``entries``: mouse.thumbwheel."""
+    made = make(test, profiles, real=False, **sections)
+    made.cfg["mouse"]["thumbwheel"] = copy.deepcopy(list(entries))
+    made.mouse, made.vinput = ThumbMouse(), Wheels()
+    made.executor.close = lambda: None
+    made.played = []
+    made._play = lambda waveform, wait=True: made.played.append(waveform)
+    return made
+
+
+def thumbs(made):
+    return [entry for entry in made.mouse.log if entry[0] == "thumb"]
+
+
+def turn(made, clock, rotation, times=1):
+    for _ in range(times):
+        clock.now += 0.05
+        made._on_thumbwheel(rotation)
+
+
+def edited(made, change):
+    """The engine's settings with ``change`` made to a copy, given to it as the Store would."""
+    cfg = copy.deepcopy(made.cfg)
+    change(cfg)
+    set_config(made, cfg)
+
+
+class ThumbWheelSettings(unittest.TestCase):
+    """mouse.thumbwheel in the settings: the thumb wheel functions of single apps, kept, left out or resolved."""
+
+    def clean(self, entries, profiles=(profile(KATE), profile(KONSOLE))):
+        cfg = copy.deepcopy(config.DEFAULTS)
+        cfg["mouse"]["profiles"] = copy.deepcopy(list(profiles))
+        cfg["mouse"]["thumbwheel"] = entries
+        return config.clean(cfg)["mouse"]["thumbwheel"]
+
+    def test_every_function_of_an_app_with_a_profile_is_kept_in_its_order(self):
+        apps = [f"app{n}" for n in range(len(config.THUMB_FUNCTIONS))]
+        entries = [own(app, function) for app, function in zip(reversed(apps), config.THUMB_FUNCTIONS)]
+        self.assertEqual(self.clean(copy.deepcopy(entries), [profile(app) for app in apps]), entries)
+
+    def test_what_is_not_a_function_of_an_app_with_a_profile_is_left_out(self):
+        for bad in (own(KWRITE, "zoom"), own(KATE, "spin"), own(KATE, None), own(KATE, ["zoom"]), own(KATE, {"a": 1}),
+                    own(KATE, 3), own(["x"], "zoom"), own({"x": 1}, "zoom"), own(3, "zoom"), own(None, "zoom"),
+                    "zoom", [KATE, "zoom"], None, {"app": KATE}, {"function": "zoom"}, own("Kate", "zoom")):
+            with self.subTest(entry=bad):
+                self.assertEqual(self.clean([bad, own(KONSOLE, "tabs")]), [own(KONSOLE, "tabs")])
+        self.assertEqual(self.clean([own(KATE, "zoom"), own(KATE, "tabs"), own(KONSOLE, "volume")]),
+                         [own(KATE, "zoom"), own(KONSOLE, "volume")])  # the first for an app
+
+    def test_other_keys_of_an_entry_are_left_out_and_its_function_kept(self):
+        self.assertEqual(self.clean([dict(own(KATE, "zoom"), speed=2.0, later={"x": 1})]), [own(KATE, "zoom")])
+
+    def test_a_list_it_is_not_is_none_and_the_rest_stays_as_it_is(self):
+        for bad in ("zoom", {KATE: "zoom"}, None, 3):
+            with self.subTest(value=bad):
+                self.assertEqual(self.clean(bad), [])
+        self.assertEqual(config.DEFAULTS["version"], 6)
+        older = copy.deepcopy(config.DEFAULTS)
+        older["mouse"] = {"profiles": [profile(KATE, back=COPY)]}  # written by a version without this list
+        older["thumbwheel"]["function"] = "tabs"
+        cleaned = config.clean(older)
+        self.assertEqual(cleaned["mouse"], {"profiles": [profile(KATE, back=COPY)], "thumbwheel": []})
+        with_entries = copy.deepcopy(older)
+        with_entries["mouse"]["thumbwheel"] = [own(KATE, "zoom")]
+        again = config.clean(with_entries)
+        self.assertEqual(again["mouse"]["thumbwheel"], [own(KATE, "zoom")])
+        again["mouse"]["thumbwheel"] = []
+        self.assertEqual(again, cleaned)
+
+    def test_one_for_each_profile_at_most(self):
+        apps = [f"app{n}" for n in range(config.MAX_PROFILES + 1)]
+        kept = self.clean([own(app, "zoom") for app in apps], [profile(app) for app in apps])
+        self.assertEqual(kept, [own(app, "zoom") for app in apps[:config.MAX_PROFILES]])
+
+    def test_what_counts_in_each_app(self):
+        cfg = copy.deepcopy(config.DEFAULTS)
+        cfg["thumbwheel"].update(function="tabs", invert=True, speed=1.5, ticks=False)
+        cfg["mouse"]["profiles"] = [profile(KATE), profile(KONSOLE)]
+        cfg["mouse"]["thumbwheel"] = [own(KATE, "zoom"), own(KWRITE, "volume")]  # KWrite: no profile, never cleaned
+        expected = {"function": "tabs", "invert": True, "speed": 1.5, "ticks": False}
+        for app in (None, "org.example.unknown", KONSOLE, KWRITE):
+            with self.subTest(app=app):
+                self.assertIsNone(config.app_thumb_function(cfg, app))
+                self.assertEqual(config.thumbwheel(cfg, app), expected)
+        self.assertEqual(config.app_thumb_function(cfg, KATE), "zoom")
+        self.assertEqual(config.thumbwheel(cfg, KATE), dict(expected, function="zoom"))
+        self.assertEqual(cfg["thumbwheel"]["function"], "tabs")  # resolving changes nothing
+
+
+class ThumbWheelPerApp(unittest.TestCase):
+    """The engine following the app in front with the thumb wheel: what a turn does, what the mouse is told, and
+    that a step begun in one app is never finished in another."""
+
+    def setUp(self):
+        self.clock = support.Clock()
+        self.clock.__enter__()
+        self.addCleanup(self.clock.__exit__)
+
+    def test_the_app_in_front_turns_its_own_function(self):
+        made = thumb_engine(self, [profile(KATE), profile(KONSOLE)], [own(KATE, "volume")])
+        front(made, KATE)
+        turn(made, self.clock, STEP_UP)
+        self.assertEqual((made.executor.ran, made.vinput.sideways), ([actions.keys("VOLUMEUP")], []))
+        front(made, KONSOLE)
+        turn(made, self.clock, STEP_UP)
+        self.assertEqual((len(made.executor.ran), made.vinput.sideways), (1, [vinput.NOTCH]))
+
+    def test_the_mouse_is_told_only_when_the_thumb_wheel_changes_between_scrolling_by_itself_and_not(self):
+        made = thumb_engine(self, [profile(KATE), profile(KWRITE), profile(KONSOLE), profile(DOLPHIN, back=COPY)],
+                            [own(KATE, "volume"), own(KWRITE, "zoom"), own(KONSOLE, "zoom")],
+                            thumbwheel={"invert": True})
+        front(made, KATE)  # sideways scrolling by itself at speed 1 -> volume: goes to the program
+        self.assertEqual(made.mouse.log, [("thumb", True, False)])
+        front(made, KWRITE)  # volume -> zoom
+        front(made, KONSOLE)  # zoom -> zoom
+        self.assertEqual(made.mouse.log, [("thumb", True, False)])
+        front(made, DOLPHIN)  # its button and the thumb wheel both: the buttons first, in one go
+        self.assertEqual(made.mouse.log, [("thumb", True, False), (BACK, True, False), ("thumb", False, True)])
+
+    def test_a_step_begun_in_one_app_is_not_finished_in_another(self):
+        made = thumb_engine(self, [profile(KATE), profile(KONSOLE)], [own(KATE, "tabs"), own(KONSOLE, "desktops")])
+        front(made, KATE)
+        turn(made, self.clock, STEP_UP, 2)  # two of the three clicks a tab takes
+        front(made, KONSOLE)
+        turn(made, self.clock, STEP_UP, 3)  # three of the five a desktop takes
+        self.assertEqual(made.executor.ran, [])
+        turn(made, self.clock, STEP_UP, 2)
+        self.assertEqual(made.executor.ran, [DESKTOP_RIGHT])
+
+    def test_the_same_function_in_the_next_app_goes_on_with_the_step(self):
+        made = thumb_engine(self, [profile(KATE), profile(KONSOLE)], [own(KATE, "tabs")], thumbwheel={"function": "tabs"})
+        front(made, KATE)
+        turn(made, self.clock, STEP_UP, 2)
+        front(made, KONSOLE)  # it has none of its own: tabs, as for all apps
+        turn(made, self.clock, STEP_UP)
+        self.assertEqual((made.executor.ran, thumbs(made)), ([TAB], []))
+
+    def test_part_of_a_sideways_scroll_carries_over_only_with_the_same_function(self):
+        made = thumb_engine(self, [profile(KATE), profile(KONSOLE), profile(KWRITE)], [own(KWRITE, "zoom")],
+                            thumbwheel={"speed": 1.33})
+        front(made, KATE)
+        turn(made, self.clock, STEP_UP)
+        front(made, KONSOLE)
+        turn(made, self.clock, STEP_UP)
+        self.assertEqual(made.vinput.sideways, [159, 160])  # 159.6 a click: the part left over goes on
+        front(made, KWRITE)
+        front(made, KONSOLE)
+        turn(made, self.clock, STEP_UP)
+        self.assertEqual(made.vinput.sideways, [159, 160, 159])
+
+    def test_this_program_in_front_keeps_the_thumb_wheel_of_the_app_before(self):
+        made = thumb_engine(self, [profile(KATE)], [own(KATE, "tabs")])
+        front(made, KATE)
+        turn(made, self.clock, STEP_UP, 2)
+        writes = len(made.mouse.log)
+        front(made, APP_ID)
+        turn(made, self.clock, STEP_UP)
+        self.assertEqual((made.executor.ran, len(made.mouse.log)), ([TAB], writes))
+
+    def test_only_the_last_app_counts_after_a_pause(self):
+        made = thumb_engine(self, [profile(KATE), profile(KONSOLE)], [own(KATE, "tabs"), own(KONSOLE, "desktops")])
+        front(made, KATE)
+        turn(made, self.clock, STEP_UP, 2)
+        writes = len(made.mouse.log)
+        for app in (KONSOLE, KATE):
+            made.set_front(app)
+            drain(made)
+        made._take_front(float("inf"))
+        turn(made, self.clock, STEP_UP)
+        self.assertEqual((made.executor.ran, len(made.mouse.log)), ([TAB], writes))
+
+    def test_while_the_ring_is_open_the_thumb_wheel_turns_its_dials_in_every_app(self):
+        made = thumb_engine(self, [profile(KATE), profile(KONSOLE)], [own(KATE, "zoom")])
+        front(made, KATE)
+        made.set_ring_open(True)
+        drain(made)
+        turn(made, self.clock, STEP_UP)
+        front(made, KONSOLE)
+        turn(made, self.clock, STEP_UP)
+        self.assertEqual((made.listener.turns, made.vinput.scrolled, made.vinput.sideways), ([1.0, 1.0], [], []))
+        made.set_ring_open(False)
+        drain(made)
+        turn(made, self.clock, STEP_UP)
+        self.assertEqual((len(made.listener.turns), made.vinput.sideways), (2, [vinput.NOTCH]))
+
+    def test_offline_nothing_is_written_and_the_next_connection_writes_what_counts(self):
+        made = thumb_engine(self, [profile(KATE)], [own(KATE, "volume")])
+        made.online = False
+        front(made, KATE)
+        self.assertEqual(made.mouse.log, [])
+        for name in ("_apply_pointer", "_apply_wheel", "_apply_haptics"):
+            setattr(made, name, lambda: None)
+        made._read_status = lambda **_kwargs: None
+        made._configure()
+        self.assertEqual(thumbs(made), [("thumb", True, False)])
+
+    def test_a_failed_thumb_wheel_write_is_tried_again_with_what_counts(self):
+        made = thumb_engine(self, [profile(KATE)], [own(KATE, "volume")])
+        made.mouse.thumb_fail = True
+        front(made, KATE)
+        self.assertEqual((made._dirty, made.online, made.mouse.log), (True, False, []))
+        for name in ("_apply_pointer", "_apply_wheel", "_apply_haptics"):
+            setattr(made, name, lambda: None)
+        made._read_status = lambda **_kwargs: None
+        made._configure()
+        self.assertEqual((thumbs(made), made._dirty), ([("thumb", True, False)], False))
+
+    def test_new_settings_count_for_the_app_in_front(self):
+        made = thumb_engine(self, [profile(KATE)], [own(KATE, "tabs")])
+        front(made, KATE)
+        self.assertEqual(thumbs(made), [("thumb", True, False)])
+        turn(made, self.clock, STEP_UP, 2)
+        edited(made, lambda cfg: cfg["thumbwheel"].update(function="volume"))  # hidden by Kate's own: no change
+        self.assertEqual(len(thumbs(made)), 1)
+        turn(made, self.clock, STEP_UP)
+        self.assertEqual(made.executor.ran, [TAB])
+        turn(made, self.clock, STEP_UP, 2)
+        edited(made, lambda cfg: cfg["mouse"]["thumbwheel"][0].update(function="desktops"))
+        self.assertEqual(len(thumbs(made)), 2)
+        turn(made, self.clock, STEP_UP, 3)
+        self.assertEqual(made.executor.ran, [TAB])  # the two clicks of the tab before do not count
+        edited(made, lambda cfg: cfg["thumbwheel"].update(speed=1.5))  # for every app, Kate too
+        self.assertEqual(len(thumbs(made)), 3)
+        edited(made, lambda cfg: cfg["mouse"].update(profiles=[]))  # its entry, not cleaned here, counts no more
+        self.assertEqual(len(thumbs(made)), 4)
+        turn(made, self.clock, STEP_UP)
+        self.assertEqual(made.executor.ran, [TAB, actions.keys("VOLUMEUP")])
+
+    def test_offline_a_step_begun_under_the_function_before_is_not_finished_either(self):
+        for entries, change in (([own(KATE, "tabs")], lambda cfg: cfg["mouse"]["thumbwheel"][0].update(function="desktops")),
+                                ([], lambda cfg: cfg["thumbwheel"].update(function="desktops"))):
+            with self.subTest(own=bool(entries)):
+                made = thumb_engine(self, [profile(KATE)], entries, thumbwheel={"function": "tabs"})
+                front(made, KATE)
+                turn(made, self.clock, STEP_UP, 2)
+                made.online = False
+                edited(made, change)
+                turn(made, self.clock, STEP_UP, 3)  # reports still queued when it went away
+                self.assertEqual(made.executor.ran, [])
+                turn(made, self.clock, STEP_UP, 2)
+                self.assertEqual(made.executor.ran, [DESKTOP_RIGHT])
+
+    def test_steps_of_an_app_s_own_function_tick_as_set_for_all_apps(self):
+        for ticks, expected in ((True, [device.WAVE_TICK]), (False, [])):
+            with self.subTest(ticks=ticks):
+                made = thumb_engine(self, [profile(KATE)], [own(KATE, "volume")], thumbwheel={"ticks": ticks})
+                front(made, KATE)
+                turn(made, self.clock, STEP_UP)
+                self.assertEqual(made.played, expected)
+
+    def test_battery_saving_alone_sends_nothing_to_the_mouse(self):
+        made = thumb_engine(self, [profile(KATE)], [own(KATE, "tabs")])
+        front(made, KATE)
+        turn(made, self.clock, STEP_UP, 2)
+        writes = list(made.mouse.log)
+        for saving in (False, True):
+            edited(made, lambda cfg: cfg["haptics"].update(battery_saving=saving))
+        turn(made, self.clock, STEP_UP)
+        self.assertEqual((made.mouse.log, made.executor.ran), (writes, [TAB]))
+
+    def test_on_stopping_the_thumb_wheel_scrolls_by_itself_in_the_direction_for_all_apps(self):
+        made = thumb_engine(self, [profile(KATE)], [own(KATE, "zoom")], thumbwheel={"invert": True})
+        front(made, KATE)
+        made.mouse.wheel = None  # the scroll wheel is handed back too: not looked at here
+        made._shutdown()
+        self.assertEqual(thumbs(made), [("thumb", True, False), ("thumb", False, True)])
+
+    def test_without_functions_of_their_own_only_the_buttons_are_written(self):
+        made = thumb_engine(self, [profile(KATE, back=COPY), profile(KONSOLE)], thumbwheel={"function": "tabs"})
+        front(made, KATE)
+        front(made, KONSOLE)
+        self.assertEqual(made.mouse.log, [(BACK, True, False), (BACK, False, False)])
+
+
+class ThumbWheelStoreAndOthers(unittest.TestCase):
+    """The thumb wheel of single apps in the Store, for other programs (Set, Get), in the settings file and in logs."""
+
+    def setUp(self):
+        self.store = Store(copy.deepcopy(config.DEFAULTS), _Engine())
+        self.store.flush = lambda: None
+        self.store._save_timer.timeout.disconnect()
+        self.api = api.MouseApi(self.store, None, lambda: None)
+        self.pushed = []
+        self.store.changed.connect(lambda: self.pushed.append(copy.deepcopy(self.store.cfg["mouse"]["thumbwheel"])))
+
+    def entries(self):
+        return self.store.cfg["mouse"]["thumbwheel"]
+
+    def test_the_store_as_the_page_uses_it(self):
+        store = self.store
+        self.assertFalse(store.set_profile_thumb(KATE, "zoom"))  # no profile
+        store.add_mouse_profile(KATE)
+        store.add_mouse_profile(KONSOLE)
+        self.assertEqual(self.entries(), [])  # a new profile has none of its own
+        self.pushed.clear()
+        self.assertTrue(store.set_profile_thumb(KATE, None))
+        self.assertEqual(self.pushed, [])
+        before = copy.deepcopy(store.cfg)
+        with self.assertLogs("mxoptions", logging.WARNING) as logs:
+            for bad in ("spin", "", 3, ["zoom"], {"type": "zoom"}, "Zoom"):
+                self.assertFalse(store.set_profile_thumb(KATE, bad))
+        self.assertNotIn(KATE, "\n".join(logs.output))
+        self.assertNotIn("spin", "\n".join(logs.output))
+        self.assertEqual((store.cfg, self.pushed), (before, []))
+        self.assertTrue(store.set_profile_thumb(KATE, "zoom"))
+        self.assertTrue(store.set_profile_thumb(KATE, "zoom"))
+        self.assertTrue(store.set_profile_thumb(KONSOLE, "volume"))
+        self.assertTrue(store.set_profile_thumb(KATE, "tabs"))
+        self.assertEqual(self.pushed, [[own(KATE, "zoom")], [own(KATE, "zoom"), own(KONSOLE, "volume")],
+                                       [own(KATE, "tabs"), own(KONSOLE, "volume")]])
+        self.assertTrue(store.set_profile_thumb(KATE, None))
+        self.assertEqual(self.entries(), [own(KONSOLE, "volume")])
+        self.assertEqual(store.cfg["thumbwheel"], config.DEFAULTS["thumbwheel"])  # for all apps: unchanged
+        self.assertEqual(config.clean(copy.deepcopy(store.cfg)), store.cfg)
+
+    def test_removing_a_profile_or_restoring_the_defaults_removes_its_function(self):
+        store = self.store
+        for app in (KATE, KONSOLE):
+            store.add_mouse_profile(app)
+            store.set_profile_thumb(app, "zoom")
+        self.pushed.clear()
+        store.remove_mouse_profile(KATE)
+        self.assertEqual((self.entries(), self.pushed), ([own(KONSOLE, "zoom")], [[own(KONSOLE, "zoom")]]))
+        store.add_mouse_profile(KATE)
+        self.assertEqual(self.entries(), [own(KONSOLE, "zoom")])  # back without the one it had
+        store.restore_defaults()
+        self.assertEqual(store.cfg["mouse"], {"profiles": [], "thumbwheel": []})
+
+    def test_other_programs_set_what_may_be_and_are_refused_the_rest(self):
+        self.assertTrue(self.api.Set("mouse.profiles", json.dumps([profile(KATE), profile(KONSOLE)])))
+        value = [own(KATE, "zoom"), own(KONSOLE, "tabs")]
+        self.assertTrue(self.api.Set("mouse.thumbwheel", json.dumps(value)))
+        self.assertEqual(self.entries(), value)
+        self.assertTrue(self.api.Set("mouse.thumbwheel.1.function", json.dumps("volume")))
+        self.assertEqual(self.entries()[1], own(KONSOLE, "volume"))
+        before = copy.deepcopy(self.store.cfg)
+        for path, bad in (("mouse.thumbwheel", [own(KWRITE, "zoom")]), ("mouse.thumbwheel", [own(KATE, "spin")]),
+                          ("mouse.thumbwheel", [dict(own(KATE, "zoom"), speed=2)]), ("mouse.thumbwheel", value * 2),
+                          ("mouse.thumbwheel", {KATE: "zoom"}), ("mouse.thumbwheel.0.function", "spin"),
+                          ("mouse.thumbwheel.0.function", None), ("mouse.thumbwheel.0.app", KWRITE),
+                          ("mouse.thumbwheel.2", own(KWRITE, "zoom"))):
+            with self.subTest(path=path, value=bad):
+                self.assertFalse(self.api.Set(path, json.dumps(bad)))
+                self.assertEqual(self.store.cfg, before)
+        self.assertTrue(self.api.Set("mouse.profiles", json.dumps([profile(KONSOLE)])))  # Kate's function goes with it
+        self.assertEqual(self.entries(), [own(KONSOLE, "volume")])
+        self.assertEqual(json.loads(self.api.Get("mouse.thumbwheel")), [own(KONSOLE, "volume")])
+
+    def test_the_settings_file_holds_what_was_saved_never_what_counts_in_front(self):
+        self.store.cfg["mouse"]["profiles"] = [profile(KATE)]
+        self.store.cfg["mouse"]["thumbwheel"] = [own(KATE, "zoom")]
+        made = thumb_engine(self, [profile(KATE)], [own(KATE, "zoom")])
+        front(made, KATE)
+        self.store.cfg["flow"]["id"] = "this-one"
+        exported = config.export_data(self.store.cfg)
+        self.assertEqual(json.loads(exported)["config"]["thumbwheel"], config.DEFAULTS["thumbwheel"])
+        current = copy.deepcopy(self.store.cfg)
+        current["flow"]["id"] = "here"
+        back = config.import_data(exported, current)
+        self.assertEqual((back["mouse"], back["flow"]["id"]), (self.store.cfg["mouse"], "here"))
+        older = json.loads(exported)
+        del older["config"]["mouse"]["thumbwheel"]  # exported by a version without it
+        self.assertEqual(config.import_data(json.dumps(older).encode(), current)["mouse"],
+                         {"profiles": [profile(KATE)], "thumbwheel": []})
+
+    def test_the_app_in_front_and_its_function_are_never_logged_published_or_told(self):
+        secret = "org.example.secret"
+        self.store.cfg["mouse"]["profiles"] = [profile(secret)]
+        self.store.cfg["mouse"]["thumbwheel"] = [own(secret, "brightness")]
+        made = thumb_engine(self, [profile(secret)], [own(secret, "brightness")])
+        made._publish = lambda: engine.Engine._publish(made)
+        with support.Clock() as clock, self.assertLogs("mxoptions", logging.DEBUG) as logs:
+            logging.getLogger("mxoptions").debug("start")
+            front(made, secret)
+            turn(made, clock, STEP_UP)
+            front(made, KONSOLE)
+            made._publish()
+            self.assertFalse(self.store.set_profile_thumb(secret, "spin"))
+            self.assertFalse(self.api.Set("mouse.thumbwheel.0.function", json.dumps("spin")))
+        text = "\n".join(logs.output)
+        for word in ("secret", "brightness", "spin"):
+            self.assertNotIn(word, text)
+        self.assertNotIn("secret", json.dumps(made.listener.states, default=str))
+        self.assertEqual(json.loads(self.api.Get("thumbwheel.function")), "hscroll")
+        self.assertEqual(json.loads(self.api.GetConfig()), self.store.cfg)  # the saved entry only
+
+
+class ThumbWheelPage(unittest.TestCase):
+    """The Thumb wheel card of the Point & scroll page: the function of all apps or of one app, the rest for all."""
+
+    CAPS = {"dpi": (200, 8000, 50), "torque": True, "smartshift": True, "wheel": True, "ratchet_events": True,
+            "waveforms": [4], "thumbwheel": True}
+
+    def make_store(self, supported=True):
+        store = Store(copy.deepcopy(config.DEFAULTS), _Engine())
+        store.flush = lambda: None
+        store._save_timer.timeout.disconnect()
+        store.front = FakeFront(supported)
+        return store
+
+    def page(self, store, kind=pages.PointScrollPage):
+        page = kind(store)
+        self.addCleanup(page.deleteLater)
+        page.resize(1100, 700)
+        page.show()
+        return page
+
+    def functions(self, page):
+        combo = page.thumb_function
+        return [combo.itemData(i) for i in range(combo.count())]
+
+    def pick(self, page, function):
+        combo = page.thumb_function
+        combo.activated.emit(combo.findData(function))  # as the user picks it
+
+    def test_for_all_apps_it_is_as_it_was(self):
+        store = self.make_store()
+        page = self.page(store)
+        self.assertEqual(self.functions(page), list(config.THUMB_FUNCTIONS))
+        self.pick(page, "tabs")
+        self.assertEqual((store.cfg["thumbwheel"]["function"], store.cfg["mouse"]["thumbwheel"]), ("tabs", []))
+        self.assertEqual(page.thumb_function.currentData(), "tabs")
+        self.assertTrue(page.thumb_ticks_row.isEnabled())
+
+    def test_the_function_of_one_app(self):
+        store = self.make_store()
+        store.add_mouse_profile(KATE)
+        page = self.page(store)
+        page.apps.apps.setCurrentIndex(1)
+        self.assertEqual(store.mouse_app, KATE)
+        self.assertEqual(self.functions(page), [None] + list(config.THUMB_FUNCTIONS))
+        self.assertEqual((page.thumb_function.currentIndex(), page.thumb_function.itemText(0)), (0, "As in all apps"))
+        self.assertIn("Direction, speed and steps", page.apps.hint.text())
+        self.assertFalse(page.thumb_ticks_row.isEnabled())  # sideways scrolling, as for all apps: no steps
+        self.pick(page, "zoom")
+        self.assertEqual(store.cfg["mouse"]["thumbwheel"], [own(KATE, "zoom")])
+        self.assertEqual(store.cfg["thumbwheel"]["function"], "hscroll")  # every other app: unchanged
+        self.assertEqual(page.thumb_function.currentData(), "zoom")
+        self.assertTrue(page.thumb_ticks_row.isEnabled())
+        page.thumb_invert.setChecked(True)
+        page.thumb_speed.changed.emit(1.5)
+        page.thumb_ticks.setChecked(False)
+        self.assertEqual(store.cfg["thumbwheel"], {"function": "hscroll", "invert": True, "speed": 1.5, "ticks": False})
+        page.thumb_function.activated.emit(0)
+        self.assertEqual((store.cfg["mouse"]["thumbwheel"], store.cfg["thumbwheel"]["function"]), ([], "hscroll"))
+        self.assertEqual(page.thumb_function.currentIndex(), 0)
+        page.apps.apps.setCurrentIndex(0)
+        self.assertEqual(self.functions(page), list(config.THUMB_FUNCTIONS))
+        self.assertEqual(page.thumb_function.currentData(), "hscroll")
+
+    def test_the_pages_show_the_same_app_and_go_back_when_it_goes(self):
+        store = self.make_store()
+        store.add_mouse_profile(KATE)
+        scroll = self.page(store)
+        buttons, rings = self.page(store, pages.ButtonsPage), self.page(store, ring_page.RingPage)
+        buttons.apps.apps.setCurrentIndex(1)
+        self.assertEqual((scroll.apps.apps.currentIndex(), scroll.thumb_function.itemData(0)), (1, None))
+        self.pick(scroll, "volume")
+        with mock.patch.object(pages.QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Yes):
+            QTest.mouseClick(scroll.apps.remove_app, Qt.MouseButton.LeftButton)
+        self.assertEqual((scroll.apps.apps.currentIndex(), buttons.apps.apps.currentIndex(),
+                          rings.apps.apps.currentIndex(), store.mouse_app), (0, 0, 0, None))
+        self.assertEqual((store.cfg["mouse"], self.functions(scroll)), ({"profiles": [], "thumbwheel": []},
+                                                                        list(config.THUMB_FUNCTIONS)))
+
+    def test_where_the_desktop_does_not_say_the_function_is_for_all_apps(self):
+        from mxoptions import i18n
+        self.addCleanup(i18n.setup, "en")
+        for language, words in (("en", "does not tell"), ("uk", "не повідомляє")):
+            with self.subTest(language=language):
+                i18n.setup(language)
+                store = self.make_store(supported=False)
+                store.front.last_other = KATE
+                store.cfg["mouse"]["profiles"] = [profile(KATE)]
+                page = self.page(store)
+                self.assertFalse(page.apps.apps.isEnabled() or page.apps.add_app.isEnabled())
+                self.assertIn(words, page.apps.hint.text())
+                self.pick(page, "volume")
+                self.assertEqual((store.cfg["thumbwheel"]["function"], store.cfg["mouse"]["thumbwheel"]), ("volume", []))
+
+    def test_names_for_assistive_technology_and_the_tab_order(self):
+        from mxoptions import i18n
+        self.addCleanup(i18n.setup, "en")
+        for language, combo, remove, hint in (
+                ("en", "Settings for", "Remove the settings of this app", "Direction, speed and steps"),
+                ("uk", "Налаштування для", "Вилучити налаштування цієї програми", "Напрямок, швидкість і кроки")):
+            with self.subTest(language=language):
+                i18n.setup(language)
+                store = self.make_store()
+                store.add_mouse_profile(KATE)
+                store.front.last_other = KWRITE
+                page = self.page(store)
+                store.set_mouse_app(KATE)
+                chooser = page.apps
+                self.assertEqual((chooser.apps.accessibleName(), chooser.remove_app.accessibleName()), (combo, remove))
+                self.assertIs(chooser.findChildren(pages.QLabel)[0].buddy(), chooser.apps)
+                self.assertIn(hint, chooser.hint.text())
+                self.assertEqual(page.thumb_function.itemText(0), i18n._("As in all apps"))
+                order, widget = [], chooser.apps
+                while len(order) < 4:
+                    widget = widget.nextInFocusChain()
+                    if widget.isVisible() and widget.isEnabled() and widget.focusPolicy() & Qt.FocusPolicy.TabFocus:
+                        order.append(widget)
+                self.assertEqual(order[:3], [chooser.add_app, chooser.remove_app, page.thumb_function])
+                self.assertTrue(page.thumb_invert.isAncestorOf(order[3]) or order[3] is page.thumb_invert)
+
+    def test_without_a_thumb_wheel_the_card_and_its_chooser_are_hidden(self):
+        store = self.make_store()
+        page = self.page(store)
+        self.assertTrue(page.apps.isVisible())
+        store.update_state(dict(store.state, uinput=True, caps=dict(self.CAPS, thumbwheel=False)))
+        self.assertFalse(page.thumb_card.isVisible() or page.apps.isVisible())
+        self.assertEqual(store.front.wanted[-1], (page.apps, False))
+        store.update_state(dict(store.state, uinput=True, caps=self.CAPS))
+        self.assertTrue(page.apps.isVisible())
 
 
 if __name__ == "__main__":

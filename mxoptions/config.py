@@ -331,7 +331,9 @@ DEFAULTS = {
     # The mouse in single apps: "profiles": [{"app", "name", "buttons", "ring"}], first one for app in front wins.
     # "buttons": key -> action over "buttons" (NATIVE: button's own function); a button not listed does what
     # "buttons" says. "ring": bubbles of its own, or None for the ring of all apps. Everything else stays global.
-    "mouse": {"profiles": []},
+    # "thumbwheel": [{"app", "function"}]: a thumb wheel function of its own (THUMB_FUNCTIONS) for an app with a
+    # profile; an app not listed uses "thumbwheel"'s function. Direction, speed and steps stay global.
+    "mouse": {"profiles": [], "thumbwheel": []},
 }
 
 
@@ -582,6 +584,33 @@ def mouse_profile_of(cfg, app):
     return next((profile for profile in cfg["mouse"]["profiles"] if profile["app"] == app), None)
 
 
+def _mouse_thumbwheel(entries, profiles):
+    """The thumb wheel functions of single apps in ``entries``: {"app", "function"} each, only for apps with one of
+    ``profiles``, the first for each app, in their order. Other keys of an entry are left out."""
+    kept = []
+    for entry in entries if isinstance(entries, list) else ():
+        if not (isinstance(entry, dict) and isinstance(entry.get("app"), str)
+                and entry.get("function") in THUMB_FUNCTIONS):
+            continue
+        app = entry["app"]
+        if any(profile["app"] == app for profile in profiles) and all(other["app"] != app for other in kept):
+            kept.append({"app": app, "function": entry["function"]})
+    return kept
+
+
+def app_thumb_function(cfg, app):
+    """The thumb wheel function ``app`` has of its own ("mouse.thumbwheel"), or None: the one for all apps. None too
+    for an app without a mouse profile."""
+    if mouse_profile_of(cfg, app) is None:
+        return None
+    return next((entry["function"] for entry in cfg["mouse"]["thumbwheel"] if entry["app"] == app), None)
+
+
+def thumbwheel(cfg, app):
+    """The thumb wheel settings while ``app`` is in front: "thumbwheel", with the app's own function if it has one."""
+    return dict(cfg["thumbwheel"], function=app_thumb_function(cfg, app) or cfg["thumbwheel"]["function"])
+
+
 def mouse_buttons(cfg, app):
     """What the buttons do while ``app`` is in front: its profile over "buttons"."""
     buttons = dict(cfg["buttons"])
@@ -713,6 +742,7 @@ def _sanitize(cfg):
     cfg["keyboard"]["lock_notices"] = cfg["keyboard"].get("lock_notices") is True
     cfg["keyboard"]["fn_notices"] = cfg["keyboard"].get("fn_notices") is True
     cfg["mouse"]["profiles"] = _mouse_profiles(cfg["mouse"].get("profiles"))
+    cfg["mouse"]["thumbwheel"] = _mouse_thumbwheel(cfg["mouse"].get("thumbwheel"), cfg["mouse"]["profiles"])
     return cfg
 
 
