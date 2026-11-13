@@ -54,7 +54,7 @@ class World:
         self.files = {c: ci_files(v, c, self.trees[c]) for c, v in self.versions.items()}
         self.calls, self.violations, self.fail = [], [], set()
         self.journeys_rc, self.deb_version = 0, None
-        self.fail_upload = self.ignore_latest = False
+        self.fail_upload = self.ignore_latest = self.tags_show_drafts = False
 
     def sleep(self, s):
         self.t += s
@@ -155,7 +155,7 @@ class World:
             return self.view(self.releases[self.latest])
         if path.startswith("releases/tags/"):
             for r in self.releases.values():
-                if r["tag_name"] == path[len("releases/tags/"):] and not r["draft"]:
+                if r["tag_name"] == path[len("releases/tags/"):] and (not r["draft"] or self.tags_show_drafts):
                     return self.view(r)
             raise LookupError(path)
         if path.startswith("releases/"):
@@ -363,6 +363,9 @@ for tag, why in (("v0.10.0.post4", "no published release"), ("latest", "not a re
                  ("v0.10.0.post2", "files are"), ("v0.10.0.post9", "no published release")):
     out, rc = release.point(tag)
     assert rc == 1 and why in out["refused"], (tag, out)
+w.tags_show_drafts = True  # GitHub serves only published releases by tag; point checks the draft flag anyway
+assert "no published release" in release.point("v0.10.0.post4")[0]["refused"]
+w.tags_show_drafts = False
 w.releases[101]["files"] = dict(w.files[C2])
 w.dirty = "?? x\n"
 assert "clean checkout" in release.point("v0.10.0.post2")[0]["refused"]
@@ -384,6 +387,9 @@ out, rc = release.health("v0.10.0.post2")
 assert rc == 1 and out["checks"]["journeys"] == "exit 1: journeys: 1 failed", out
 w.journeys_rc, w.deb_version = 0, "0.10.0-1"
 assert release.health("v0.10.0.post2")[0]["checks"]["deb"] == "Version 0.10.0-1"
+w.releases[100]["files"] = ci_files("0.10.0.post2", C2, w.trees[C2], "meta")  # sums agree, BUILDINFO names another tree
+out, rc = release.health("v0.10.0.post2")
+assert rc == 1 and out["checks"]["files"] is True and out["checks"]["buildinfo"].startswith("BUILDINFO.json tree"), out
 w.deb_version = None
 w.releases[100]["files"]["SHA256SUMS"] = b"0  BUILDINFO.json\n"
 out, rc = release.health("v0.10.0.post2")

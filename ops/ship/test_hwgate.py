@@ -174,6 +174,9 @@ r = hwgate.check(commit(stack, **{"mxoptions/kbsettings.py": fn_line}), MANIFEST
 assert not r["stable"] and not r["unclassified"] and r["groups"]["fn-lock"]["present"], r
 r = hwgate.check(commit(stack, **{"mxoptions/brand_new.py": fn_line}), MANIFEST, full)
 assert r["unclassified"] == ["mxoptions/brand_new.py"] and r["groups"]["fn-lock"]["present"] and not r["stable"], r
+for path in ("mxoptions/brand_new.py", "data/brand_new.rules"):  # unclassified alone blocks stable, whatever it holds
+    r = hwgate.check(commit(stack, **{path: "x = 1\n"}), MANIFEST, full)
+    assert r["unclassified"] == [path] and not any(g["missing"] for g in r["groups"].values()) and not r["stable"], r
 
 with contextlib.redirect_stdout(io.StringIO()):
     assert hwgate.main(["check", base, os.path.join(REPO, "none.json")]) == 0
