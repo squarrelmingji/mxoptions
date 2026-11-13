@@ -63,8 +63,28 @@ OUTCOMES = {
 }
 FN_HINT = ("On: the top row gives F1–F12, and Fn with a key gives its other function. Off: the other way round. "
            "The keyboard's own Fn lock shortcut changes it too.")
+# The keys the keyboard can turn off (kbsettings.DISABLE_KEYS): the title of each one's row, and its keycap name
+DISABLE_TITLES = (("caps_lock", "Caps Lock", "Caps Lock"), ("num_lock", "Num Lock", "Num Lock"),
+                  ("scroll_lock", "Scroll Lock", "Scroll Lock"), ("insert", "Insert", "Insert"),
+                  ("super", "Windows/Super key", "Windows/Super"))
+DISABLE_NOTE = "Turn off keys you press by mistake. A key turned off does nothing; turn its switch off to enable it again."
+DISABLE_HINT = ("The keyboard does this itself. Whether it keeps it after it is switched off is not known yet; "
+                "MX Options shows what the keyboard reports.")
+# Operating systems a layout is for (kbsettings.OS_BITS): their own names, the same in every language
+OS_NAMES = {"windows": "Windows", "macos": "macOS", "linux": "Linux", "chromeos": "ChromeOS", "android": "Android",
+            "ios": "iOS", "webos": "webOS", "windows_embedded": "Windows Embedded", "tizen": "Tizen"}
+PLATFORM_HINT = ("The layout the keyboard uses for the operating system on this Easy-Switch channel; each channel keeps "
+                 "its own. The keyboard's own shortcut for it, as its guide describes, changes it too.")
 CAP_W, CAP_H, CAP_GAP, PAD = 152, 54, 8, 18
 CHARGING = (device.BATTERY_CHARGING, device.BATTERY_ALMOST_FULL, device.BATTERY_SLOW_CHARGE)
+
+
+def layout_labels(choices):
+    """What the layouts a keyboard offers are called: the systems each is for, numbered where that is not enough."""
+    labels = [", ".join(OS_NAMES.get(name, name) for name in choice["os"]) or _("Layout {}").format(choice["index"] + 1)
+              for choice in choices]
+    return [label + " · " + _("Layout {}").format(choice["index"] + 1) if labels.count(label) > 1 else label
+            for label, choice in zip(labels, choices)]
 
 
 def battery_text(battery):
@@ -467,13 +487,26 @@ class KeyboardPage(ScrollPage):
         self.body.addWidget(card)
 
         card = Card(_("Keyboard settings"), hint=_(
-            "Settings the keyboard keeps itself. Where MX Options can change one, the change is made on the keyboard "
-            "and stays there; the keyboard's own keys change it too."))
+            "Settings the keyboard controls itself. Changes are made on the keyboard. Its own shortcuts may change "
+            "them too."))
         self.fn_switch = Switch()
         self.fn_switch.setAccessibleName(_("Use F1–F12 without Fn"))
         self.fn_switch.toggled.connect(lambda on: self.store.engine.set_keyboard_setting("fn", on))
-        self.settings_rows = {name: card.add(Row(_(title), None, self.fn_switch if name == "fn" else None, note=_(text)))
-                              for name, (title, text) in SETTINGS.items()}
+        self.platform_box = QComboBox()
+        self.platform_box.setAccessibleName(_("Operating system layout"))
+        self.platform_box.activated.connect(self._platform_chosen)
+        self._choices = []  # the layouts in self.platform_box, as the keyboard offers them
+        controls = {"fn": self.fn_switch, "platform": self.platform_box}
+        self.settings_rows, self.disable_switches, self.disable_rows = {}, {}, {}
+        for name, (title, text) in SETTINGS.items():
+            self.settings_rows[name] = card.add(Row(_(title), None, controls.get(name), note=_(text)))
+            if name == "disable":  # a row of its own for each key it can turn off, under it
+                for key, label, cap in DISABLE_TITLES:
+                    switch = self.disable_switches[key] = Switch()
+                    switch.setAccessibleName(_("Turn off the {} key").format(cap))
+                    switch.toggled.connect(lambda on, key=key: self.store.engine.set_keyboard_setting("disable", {key: on}))
+                    self.disable_rows[key] = card.add(Row(_(label), None, switch))
+        self.settings_rows["platform"].title.setBuddy(self.platform_box)
         self.settings_card = card
         self.body.addWidget(card)
 
@@ -495,26 +528,76 @@ class KeyboardPage(ScrollPage):
         store.state_changed.connect(self._state)
         self._state(store.state)
 
-    def _show_fn(self, control):
-        """The Fn lock row: a switch while the keyboard lets it be changed, its general hint otherwise. What it shows
-        is always what the keyboard said last; one asked for is shown as such until the keyboard answers."""
-        row = self.settings_rows["fn"]
-        self.fn_switch.setVisible(control is not None)
+    def _show_note(self, name, control, hint, otherwise=""):
+        """The note and hint of setting ``name``'s row: its general words while MX Options cannot change it, else how
+        its last change went, or ``otherwise``."""
+        row = self.settings_rows[name]
         if control is None:
             row.set_hint("")
-            row.note.setText(_(SETTINGS["fn"][1]))
+            row.note.setText(_(SETTINGS[name][1]))
             row.note.show()
             return
-        busy = control.get("busy")
-        if not busy:
-            self.fn_switch.set_checked_silently(bool(control.get("value")))
-        self.fn_switch.setEnabled(control.get("value") is not None and bool(control.get("writable")) and not busy)
-        row.set_hint(_(FN_HINT))
+        row.set_hint(_(hint))
         outcome = OUTCOMES.get(control.get("outcome"))
         if outcome is None and control.get("value") is None:
             outcome = OUTCOMES["unknown"]
-        row.note.setText(_(outcome) if outcome else "")
-        row.note.setVisible(bool(outcome))
+        text = _(outcome) if outcome else otherwise
+        row.note.setText(text)
+        row.note.setVisible(bool(text))
+
+    @staticmethod
+    def _changeable(control):
+        return control.get("value") is not None and bool(control.get("writable")) and not control.get("busy")
+
+    def _show_fn(self, control):
+        """The Fn lock row: a switch while the keyboard lets it be changed, its general hint otherwise. What it shows
+        is always what the keyboard said last; one asked for is shown as such until the keyboard answers."""
+        self.fn_switch.setVisible(control is not None)
+        self._show_note("fn", control, FN_HINT)
+        if control is None:
+            return
+        if not control.get("busy"):
+            self.fn_switch.set_checked_silently(bool(control.get("value")))
+        self.fn_switch.setEnabled(self._changeable(control))
+
+    def _show_disable(self, control, shown):
+        """The keys the keyboard can turn off, a switch each (on: turned off), as for Fn lock."""
+        self._show_note("disable", control, DISABLE_HINT, _(DISABLE_NOTE))
+        keys = (control or {}).get("keys") or []
+        off = (control or {}).get("value") or []
+        for key, switch in self.disable_switches.items():
+            self.settings_card.set_row_visible(self.disable_rows[key], shown and key in keys)
+            if control is None:
+                continue
+            if not control.get("busy"):
+                switch.set_checked_silently(key in off)
+            switch.setEnabled(self._changeable(control))
+
+    def _show_platform(self, control, blocked):
+        """The layout for this computer's Easy-Switch channel, picked from those the keyboard offers."""
+        self.platform_box.setVisible(control is not None)
+        read_only = control is not None and control.get("value") is not None and not control.get("writable") and not blocked
+        self._show_note("platform", control, PLATFORM_HINT, _(OUTCOMES["unsupported"]) if read_only else "")
+        if control is None:
+            return
+        choices = control.get("choices") or []
+        if choices != self._choices:
+            self._choices = choices
+            self.platform_box.blockSignals(True)
+            self.platform_box.clear()
+            self.platform_box.addItems(layout_labels(choices))
+            self.platform_box.blockSignals(False)
+        if not control.get("busy"):
+            index = next((i for i, choice in enumerate(choices) if choice["index"] == control.get("value")), -1)
+            self.platform_box.blockSignals(True)
+            self.platform_box.setCurrentIndex(index)
+            self.platform_box.blockSignals(False)
+        self.platform_box.setEnabled(self._changeable(control) and bool(choices))
+
+    def _platform_chosen(self, position):
+        control = ((self.store.state.get("keyboard") or {}).get("controls") or {}).get("platform") or {}
+        if 0 <= position < len(self._choices) and self._choices[position]["index"] != control.get("value"):
+            self.store.engine.set_keyboard_setting("platform", self._choices[position]["index"])
 
     def _ask_firmware(self):
         found = self.store.state.get("keyboard") or {}
@@ -570,7 +653,10 @@ class KeyboardPage(ScrollPage):
         for name, row in self.settings_rows.items():
             self.settings_card.set_row_visible(row, name in settings)
         self.settings_card.setVisible(any(name in SETTINGS for name in settings))
-        self._show_fn((found.get("controls") or {}).get("fn") if connected else None)
+        controls = (found.get("controls") or {}) if connected else {}
+        self._show_fn(controls.get("fn"))
+        self._show_disable(controls.get("disable"), "disable" in settings)
+        self._show_platform(controls.get("platform"), bool(found.get("reason")))
         battery = found.get("battery") if connected else None
         self.battery.setText(battery_text(battery) if battery else _("Connected") if connected else _("Not connected"))
         hosts = found.get("hosts") or []

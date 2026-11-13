@@ -48,7 +48,14 @@ KEYBOARD = {
     "keys": [{"id": f"0x{cid:04x}", "cid": cid, "tid": cid, "protected": cid in (0x00D1, 0x00D2, 0x00D3, 0x0034),
               "active": cid in (0x0f01, 0x0f02, 0x0f05), "native_reason": "protected" if cid in (0x00D1, 0x00D2, 0x00D3, 0x0034) else None}
              for cid in (0x00D1, 0x00D2, 0x00D3, 0x0034, 0x00E2, 0x00E3, 0x0f01, 0x0f02, 0x0f03, 0x0f04, 0x0f05, 0x0f06)],
-    "reason": None, "firmware": "12.3.45", "settings": ["fn", "backlight", "platform", "locks"],
+    "reason": None, "firmware": "12.3.45", "settings": ["fn", "backlight", "platform", "disable", "locks"],
+    "controls": {
+        "disable": {"value": ["insert"], "keys": ["caps_lock", "num_lock", "scroll_lock", "insert", "super"],
+                    "writable": True, "busy": False, "outcome": None},
+        "platform": {"value": 0, "choices": [{"index": 0, "os": ["windows", "android"]}, {"index": 1, "os": ["macos", "ios"]},
+                                             {"index": 2, "os": ["linux", "chromeos"]}],
+                     "writable": True, "busy": False, "outcome": None},
+    },
 }
 KEYBOARD_KEYS = {"0x0f01": {"type": "keys", "keys": ["KEY_LEFTCTRL", "KEY_C"]}, "0x0f02": {"type": "keys", "keys": ["KEY_LEFTCTRL", "KEY_V"]},
                  "0x0f05": {"type": "host", "host": 1}}

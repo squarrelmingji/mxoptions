@@ -796,10 +796,9 @@ STRINGS = {
     "Read from the keyboard. fwupd, the system's firmware updater, does not see it right now.":
         "Прочитано з клавіатури. fwupd, системний засіб оновлення прошивок, зараз її не бачить.",
     "Keyboard settings": "Налаштування клавіатури",
-    "Settings the keyboard keeps itself. Where MX Options can change one, the change is made on the keyboard and "
-    "stays there; the keyboard's own keys change it too.":
-        "Налаштування, які клавіатура зберігає сама. Там, де MX Options може змінити налаштування, зміна робиться на "
-        "клавіатурі й залишається там; власні клавіші клавіатури теж його змінюють.",
+    "Settings the keyboard controls itself. Changes are made on the keyboard. Its own shortcuts may change them too.":
+        "Налаштування, якими клавіатура керує сама. Зміни робляться на клавіатурі. Її власні сполучення клавіш теж "
+        "можуть їх змінювати.",
     "Use F1–F12 without Fn": "F1–F12 без Fn",
     "On: the top row gives F1–F12, and Fn with a key gives its other function. Off: the other way round. The "
     "keyboard's own Fn lock shortcut changes it too.":
@@ -829,6 +828,20 @@ STRINGS = {
     "Disable keys": "Вимкнення клавіш",
     "The keyboard can turn some of its keys off. MX Options does not do this yet.":
         "Клавіатура може вимикати деякі свої клавіші. MX Options поки цього не робить.",
+    "Windows/Super key": "Клавіша Windows/Super",
+    "Turn off the {} key": "Вимкнути клавішу {}",
+    "Turn off keys you press by mistake. A key turned off does nothing; turn its switch off to enable it again.":
+        "Вимкніть клавіші, які натискаєте випадково. Вимкнена клавіша нічого не робить; щоб знову її ввімкнути, "
+        "вимкніть її перемикач.",
+    "The keyboard does this itself. Whether it keeps it after it is switched off is not known yet; MX Options shows "
+    "what the keyboard reports.":
+        "Клавіатура робить це сама. Чи зберігає вона це після вимкнення, поки невідомо; MX Options показує те, що "
+        "повідомляє клавіатура.",
+    "Layout {}": "Розкладка {}",
+    "The layout the keyboard uses for the operating system on this Easy-Switch channel; each channel keeps its own. "
+    "The keyboard's own shortcut for it, as its guide describes, changes it too.":
+        "Розкладка, яку клавіатура використовує для операційної системи на цьому каналі Easy-Switch; кожен канал має "
+        "свою. Власне сполучення клавіш клавіатури для неї, як описано в її посібнику, теж її змінює.",
     "Lock keys": "Клавіші фіксації",
     "The keyboard can report the state of its lock keys. MX Options does not show it yet.":
         "Клавіатура може повідомляти стан своїх клавіш фіксації. MX Options поки його не показує.",

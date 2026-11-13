@@ -596,9 +596,14 @@ class KeyboardSide:
                 "settings": list(self._seen[2]), "controls": self._shown_controls()}
 
     def _shown_controls(self):
-        return {name: dict(control, writable=control["writable"] and self._block is None,
-                           busy=name in self._pending or name == self._committing,
-                           outcome=self._outcomes.get(name)) for name, control in self._controls.items()}
+        shown = {}
+        for name, control in self._controls.items():
+            public = getattr(kbsettings.CODECS.get(name), "public", None)  # what of a reading is shown, where not all
+            if public is not None:
+                public = public(control) if control["value"] is not None else {"value": None}
+            shown[name] = dict(public or control, writable=control["writable"] and self._block is None,
+                               busy=name in self._pending or name == self._committing, outcome=self._outcomes.get(name))
+        return shown
 
     # -- settings the keyboard keeps -----------------------------------------------
 
@@ -611,7 +616,8 @@ class KeyboardSide:
                 or self._block is not None):
             log.debug("keyboard setting change ignored")
             return
-        self._pending[name] = value  # one asked for before, and not sent yet, is replaced
+        merge = getattr(codec, "merge", None)  # one asked for before, and not sent yet, is replaced, or laid under
+        self._pending[name] = merge(self._pending.get(name), value) if merge else value
         self._outcomes[name] = None
         self.engine._publish()
         if self._task is None:
@@ -641,7 +647,7 @@ class KeyboardSide:
         except Exception:
             self._controls[name] = {"value": None, "default": None, "writable": False}
             raise
-        self._controls[name] = dict(read, writable=True)
+        self._controls[name] = dict(read, writable=read.get("writable", True) is True)  # where it says, it counts
         return host, read
 
     def _read_settings(self):
@@ -672,7 +678,8 @@ class KeyboardSide:
         self.engine._publish()
 
     def _change(self, name, codec):
-        """A task: read the setting; if it is not the value asked for, send that once and read it back. Where the
+        """A task: read the setting; if it is not the value asked for (laid over that reading, where the setting
+        has kbsettings' ``target``), and the keyboard lets it be changed, send that once and read it back. Where the
         keyboard then has something else again, send back what it had and read that. Returns None when the
         keyboard has the value asked for, or why not: "unknown" (not read: nothing sent), "unsupported",
         "not-applied" (it kept what it had), "restored" (it took another value, and the earlier one was sent back),
@@ -693,8 +700,17 @@ class KeyboardSide:
             if isinstance(e, HidppTimeout):
                 self._settings_at = time.monotonic() + RECOVERY_RETRY
             return "unknown"
-        target = self._pending.get(name)
-        if target is None or target == before["value"]:
+        request = self._pending.get(name)
+        if request is None:
+            return None
+        try:  # what to send, from what was just read: a whole value laid over by what was asked of it, or it alone
+            if not self._controls[name]["writable"]:
+                raise kbsettings.Unsupported("the keyboard does not let it be changed")
+            target = codec.target(before, request) if hasattr(codec, "target") else request
+        except kbsettings.Unsupported:
+            self._pending.pop(name, None)
+            return "unsupported"
+        if target == before["value"]:
             self._pending.pop(name, None)
             return None
         if self._settings_held():

@@ -114,7 +114,9 @@ class FakeDevice:
     ``entities``: the getFwInfo replies of DEVICE_INFO, by index; ``extra``: further feature ids it lists, answered
     with an error, except for the settings in ``settings``: {FN_INVERSION_HOSTS: {host: [state, default]},
     FN_INVERSION_DEFAULT: [state, default], FN_INVERSION: [state], HOSTS_INFO: current host it says}, each
-    answered (functions 0 and 1) and listed."""
+    answered (functions 0 and 1) and listed; also DISABLE_KEYS: {"caps": bits, "current": bits} (functions 0, 1, 2),
+    MULTI_PLATFORM: {"info": function 0's answer, "descriptors": [function 1's answers]} (functions 0, 1, 3; 3
+    leaves the platform in byte 6) and DUAL_PLATFORM: [platform] (function 0)."""
 
     def __init__(self, name="Synthetic keyboard", kind=device.KIND_KEYBOARD, controls=(), unit=b"\x5e\x01\x5e\x02",
                  model=b"\x0a\x0b\x0c\x0d\x0e\x0f", info=True, battery=(80, device.BATTERY_DISCHARGING), hosts=(3, 0),
@@ -210,6 +212,28 @@ class FakeDevice:
         value = self.settings[feature]
         if feature == device.HOSTS_INFO:
             return bytes([0, 0, self.hosts[0], value]) if function == 0 else 7
+        if feature == device.DISABLE_KEYS:
+            if function in (0, 1):
+                return bytes([value["caps" if function == 0 else "current"]])
+            if function != 2:
+                return 7
+            self.setting_writes.append((feature, bytes(params[:1])))
+            if not self.ignore_writes:
+                value["current"] = self.taken[feature].pop(0) if self.taken.get(feature) else params[0]
+            return bytes(params[:1])
+        if feature == device.MULTI_PLATFORM:
+            if function == 0:
+                return bytes(value["info"])
+            if function == 1:
+                return bytes(value["descriptors"][params[0]]) if params[0] < len(value["descriptors"]) else 2
+            if function != 3:
+                return 7
+            self.setting_writes.append((feature, bytes(params[:2])))
+            if not self.ignore_writes:
+                info = bytearray(value["info"])
+                info[6] = self.taken[feature].pop(0) if self.taken.get(feature) else params[1]
+                value["info"] = bytes(info)
+            return bytes(params[:2])
         if function not in (0, 1):
             return 7
         if feature == device.FN_INVERSION_HOSTS:
