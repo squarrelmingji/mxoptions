@@ -5,11 +5,15 @@ field filled; `none` plus reason where it does not apply.
 
 ## Level
 
-Level: 0. No proof has run yet; see Pending proofs and Proof log.
+Level: 1, proven 2026-11-13. See Proof log.
 
-Level 0 lets agents verify and babysit pull requests, never merge or publish. Level 1 (agents
-merge) needs every proof under Pending proofs to pass and be recorded first. Even at Level 1,
-until the Proof log shows the Level 2 and 3 proofs, a release happens only as a proof run the
+Level 1 lets agents merge a pull request that passes the merge gate (see Release eligibility);
+it never lets them publish. This first setup pull request counts under the first-setup rule: the
+profile at its head stands in for the profile on `main`. The proofs below ran on head `eaa9c41`
+(tree `e2bf204`), before this docs-only change. This pull request merges only after `gate` and
+`journeys` pass on its exact final head and an independent review of this profile at that head
+passes. No agent merge authority exists before that gate. Level 2 and 3 are not proven (see
+Pending proofs): until the Proof log shows them, a release happens only as a proof run the
 owner's standing authorization covers.
 
 ## Repository
@@ -180,23 +184,28 @@ gate a stable release through `ops/ship/hardware-gates.json` (see Release eligib
 
 ## Pending proofs
 
-Not run yet. Each moves to the Proof log with its date and actual result when it passes.
+Not run yet. Each moves to the Proof log with its date and actual result when it passes. Level 2
+and 3 apply the staging items to production: this repository has no staging.
 
 | Level | Proof | Command | Expected result |
 | ----- | ----- | ------- | --------------- |
-| 0 | CI runs on PRs | `gh pr checks <first setup PR> --repo squarrelmingji/mxoptions` | `gate` and `journeys` listed and passing, with the run URL |
-| 1 | Profile at PR head (first setup PR) | `git show HEAD:SHIP.md` in the reviewer's checkout of the PR head | present; the verdict record binds base, head and tree |
-| 1 | Branch rule | `gh api repos/squarrelmingji/mxoptions/rules/branches/main` | deletion, non_fast_forward, pull_request, required_status_checks `gate` and `journeys` (app 15368), strict true |
-| 1 | Merge methods | `gh repo view squarrelmingji/mxoptions --json squashMergeAllowed,mergeCommitAllowed` | both true |
-| 1 | Merge deploys nothing | `grep -n -A4 '^on:' .github/workflows/*.yml`; `grep -c 'gh release' .github/workflows/*.yml`; `gh api repos/squarrelmingji/mxoptions/environments --jq .total_count` | `ci.yml` only, on pull_request, push to main and workflow_dispatch, contents read; `gh release` count 0; 0 environments; `release.py` runs only by hand |
-| - | Ruleset undo | `gh api -X DELETE repos/squarrelmingji/mxoptions/rulesets/<ruleset id>` | recorded with the real id, not run |
-| - | Reproduction | clean Ubuntu 24.04, Setup steps 1-3, Local gate, Behaviour check, by someone other than the profile author | every step passes; image, driver revision and prerequisites recorded |
+| 1 | Exact final head of the first setup PR | `gh pr checks 1 --repo squarrelmingji/mxoptions` at the final head; independent review of `git show <head>:SHIP.md` | `gate` and `journeys` pass on that head; the verdict binds base, head and tree |
+| 2 | First release, health and known-good | `python3 ops/ship/release.py publish <older main commit>` from a clean checkout of `main` tip, then `health <tag>` | `published`; health passes; known-good recorded |
+| 2 | Serving version and in-flight, with a release | `python3 ops/ship/release.py serving`; `python3 ops/ship/release.py inflight` | the published tag, its commit and tree; no draft |
+| 2 | Rollback to known-good | from a newer clean `main` tip: `publish <next older commit>`, `health`, `point <known-good tag>`, `serving`, `health`, then `point` back and `health` | each `point` serves the named tag's commit and tree; health passes each time |
+| 3 | Production autopilot | fresh reruns of the Level 1 and Level 2 proofs, recorded in a Level 3 PR | every rerun passes |
 
 ## Proof log
 
 | Date | Level | Proof | Command | Result |
 | ---- | ----- | ----- | ------- | ------ |
-
-None recorded yet.
+| 2026-11-13 | 0 | CI runs on PRs | `gh pr checks 1 --repo squarrelmingji/mxoptions` | head `eaa9c41`: `gate` pass ([job](https://github.com/squarrelmingji/mxoptions/actions/runs/43366081641/job/131690694471)), `journeys` pass ([job](https://github.com/squarrelmingji/mxoptions/actions/runs/43366081641/job/131690694102)); run [43366081641](https://github.com/squarrelmingji/mxoptions/actions/runs/43366081641), app 15368 |
+| 2026-11-13 | 1 | Profile at PR head (first setup PR) | `git show eaa9c41:SHIP.md`; independent Codex review | present; review binds base `0bd1a78`, head `eaa9c41`, tree `e2bf204`: APPROVE. Not yet repeated for this docs-only head (see Pending proofs) |
+| 2026-11-13 | 1 | Branch rule | `gh api repos/squarrelmingji/mxoptions/rules/branches/main` | ruleset 27176188 `ship-main` on the default branch, active, no bypass actors: deletion, non_fast_forward, pull_request (squash, merge), required_status_checks `gate` and `journeys` (app 15368), strict true |
+| 2026-11-13 | 1 | Merge methods | `gh repo view squarrelmingji/mxoptions --json squashMergeAllowed,mergeCommitAllowed` | both true |
+| 2026-11-13 | 1 | Merge deploys nothing | `grep -n -A4 '^on:' .github/workflows/*.yml`; `grep -c 'gh release' .github/workflows/*.yml`; `gh api repos/squarrelmingji/mxoptions/environments --jq .total_count`; `gh api repos/squarrelmingji/mxoptions/actions/permissions/workflow` | `ci.yml` only, on pull_request, push to main and workflow_dispatch, contents read; `gh release` count 0; 0 environments; default workflow token read, cannot approve PRs; `release.py` runs only by hand |
+| 2026-11-13 | - | Ruleset undo | `gh api -X DELETE repos/squarrelmingji/mxoptions/rulesets/27176188` | recorded, not run |
+| 2026-11-13 | - | Reproduction | image `ubuntu@sha256:2198e4c65076e9cb0b3d695219df667c0e3b0072da64ca3c2648aca17dcecaf5`: as root, Setup step 1, `useradd -m u`, `sh ops/ship/prereqs.sh`; as `u`, clone and check out `eaa9c41`, `sh ops/ship/prereqs.sh --check`, `sh ops/ship/env.sh /usr/bin/python3 "$V"`, `sh ops/ship/gate.sh "$V/bin/python"`, `sh ops/ship/journeys.sh "$V/bin/python"`, `test -z "$(git status --porcelain)"` | run by an independent Codex reviewer, not the profile author. Ubuntu Python 3.12; `prerequisites: all present`; `Ran 269 tests`, `OK (skipped=50)`; hwgate and release self-checks OK; driver checks 9 of 9; driver `ops/ship @ eaa9c41`, app 0.10.0.post1; J2-J8 PASS; `REPRODUCED`, exit 0. Ran as root only for apt, `prereqs.sh` and `useradd`; no host mounts, devices, privileges or credentials. Journeys ran on the head tree only; `git diff --check` was not part of this run |
+| 2026-11-13 | 2 | Read-only release reads, no release yet | `python3 -I ops/ship/release.py serving`; `... inflight`; `... health v0.0.0-missing`, tools at `c56a458` | tag, commit and tree null, exit 0; drafts empty, exit 0; `404: no published release v0.0.0-missing`, pass false, exit 1. Partial only: tools changed after `c56a458`; no published release, positive health, known-good or rollback yet |
 
 Level `-` marks non-level checks, such as the reproduction check.
