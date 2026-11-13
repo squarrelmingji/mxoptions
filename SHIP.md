@@ -5,16 +5,15 @@ field filled; `none` plus reason where it does not apply.
 
 ## Level
 
-Level: 1, proven 2026-11-13. See Proof log.
+Level: 1, proven 2026-11-13, on `main` since merge `062a3d4`. See Proof log.
 
 Level 1 lets agents merge a pull request that passes the merge gate (see Release eligibility);
-it never lets them publish. This first setup pull request counts under the first-setup rule: the
-profile at its head stands in for the profile on `main`. The proofs below ran on head `eaa9c41`
-(tree `e2bf204`), before this docs-only change. This pull request merges only after `gate` and
-`journeys` pass on its exact final head and an independent review of this profile at that head
-passes. No agent merge authority exists before that gate. Level 2 and 3 are not proven (see
-Pending proofs): until the Proof log shows them, a release happens only as a proof run the
-owner's standing authorization covers.
+it never lets them publish. The profile on `main` governs every pull request. Each one merges
+only after `gate` and `journeys` pass on its exact head and an independent review of that head
+passes. History: the first setup pull request (#1) merged under the first-setup rule, with the
+profile at its head standing in for the profile on `main`; that rule applies to no later pull
+request. Level 2 and 3 are not proven (see Pending proofs): until the Proof log shows them, a
+release happens only as a proof run the owner's standing authorization covers.
 
 ## Repository
 
@@ -189,18 +188,23 @@ and 3 apply the staging items to production: this repository has no staging.
 
 | Level | Proof | Command | Expected result |
 | ----- | ----- | ------- | --------------- |
-| 1 | Exact final head of the first setup PR | `gh pr checks 1 --repo squarrelmingji/mxoptions` at the final head; independent review of `git show <head>:SHIP.md` | `gate` and `journeys` pass on that head; the verdict binds base, head and tree |
 | 2 | First release, health and known-good | `python3 ops/ship/release.py publish <older main commit>` from a clean checkout of `main` tip, then `health <tag>` | `published`; health passes; known-good recorded |
 | 2 | Serving version and in-flight, with a release | `python3 ops/ship/release.py serving`; `python3 ops/ship/release.py inflight` | the published tag, its commit and tree; no draft |
 | 2 | Rollback to known-good | from a newer clean `main` tip: `publish <next older commit>`, `health`, `point <known-good tag>`, `serving`, `health`, then `point` back and `health` | each `point` serves the named tag's commit and tree; health passes each time |
 | 3 | Production autopilot | fresh reruns of the Level 1 and Level 2 proofs, recorded in a Level 3 PR | every rerun passes |
+
+Push CI on merge `062a3d4`: pending, not read for this record. `release.py publish` refuses a
+commit whose push CI run did not succeed, so it is checked before any release.
 
 ## Proof log
 
 | Date | Level | Proof | Command | Result |
 | ---- | ----- | ----- | ------- | ------ |
 | 2026-11-13 | 0 | CI runs on PRs | `gh pr checks 1 --repo squarrelmingji/mxoptions` | head `eaa9c41`: `gate` pass ([job](https://github.com/squarrelmingji/mxoptions/actions/runs/43366081641/job/131690694471)), `journeys` pass ([job](https://github.com/squarrelmingji/mxoptions/actions/runs/43366081641/job/131690694102)); run [43366081641](https://github.com/squarrelmingji/mxoptions/actions/runs/43366081641), app 15368 |
-| 2026-11-13 | 1 | Profile at PR head (first setup PR) | `git show eaa9c41:SHIP.md`; independent Codex review | present; review binds base `0bd1a78`, head `eaa9c41`, tree `e2bf204`: APPROVE. Not yet repeated for this docs-only head (see Pending proofs) |
+| 2026-11-13 | 1 | Profile at PR head (first setup PR) | `git show eaa9c41:SHIP.md`; independent Codex review | present; review binds base `0bd1a78`, head `eaa9c41`, tree `e2bf204`: APPROVE. Repeated at final head `24588b3` (rows below) |
+| 2026-11-13 | 1 | CI on exact final head (first setup PR) | `gh pr checks 1 --repo squarrelmingji/mxoptions` | head `24588b3` (base `0bd1a78`, tree `0c9ca75`): `gate` pass ([job](https://github.com/squarrelmingji/mxoptions/actions/runs/43375739159/job/131721690648)), `journeys` pass ([job](https://github.com/squarrelmingji/mxoptions/actions/runs/43375739159/job/131721690900)); run [43375739159](https://github.com/squarrelmingji/mxoptions/actions/runs/43375739159), app 15368. Branch rule read back at the same time: ruleset 27176188 active, no bypass actors, `gate` and `journeys` required, strict true |
+| 2026-11-13 | 1 | Independent review at final head (first setup PR) | `git show 24588b3:SHIP.md`; independent Codex review; `sh ops/ship/gate.sh "$V/bin/python"`; `sh ops/ship/journeys.sh "$V/bin/python" <tree>` with the parent tree and the head tree | run by an independent Codex reviewer, not the profile author; review binds base `0bd1a78`, parent `eaa9c41`, head `24588b3`, tree `0c9ca75`. `Ran 269 tests`, `OK`; hwgate and release self-checks OK; driver checks 9 of 9; driver `ops/ship @ 24588b3`; J2-J8 PASS on app `0bd1a78` (0.10.0) and on app `24588b3` (0.10.0.post1): APPROVE |
+| 2026-11-13 | 1 | Merge and read-back (first setup PR) | squash merge of PR 1; `git rev-parse 062a3d4^{tree} 062a3d4^1` | merge `062a3d4`, squash, 2026-11-13T06:05:47Z; tree `0c9ca75` equals the reviewed head tree; first parent `0bd1a78` equals the reviewed base; deploy none. Level 1 on `main` from this commit |
 | 2026-11-13 | 1 | Branch rule | `gh api repos/squarrelmingji/mxoptions/rules/branches/main` | ruleset 27176188 `ship-main` on the default branch, active, no bypass actors: deletion, non_fast_forward, pull_request (squash, merge), required_status_checks `gate` and `journeys` (app 15368), strict true |
 | 2026-11-13 | 1 | Merge methods | `gh repo view squarrelmingji/mxoptions --json squashMergeAllowed,mergeCommitAllowed` | both true |
 | 2026-11-13 | 1 | Merge deploys nothing | `grep -n -A4 '^on:' .github/workflows/*.yml`; `grep -c 'gh release' .github/workflows/*.yml`; `gh api repos/squarrelmingji/mxoptions/environments --jq .total_count`; `gh api repos/squarrelmingji/mxoptions/actions/permissions/workflow` | `ci.yml` only, on pull_request, push to main and workflow_dispatch, contents read; `gh release` count 0; 0 environments; default workflow token read, cannot approve PRs; `release.py` runs only by hand |
