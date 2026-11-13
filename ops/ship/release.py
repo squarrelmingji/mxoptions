@@ -6,20 +6,24 @@
     python3 ops/ship/release.py point TAG                  make a published release latest (rollback, promotion)
     python3 ops/ship/release.py health [TAG]               check a published release (default: latest)
 
-Each call prints one JSON line. Run it from a clean checkout of origin/main tip, also when COMMIT is older;
-publish and point refuse otherwise. It needs git and an authenticated gh, and nothing else.
+Each call prints one JSON line. Run it from a clean checkout of origin/main tip; publish and point refuse
+any other checkout. Their target commit must be on the first-parent history of origin/main and strictly older
+than its tip: the tools never run from the commit being deployed or rolled back to, so the tip itself is
+refused, also from another directory. It needs git and an authenticated gh, and nothing else.
 
 publish refuses before it creates anything when the tag or a release for the version exists, a draft is in
-flight, COMMIT is not on the first-parent history of origin/main, or (without --preview) hwgate.py says the
-commit is not stable. It then waits for the push CI run of COMMIT, takes that run's release-<COMMIT> files
-unchanged, checks them, uploads them as a draft and publishes it: stable as latest, or a preview as a
-pre-release that never becomes latest. Terminal states: published, preview, refused, draft-left, timeout.
-If a step fails after the draft exists, the draft this run made is deleted when it is still a draft
-(refused), else left for inspection (draft-left). Nothing here deletes a published release, a tag or a file.
+flight, COMMIT is not such an older commit, or (without --preview) hwgate.py says the commit is not stable.
+It then waits for the push CI run of COMMIT, takes that run's release-<COMMIT> files unchanged, checks them,
+creates a draft with one REST call, uploads the files to that draft's id and publishes it: stable as latest,
+or a preview as a pre-release that never becomes latest. Terminal states: published, preview, refused,
+draft-left, timeout. Only the id the create reply names is ever deleted, and only while it is still an
+unpublished draft of the tag (refused); otherwise it is left for inspection (draft-left). When the create
+fails or its reply names no id, nothing is deleted: refused for an HTTP 4xx rejection, else draft-left,
+since a draft may exist. Nothing here deletes a published release, a tag or a file.
 
 point TAG makes a published stable-eligible release latest and marks every newer stable release a
-pre-release. The same bytes stay; nothing is rebuilt. It refuses drafts, releases missing files, commits off
-origin/main and commits hwgate.py does not call stable.
+pre-release. The same bytes stay; nothing is rebuilt. It refuses drafts, releases missing files, commits
+that are not older first-parent commits of origin/main and commits hwgate.py does not call stable.
 """
 import hashlib
 import json
@@ -83,11 +87,15 @@ def api(path, *extra, missing=False):
     return json.loads(out)
 
 
-def patch(rid, what, **fields):
-    args = ["gh", "api", "-X", "PATCH", f"repos/{REPO}/releases/{rid}"]
-    for k, v in fields.items():
+def fields(**kv):
+    args = []
+    for k, v in kv.items():
         args += ["-F", f"{k}={json.dumps(v)}"] if isinstance(v, bool) else ["-f", f"{k}={v}"]
-    must(args, what)
+    return args
+
+
+def patch(rid, what, **kv):
+    must(["gh", "api", "-X", "PATCH", f"repos/{REPO}/releases/{rid}", *fields(**kv)], what)
 
 
 def git(*args):
@@ -187,8 +195,13 @@ def tools_checkout():
         raise Fail("run from a clean checkout of origin/main tip")
 
 
-def on_main(commit):
-    return commit in git("rev-list", "--first-parent", "origin/main").split()
+def admit(commit):
+    """Raise unless commit is on origin/main's first-parent history and older than its tip, the tools' commit."""
+    history = git("rev-list", "--first-parent", "origin/main").split()
+    if commit == history[0]:
+        raise Fail(f"{commit} is origin/main tip, the tools' own commit; publish or point only an older commit")
+    if commit not in history:
+        raise Fail(f"{commit} is not on the first-parent history of origin/main")
 
 
 def tag_commit(tag):
@@ -244,8 +257,7 @@ def publish(commit, preview):
     try:
         tools_checkout()
         commit = git("rev-parse", "--verify", f"{commit}^{{commit}}")
-        if not on_main(commit):
-            raise Fail(f"{commit} is not on the first-parent history of origin/main")
+        admit(commit)
         version = version_of(git("show", f"{commit}:mxoptions/__init__.py"))
         tag = out["tag"] = "v" + version
         if api(f"repos/{REPO}/git/ref/tags/{tag}", missing=True) or any(r["tag_name"] == tag for r in releases()):
@@ -277,21 +289,31 @@ def publish(commit, preview):
         except Fail as e:
             out["reason"] = str(e)
             return out, 1
-        notes = os.path.join(folder, "notes.md")
-        with open(notes, "w") as f:
-            f.write(preview_notes(hardware, manifest, commit) if preview else stable_notes(commit))
+        notes = preview_notes(hardware, manifest, commit) if preview else stable_notes(commit)
         title = f"MX Options {version}" + (" preview" if preview else "")
         sizes = {n: os.path.getsize(os.path.join(files, n)) for n in os.listdir(files)}
-        rc, _, err = run(["gh", "release", "create", tag, "--repo", REPO, "--draft", "--target", commit, "--title", title,
-                          "--notes-file", notes, *sorted(os.path.join(files, n) for n in sizes)], timeout=900)
+        # The reply's id is the only proof of which draft is ours; a same-tag draft found later may be anyone's.
+        rc, text, err = run(["gh", "api", "-X", "POST", f"repos/{REPO}/releases", *fields(
+            tag_name=tag, target_commitish=commit, name=title, body=notes, draft=True, prerelease=False)])
         try:
-            mine = [d for d in drafts() if d["tag"] == tag]  # inflight was empty before: a draft with this tag is ours
-            if rc or len(mine) != 1:
-                raise Fail(f"draft upload: {last(err) or f'{len(mine)} drafts for {tag}'}")
-            rid = out["id"] = mine[0]["id"]
-            got = {a["name"]: a["size"] for a in api(f"repos/{REPO}/releases/{rid}")["assets"] if a["state"] == "uploaded"}
-            if got != sizes:
-                raise Fail(f"draft files read back as {sorted(got.items())}")
+            rid = json.loads(text)["id"] if not rc else None
+        except (ValueError, KeyError, TypeError):
+            rid = None
+        if type(rid) is not int:
+            out.update(state="refused" if rc and re.search(r"HTTP 4\d\d", err) else "draft-left",
+                       reason=f"draft create: {last(err) or 'reply names no release id'}; no draft known as ours, "
+                              "nothing deleted; see inflight")
+            return out, 1
+        out["id"] = rid
+        try:
+            for n in sorted(sizes):
+                must(["gh", "api", "-X", "POST", "-H", "Content-Type: application/octet-stream", "--input",
+                      os.path.join(files, n), f"https://uploads.github.com/repos/{REPO}/releases/{rid}/assets?name={n}"],
+                     f"upload {n}", timeout=900)
+            r = api(f"repos/{REPO}/releases/{rid}")
+            got = {a["name"]: a["size"] for a in r["assets"] if a["state"] == "uploaded"}
+            if not r["draft"] or r["tag_name"] != tag or got != sizes:
+                raise Fail(f"draft {rid} read back as {r['tag_name']}, draft {r['draft']}, files {sorted(got.items())}")
             if preview:
                 patch(rid, "publish preview", draft=False, prerelease=True, make_latest="false")
                 r = api(f"repos/{REPO}/releases/{rid}")
@@ -306,7 +328,7 @@ def publish(commit, preview):
                 out.update(state="published", reason=f"{tag} is latest")
             return out, 0
         except Exception as e:  # any failure once a draft may exist ends in a terminal state, never a traceback
-            removed, what = discard_draft(tag, out["id"])
+            removed, what = discard_draft(tag, rid)
             out.update(state="refused" if removed else "draft-left", reason=f"{e}; {what}")
             return out, 1
     finally:
@@ -314,13 +336,9 @@ def publish(commit, preview):
 
 
 def discard_draft(tag, rid):
-    """(removed, what happened): delete the draft this run made, only while it is an unpublished draft of tag."""
+    """(removed, what happened): delete release rid, which this run's create reply named, only while it is still
+    an unpublished draft of tag."""
     try:
-        if rid is None:
-            mine = [d for d in drafts() if d["tag"] == tag]
-            if len(mine) != 1:
-                return len(mine) == 0, f"{len(mine)} drafts for {tag}; nothing deleted"
-            rid = mine[0]["id"]
         r = api(f"repos/{REPO}/releases/{rid}", missing=True)
         if r is None:
             return True, "no draft left"
@@ -345,8 +363,7 @@ def point(tag):
         if got != assets(tag[1:]):
             raise Fail(f"{tag} files are {sorted(got)}")
         commit, _ = tag_commit(tag)
-        if not on_main(commit):
-            raise Fail(f"{commit} is not on the first-parent history of origin/main")
+        admit(commit)
         hardware, _ = gate(commit)
         if not hardware["stable"]:
             raise Fail("not stable: " + not_stable(hardware))

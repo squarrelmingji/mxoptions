@@ -25,7 +25,7 @@ owner's standing authorization covers.
 
 | Name       | Deploys from | URL | Pattern | Trigger | Waits for CI |
 | ---------- | ------------ | --- | ------- | ------- | ------------ |
-| production | a commit on `main`'s first-parent history | `https://github.com/squarrelmingji/mxoptions/releases/latest` | A agent-run | `python3 ops/ship/release.py publish <commit>` from a clean checkout of `main` tip | yes: `release.py` refuses unless the push CI run on that commit succeeded, and publishes that run's `release-<commit>` files unchanged |
+| production | a commit on `main`'s first-parent history, older than `main` tip | `https://github.com/squarrelmingji/mxoptions/releases/latest` | A agent-run | `python3 ops/ship/release.py publish <commit>` from a clean checkout of `main` tip | yes: `release.py` refuses unless the push CI run on that commit succeeded, and publishes that run's `release-<commit>` files unchanged |
 
 Production is what a new installation downloads: the GitHub Releases of this fork and the
 `releases/latest` pointer. It proves the published files, never a device. Copies already
@@ -124,8 +124,11 @@ gate a stable release through `ops/ship/hardware-gates.json` (see Release eligib
 ## Deploy
 
 - Deploy command per environment: production `python3 ops/ship/release.py publish <commit>`
-  (stable) or `... publish <commit> --preview`, from a clean detached checkout of `main` tip,
-  also when `<commit>` is older; it refuses any other checkout.
+  (stable) or `... publish <commit> --preview`, from a clean detached checkout of `main` tip; it
+  refuses any other checkout. `<commit>` must be on `main`'s first-parent history and strictly
+  older than that tip: the tools never run from the commit being deployed or rolled back to.
+  `publish` and `point` refuse `main` tip itself before any change, also from another directory,
+  so a commit is publishable once a newer commit lands on `main`.
 - Read serving version: `python3 ops/ship/release.py serving`; returns the `latest` tag, its
   commit and tree.
 - Detect in-flight deploy and read one operation: `python3 ops/ship/release.py inflight` (exit 10
@@ -133,8 +136,10 @@ gate a stable release through `ops/ship/hardware-gates.json` (see Release eligib
 - Terminal states, all of them: `published`, `preview`, `refused`, `draft-left`, `timeout`. Only
   `published` counts as deployed to production; `preview` is a pre-release, not production.
   `refused` and `timeout`: the channel is as it was (a draft this run made and could remove is
-  gone). `draft-left`: a release this run made is left for inspection, a draft or published
-  without the expected read-back; nothing was deleted. Read `serving` and `inflight` next.
+  gone). `draft-left`: a release this run made, or may have made, is left for inspection: a
+  draft, one published without the expected read-back, or a create whose outcome is unknown;
+  nothing was deleted. Read `serving` and `inflight` next. Only the draft id the create reply
+  names counts as this run's; a same-tag draft found later is never deleted.
 - Deploy timeout: 45 minutes.
 
 ## Health check
@@ -149,7 +154,8 @@ gate a stable release through `ops/ship/hardware-gates.json` (see Release eligib
 
 ## Rollback
 
-- Command to known-good: `python3 ops/ship/release.py point <known-good tag>`.
+- Command to known-good: `python3 ops/ship/release.py point <known-good tag>`, from a clean
+  checkout of `main` tip; the tag's commit must be older than that tip, as for `publish`.
 - Restores: the stored release files of that tag, unchanged; it becomes `latest` and every newer
   stable release becomes a pre-release. Nothing is rebuilt and nothing published is deleted.
 - Read back after rollback: `python3 ops/ship/release.py serving`, then `health`.

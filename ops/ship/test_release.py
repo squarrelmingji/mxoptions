@@ -3,8 +3,8 @@
     python3 ops/ship/test_release.py
 
 Every gh and git call goes to World, which keeps releases, tags, CI runs and CI files in memory and records
-any deletion of something that is not an unpublished draft. Each publish, point and health case checks the
-terminal state and what changed on the fake channel.
+any deletion of something published or of a draft another publisher made. Each publish, point and health case
+checks the terminal state and what changed on the fake channel.
 """
 import hashlib
 import json
@@ -21,7 +21,7 @@ import make_deb  # noqa: E402
 R = release.REPO
 with open(os.path.join(HERE, "hardware-gates.json")) as f:
     MANIFEST = json.load(f)
-C1, C2, C3, SIDE = "a" * 40, "b" * 40, "c" * 40, "d" * 40
+C1, C2, C3, C4, SIDE = "a" * 40, "b" * 40, "c" * 40, "e" * 40, "d" * 40
 STABLE = {"stable": True, "unclassified": [], "groups": {"keyboard": {"present": False, "missing": []}}}
 OPEN = {"stable": False, "unclassified": [], "groups": {"mouse-follows-keyboard": {
     "present": True, "missing": ["mouse-follows-keyboard: no result for this build"]}}}
@@ -44,9 +44,10 @@ class World:
     """A fake gh and git: releases, tags, push CI runs and their files, all in memory."""
 
     def __init__(self):
-        self.main = [C2, C1]  # first-parent history of origin/main, newest first
-        self.head, self.dirty = C2, ""
-        self.versions = {C1: "0.10.0.post1", C2: "0.10.0.post2", C3: "0.10.0.post3", SIDE: "0.10.0.post9"}
+        self.main = [C3, C2, C1]  # first-parent history of origin/main, newest first; tools run from C3
+        self.head, self.dirty = C3, ""
+        self.versions = {C1: "0.10.0.post1", C2: "0.10.0.post2", C3: "0.10.0.post3", C4: "0.10.0.post4",
+                         SIDE: "0.10.0.post9"}
         self.trees = {c: c[0] * 39 + "f" for c in self.versions}
         self.releases, self.tags, self.latest, self.next_id, self.t = {}, {}, None, 100, 0
         self.runs = {c: [[{"databaseId": 7, "status": "completed", "conclusion": "success", "headSha": c,
@@ -54,7 +55,8 @@ class World:
         self.files = {c: ci_files(v, c, self.trees[c]) for c, v in self.versions.items()}
         self.calls, self.violations, self.fail = [], [], set()
         self.journeys_rc, self.deb_version = 0, None
-        self.fail_upload = self.ignore_latest = self.tags_show_drafts = False
+        self.ignore_latest = self.tags_show_drafts = False
+        self.on_create = self.on_upload = lambda r: None  # what other publishers or the network do meanwhile
 
     def sleep(self, s):
         self.t += s
@@ -93,9 +95,13 @@ class World:
             return self.patch(int(a[4].rsplit("/", 1)[1]), a[5:])
         if a[:4] == ["gh", "api", "-X", "DELETE"]:
             r = self.releases.pop(int(a[4].rsplit("/", 1)[1]))
-            if not r["draft"]:
-                self.violations.append(f"deleted published {r['tag_name']}")
+            if not r["draft"] or r.get("foreign"):
+                self.violations.append(f"deleted {'foreign' if r.get('foreign') else 'published'} {r['id']}")
             return ""
+        if a[:5] == ["gh", "api", "-X", "POST", f"repos/{R}/releases"]:
+            return self.create(a[5:])
+        if a[:4] == ["gh", "api", "-X", "POST"]:
+            return self.upload(a)
         if a[:2] == ["gh", "api"]:
             return self.get(a[2].removeprefix(f"repos/{R}/"))
         if a[:3] == ["gh", "run", "list"]:
@@ -106,8 +112,6 @@ class World:
             c = a[a.index("-n") + 1].removeprefix("release-")
             self.write(a[a.index("-D") + 1], self.files[c])
             return ""
-        if a[:3] == ["gh", "release", "create"]:
-            return self.create(a)
         if a[:3] == ["gh", "release", "download"]:
             r = next(r for r in self.releases.values() if r["tag_name"] == a[3] and not r["draft"])
             self.write(a[a.index("-D") + 1], r["files"])
@@ -179,19 +183,26 @@ class World:
                 f.write(b)
 
     def create(self, a):
-        tag, files = a[3], a[a.index("--notes-file") + 2:]
-        with open(a[a.index("--notes-file") + 1]) as f:
-            body = f.read()
-        r = {"id": self.next_id, "tag_name": tag, "draft": True, "prerelease": False, "body": body,
-             "name": a[a.index("--title") + 1], "published_at": None, "target": a[a.index("--target") + 1], "files": {}}
+        f = {a[i + 1].split("=", 1)[0]: a[i + 1].split("=", 1)[1] for i in range(0, len(a), 2)}
+        assert f["draft"] == "true" and f["prerelease"] == "false", f
+        r = {"id": self.next_id, "tag_name": f["tag_name"], "draft": True, "prerelease": False, "body": f["body"],
+             "name": f["name"], "published_at": None, "target": f["target_commitish"], "files": {}}
         self.next_id += 1
         self.releases[r["id"]] = r
-        for path in files:
-            if self.fail_upload:
-                raise RuntimeError("upload failed: connection reset")
-            with open(path, "rb") as f:
-                r["files"][os.path.basename(path)] = f.read()
-        return ""
+        self.on_create(r)  # may add another publisher's draft, or fail after GitHub made r
+        return self.view(r)
+
+    def upload(self, a):
+        url = a[-1]
+        assert url.startswith(f"https://uploads.github.com/repos/{R}/releases/") and "-X" == a[2], a
+        rid, name = int(url.split("/releases/")[1].split("/")[0]), url.split("?name=")[1]
+        r = self.releases[rid]
+        if not r["draft"] or r.get("foreign"):
+            self.violations.append(f"upload to {'foreign' if r.get('foreign') else 'published'} {rid}")
+        self.on_upload(r)
+        with open(a[a.index("--input") + 1], "rb") as f:
+            r["files"][name] = f.read()
+        return {"name": name}
 
     def patch(self, rid, a):
         r = self.releases[rid]
@@ -218,7 +229,17 @@ def fresh(hardware=STABLE):
 
 
 def mutations(w):
-    return [c for c in w.calls if c[:3] == ["gh", "release", "create"] or c[2:3] == ["-X"]]
+    return [c for c in w.calls if c[2:3] == ["-X"]]
+
+
+def foreign(w, rid, tag, draft=True):
+    """A release another publisher made meanwhile."""
+    w.releases[rid] = {"id": rid, "tag_name": tag, "draft": draft, "prerelease": False, "name": "other", "body": "",
+                       "published_at": None if draft else "2026-11-12T00:59:00Z", "files": {}, "foreign": True}
+
+
+def deletes(w):
+    return [c[4] for c in w.calls if c[:4] == ["gh", "api", "-X", "DELETE"]]
 
 
 # Pure parts.
@@ -254,9 +275,8 @@ def publish(w, commit, preview=False, want="published"):
     return out
 
 
-# Stable publish: CI files unchanged, then latest.
+# Stable publish of an older commit from main tip: CI files unchanged, then latest.
 w = fresh()
-w.main, w.head = [C1], C1
 w.runs[C1] = [[{"databaseId": 7, "status": "in_progress", "conclusion": "", "headSha": C1, "headBranch": "main",
                 "event": "push"}]] * 3 + w.runs[C1]
 out = publish(w, C1)
@@ -264,6 +284,7 @@ assert out["tag"] == "v0.10.0.post1" and out["id"] == 100 and w.t >= 3 * release
 assert release.serving() == {"tag": "v0.10.0.post1", "commit": C1, "tree": w.trees[C1]}
 r = w.releases[100]
 assert r["files"] == w.files[C1] and not r["prerelease"] and r["name"] == "MX Options 0.10.0.post1"
+assert r["target"] == C1 and r["body"] == release.stable_notes(C1)
 assert any(c[:3] == ["gh", "run", "download"] and c[c.index("-n") + 1] == "release-" + C1 for c in w.calls)
 
 # Refusals before anything is created.
@@ -271,6 +292,7 @@ cases = {
     "dirty tools checkout": lambda w: setattr(w, "dirty", " M ops/ship/release.py\n"),
     "tools checkout behind main": lambda w: setattr(w, "head", C1),
     "commit off main": lambda w: None,  # SIDE below
+    "commit is main tip": lambda w: None,  # C3 below: the tools' own commit, whatever directory runs them
     "tag exists": lambda w: w.tags.update({"v0.10.0.post2": C2}),
     "draft in flight": lambda w: w.releases.update({5: {"id": 5, "tag_name": "v9", "draft": True, "prerelease": False,
                                                         "name": "x", "body": "", "published_at": None, "files": {}}}),
@@ -286,10 +308,12 @@ for name, setup in cases.items():
     w = fresh()
     setup(w)
     before = json.dumps(w.releases, sort_keys=True)
-    out = publish(w, SIDE if name == "commit off main" else C2, want="timeout" if name == "CI run of another branch"
-                  else "refused")
+    target = {"commit off main": SIDE, "commit is main tip": C3}.get(name, C2)
+    out = publish(w, target, want="timeout" if name == "CI run of another branch" else "refused")
     assert not mutations(w) and json.dumps(w.releases, sort_keys=True) == before, (name, w.calls)
     assert out["reason"], name
+    if name == "commit is main tip":
+        assert "origin/main tip" in out["reason"] and not any(c[:3] == ["gh", "run", "list"] for c in w.calls), out
 
 # Not stable: refused without --preview (no CI wait, nothing created); --preview makes a pre-release.
 w = fresh(OPEN)
@@ -313,12 +337,54 @@ w.runs[C2] = [[dict(w.runs[C2][0][0], status="queued", conclusion="")]]
 out = publish(w, C2, want="timeout")
 assert not mutations(w) and w.t >= release.CI_WAIT
 
-# Failures after the draft exists: the draft this run made goes, nothing published is touched.
+# Failures after the draft exists: only the draft id the create reply named goes, only while still a draft.
 w = fresh()
 publish(w, C1)
-w.fail_upload = True
+w.fail.add("name=SHA256SUMS")  # partial upload: BUILDINFO.json is up, then the second file fails
+w.on_upload = lambda r: foreign(w, 999, r["tag_name"]) if 999 not in w.releases else None
 out = publish(w, C2, want="refused")
-assert "removed" in out["reason"] and set(w.releases) == {100} and release.serving()["tag"] == "v0.10.0.post1"
+assert out["id"] == 101 and "draft 101 removed" in out["reason"], out
+assert deletes(w) == [f"repos/{R}/releases/101"] and set(w.releases) == {100, 999} and w.releases[999]["draft"]
+assert release.serving()["tag"] == "v0.10.0.post1"
+
+w = fresh()  # another publisher's same-tag draft appears as ours is made: files go to our id only
+w.on_create = lambda r: foreign(w, 999, r["tag_name"])
+out = publish(w, C2)
+assert out["id"] == 100 and w.releases[100]["files"] == w.files[C2] and w.releases[999] == dict(
+    w.releases[999], draft=True, files={}) and not deletes(w)
+w = fresh()  # every upload replies OK, but the draft lacks a file on read-back
+w.on_upload = lambda r: r["files"].pop("BUILDINFO.json", None) if len(r["files"]) == 3 else None
+out = publish(w, C2, want="refused")
+assert "files [" in out["reason"] and "draft 100 removed" in out["reason"] and not w.releases, out
+
+# Create fails or its outcome is unknown: no id of ours, so no deletion, whatever drafts exist for the tag.
+w = fresh()
+def taken(r):  # another publisher's draft for the tag; GitHub rejects ours and keeps nothing of it
+    del w.releases[r["id"]]
+    foreign(w, 999, r["tag_name"])
+    raise RuntimeError("gh: Validation Failed (HTTP 422)\nalready_exists")
+w.on_create = taken
+out = publish(w, C2, want="refused")
+assert out["id"] is None and "nothing deleted" in out["reason"] and not deletes(w), out
+assert set(w.releases) == {999} and w.releases[999]["draft"]
+for reply in ("timed out after 120 s", "gh: Server Error (HTTP 502)", None):
+    w = fresh()
+    def lost(r, reply=reply):  # GitHub made the draft, but the reply never says so
+        if reply:
+            raise RuntimeError(reply)
+    w.on_create = lost
+    if reply is None:
+        w.create = lambda a, create=w.create: (create(a), "not json")[1]
+    out = publish(w, C2, want="draft-left")
+    assert out["id"] is None and "nothing deleted" in out["reason"] and not deletes(w), (reply, out)
+    assert [r["draft"] for r in w.releases.values()] == [True], w.releases
+w = fresh()
+def published(r):  # someone published our draft meanwhile, then the upload fails
+    r.update(draft=False, published_at="2026-11-12T00:58:00Z")
+    raise RuntimeError("upload failed: connection reset")
+w.on_upload = published
+out = publish(w, C2, want="draft-left")
+assert not deletes(w) and "left as it is" in out["reason"] and not w.releases[out["id"]]["draft"], out
 w = fresh()
 w.fail.add("make_latest=true")
 out = publish(w, C2, want="refused")
@@ -336,17 +402,21 @@ w.fail.add("--paginate")  # releases cannot be listed
 out, rc = release.publish(C2, False)
 assert out["state"] == "refused" and rc == 1 and not mutations(w), out  # fails before create: releases unreadable
 
-# point: rollback, re-deploy, promotion, refusals.
+# point: rollback, re-deploy, promotion, refusals; tools always on a newer main tip than the target.
 w = fresh()
-w.main, w.head = [C1], C1
-publish(w, C1)
 w.main, w.head = [C2, C1], C2
+publish(w, C1)
+w.main, w.head = [C3, C2, C1], C3
 publish(w, C2)
 assert release.point("v0.10.0.post1") == ({"latest": "v0.10.0.post1", "prerelease": ["v0.10.0.post2"]}, 0)
 assert release.serving()["commit"] == C1 and w.releases[101]["prerelease"]
 assert release.point("v0.10.0.post2") == ({"latest": "v0.10.0.post2", "prerelease": []}, 0)
 assert not w.releases[101]["prerelease"] and not w.violations and len(w.releases) == 2
-w.main, w.head = [C3, C2, C1], C3
+w.main, w.head = [C2, C1], C2  # the tools' commit is the target's: refused before any change
+n = len(mutations(w))
+out, rc = release.point("v0.10.0.post2")
+assert rc == 1 and "origin/main tip" in out["refused"] and len(mutations(w)) == n, out
+w.main, w.head = [C4, C3, C2, C1], C4
 release.gate = lambda commit: (OPEN, MANIFEST)
 pre = publish(w, C3, preview=True, want="preview")
 out, rc = release.point("v0.10.0.post3")
@@ -369,8 +439,7 @@ w.tags_show_drafts = False
 w.releases[101]["files"] = dict(w.files[C2])
 w.dirty = "?? x\n"
 assert "clean checkout" in release.point("v0.10.0.post2")[0]["refused"]
-w.dirty, w.main = "", [C3, C1]  # its commit is no longer on main's first-parent history
-w.head = C3
+w.dirty, w.main = "", [C4, C3, C1]  # its commit is no longer on main's first-parent history
 assert "first-parent" in release.point("v0.10.0.post2")[0]["refused"]
 assert len(mutations(w)) == n and release.serving()["tag"] == "v0.10.0.post3" and not w.violations
 
@@ -395,6 +464,6 @@ w.releases[100]["files"]["SHA256SUMS"] = b"0  BUILDINFO.json\n"
 out, rc = release.health("v0.10.0.post2")
 assert rc == 1 and "files" in out["checks"] and out["checks"]["files"] is not True and "wheel" not in out["checks"], out
 assert release.health("v0/../x")[0]["checks"]["release"] == "not a tag name"
-assert not [c for c in w.calls if c[2:3] == ["-X"] and c[3] != "PATCH" or c[:3] == ["gh", "release", "delete"]]
+assert not [c for c in w.calls if c[2:3] == ["-X"] and c[3] not in ("PATCH", "POST") or c[:3] == ["gh", "release", "delete"]]
 
 print("release self-check: OK")
