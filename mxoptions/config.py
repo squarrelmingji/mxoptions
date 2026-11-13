@@ -328,6 +328,10 @@ DEFAULTS = {
     # screen what the keyboard reports it changed (its brightness), never what made it change. "lock_notices": the
     # same when it reports a lock key (Caps Lock, Num Lock, Scroll Lock) on or off; "fn_notices": for its Fn lock.
     "keyboard": {"keys": {}, "profiles": [], "notices": False, "lock_notices": False, "fn_notices": False},
+    # The mouse in single apps: "profiles": [{"app", "name", "buttons", "ring"}], first one for app in front wins.
+    # "buttons": key -> action over "buttons" (NATIVE: button's own function); a button not listed does what
+    # "buttons" says. "ring": bubbles of its own, or None for the ring of all apps. Everything else stays global.
+    "mouse": {"profiles": []},
 }
 
 
@@ -532,6 +536,67 @@ def _keyboard_profiles(profiles):
     return kept
 
 
+# What a button may do in a mouse profile besides what a key may: the mouse's own actions, exactly as offered
+MOUSE_ONLY = ({"type": "wheel_mode"}, {"type": "dpi_cycle"}, {"type": "dpi_shift"}, {"type": "flow"})
+
+
+def profile_button_action(action):
+    """Whether a button of a mouse profile may do ``action``: NATIVE, what a key may, or a mouse action. Never
+    gestures (gesture settings stay global)."""
+    return action == NATIVE or keyboard_action(action) or action in MOUSE_ONLY
+
+
+def mouse_profile(profile):
+    """The mouse profile made from ``profile`` (see DEFAULTS). Buttons it cannot have are dropped; None if it is
+    not one at all."""
+    if not (isinstance(profile, dict) and set(profile) == {"app", "name", "buttons", "ring"} and app_id(profile["app"])
+            and isinstance(profile["name"], str) and len(profile["name"]) <= MAX_PROFILE_NAME
+            and isinstance(profile["buttons"], dict) and (profile["ring"] is None or isinstance(profile["ring"], list))):
+        return None
+    buttons = {}
+    for key in BUTTONS:
+        if key in profile["buttons"]:
+            action = environment.modernize(profile["buttons"][key])
+            if profile_button_action(action):
+                buttons[key] = action
+    ring = _sanitize_bubbles(profile["ring"], 1) if profile["ring"] is not None else None
+    return {"app": profile["app"], "name": profile["name"], "buttons": buttons, "ring": ring or None}
+
+
+def _mouse_profiles(profiles):
+    """The usable mouse profiles of ``profiles``, in their order: at most MAX_PROFILES, the first for each app."""
+    kept = []
+    for profile in profiles if isinstance(profiles, list) else ():
+        profile = mouse_profile(profile)
+        if profile is not None and all(other["app"] != profile["app"] for other in kept):
+            kept.append(profile)
+            if len(kept) >= MAX_PROFILES:
+                break
+    return kept
+
+
+def mouse_profile_of(cfg, app):
+    """The profile of ``app`` in "mouse.profiles", or None (app None: none)."""
+    if app is None:
+        return None
+    return next((profile for profile in cfg["mouse"]["profiles"] if profile["app"] == app), None)
+
+
+def mouse_buttons(cfg, app):
+    """What the buttons do while ``app`` is in front: its profile over "buttons"."""
+    buttons = dict(cfg["buttons"])
+    profile = mouse_profile_of(cfg, app)
+    if profile is not None:
+        buttons.update(profile["buttons"])
+    return buttons
+
+
+def ring_bubbles(cfg, app):
+    """The bubbles of the Actions Ring while ``app`` is in front: its own, else the ring for all apps."""
+    profile = mouse_profile_of(cfg, app)
+    return profile["ring"] if profile is not None and profile["ring"] is not None else cfg["ring"]["bubbles"]
+
+
 def _sanitize(cfg):
     for key in BUTTONS:
         # The KDE shortcuts the catalogue held before it named things for every desktop become those names here.
@@ -647,6 +712,7 @@ def _sanitize(cfg):
     cfg["keyboard"]["notices"] = cfg["keyboard"].get("notices") is True
     cfg["keyboard"]["lock_notices"] = cfg["keyboard"].get("lock_notices") is True
     cfg["keyboard"]["fn_notices"] = cfg["keyboard"].get("fn_notices") is True
+    cfg["mouse"]["profiles"] = _mouse_profiles(cfg["mouse"].get("profiles"))
     return cfg
 
 

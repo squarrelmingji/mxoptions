@@ -177,6 +177,7 @@ Buttons additionally take `{"type": "default"}` (leave it to the mouse), `{"type
 | `flow.peers` | The other computers of Flow, two at most, each with `name`, `address`, `edge` (`left`, `right`, `top`, `bottom`: the side it stands on) and `key`, the pairing key: treat that as a password. A single field is addressed like `flow.peers.0.edge`. |
 | `keyboard.keys` | What the keys of the keyboard do: an object from key id to action, the id being the key's control id as `0x` and four lowercase hex digits (`"0x00c7"`). A key that is not listed does what it always does. Keys take every action above except `wheel_mode`, `dpi_cycle`, `dpi_shift`, `flow` and `gestures`; `host` moves the keyboard, not the mouse; `ring` (exactly `{"type": "ring"}`) opens the Actions Ring at the pointer. At most 128. |
 | `keyboard.profiles` | Keys of their own for single apps, at most 32: a list of `{"app", "name", "keys"}`. `app` is the name the app goes by on this desktop, lowercase, 1 to 128 characters (KDE: its window class; sway: its `app_id`, else its X11 class; Hyprland and other X11 desktops: its class; Windows: its program file, like `firefox.exe`), one profile each. `name` is shown in the window, at most 64 characters. `keys` is like `keyboard.keys`, plus `{"type": "default"}`: the key does what it always does in that app, even where `keyboard.keys` changes it. A key a profile does not list does what `keyboard.keys` says. While that app is in front, the first profile for it counts. GNOME on Wayland does not say which app is in front: there only `keyboard.keys` counts. Which app is in front is not offered here. |
+| `mouse.profiles` | Buttons and Actions Ring of their own for single apps, at most 32: a list of `{"app", "name", "buttons", "ring"}`. `app` and `name` as in `keyboard.profiles`, one profile each, its own 32. `buttons` maps `middle`, `back`, `forward`, `gesture`, `smartshift`, `panel` to an action a key may have, or `wheel_mode`, `dpi_cycle`, `dpi_shift`, `flow` (exactly `{"type": ...}`), or `{"type": "default"}`: the button's own function in that app, even where `buttons` changes it. Never `gestures`. A button not listed does what `buttons` says. `ring`: bubbles in the format of `ring.bubbles`, or `null` for the ring of all apps. Thumb wheel, gesture directions, pointer, scroll, SmartShift and haptics stay the same in every app. |
 | `flow.clipboard`, `flow.files`, `flow.files_max_mb`, `flow.cue_arrived`, `flow.cue_failed` | Flow: whether copied text and pictures go along, whether files do, the most megabytes in one go, and the vibration patterns for files that have arrived and files that could not be brought over. |
 
 `Set` changes only what is there, so a key is given an action, or its action taken away, by setting
@@ -193,7 +194,12 @@ q Set keyboard.profiles '[{"app": "org.kde.kate", "name": "Kate", "keys": {"0x00
 q Set keyboard.profiles.0.keys.0x00c7 '{"type": "keys", "keys": ["KEY_F5"]}'
 ```
 
-Under `keyboard`, `Set` returns `false` and changes nothing if any of what was sent would not be kept
+```sh
+q Set mouse.profiles '[{"app": "org.kde.kate", "name": "Kate", "buttons": {"back": {"type": "default"}}, "ring": null}]'
+q Set mouse.profiles.0.buttons.back '{"type": "keys", "keys": ["KEY_LEFTCTRL", "KEY_C"]}'
+```
+
+Under `keyboard` and `mouse`, `Set` returns `false` and changes nothing if any of what was sent would not be kept
 as it is (an id in another form, an action a key cannot have, `{"type": "default"}` in `keyboard.keys`,
 a profile with a field more or less, an app name in capitals, two profiles for one app). An action
 is checked all the way down: key names the virtual keyboard knows, at most 16 to a combination; a
@@ -217,6 +223,31 @@ Versions of MX Options with keyboard support from before keys could open the rin
 on a key: such a key does what it always does there, and the first setting they save takes it out
 of `keyboard.keys` and of every profile for good. Before going back to one, export the settings
 (*Device & app → Settings file*); importing that file again in this version brings those keys back.
+
+### Mouse in single apps
+
+While an app with a mouse profile is in front, its buttons and its ring count, 0.3 s after it came
+to the front; everywhere else the settings for all apps. `Get` and `GetConfig` show saved settings
+only, never which app is in front or what its profile makes of a button. Same limits as keyboard
+profiles: app matched by name only; KDE, X11, sway, Hyprland and Windows only, GNOME on Wayland
+none (there the settings for all apps count). MX Options' own window in front keeps the mouse as
+it was for the app before (the keyboard follows its own window).
+
+When the app in front changes a button: what it holds is let go of then, its release later does
+nothing, and macros it started stop (a command already started keeps running; macros a gesture or
+a ring bubble started play on). Unchanged buttons stay as they are. When the ring of the new app
+differs, an open ring closes and a bubble picked in it runs nothing, even after coming back to the
+first app. A bubble already picked still runs when a ring closes for another reason (same ring in
+the new app, its button changed, a device gone). Until a closed ring is off the screen, the thumb
+wheel may still turn its dials for a moment. Only changed buttons whose reporting changes are
+written to the mouse.
+
+`OpenRing` shows the ring for all apps, `ShowRing` the caller's bubbles, whatever app is in front;
+neither closes when the app in front changes, and their bubbles run.
+
+Versions without mouse profiles ignore `mouse.profiles` and keep it as it is when they save,
+export or import. "Restore defaults" removes them, in every version. Before going back, export the
+settings; importing that file in this version brings the profiles back.
 
 Macro steps, for a button or a key:
 

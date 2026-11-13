@@ -26,7 +26,7 @@ class Bridge(QObject, Listener):
 
     state = Signal(object)
     seeded = Signal(object)
-    ring = Signal(str)
+    ring = Signal(str, object, object)
     pressed = Signal(object)
     ring_turn = Signal(float)
     gesture = Signal(object)
@@ -38,8 +38,8 @@ class Bridge(QObject, Listener):
     def on_config(self, cfg):
         self.seeded.emit(cfg)
 
-    def on_ring(self, event):
-        self.ring.emit(event)
+    def on_ring(self, event, session=None, bubbles=None):
+        self.ring.emit(event, session, bubbles)
 
     def on_pressed(self, keys):
         self.pressed.emit(keys)
@@ -270,7 +270,7 @@ def main(argv=None):
             overlay.configure(applied["ring"])
         sounds.configure(store.cfg["wheel_click"])
         service.set_enabled(store.cfg["app"]["api"])
-        store.front.want("profiles", bool(store.cfg["keyboard"]["profiles"]))
+        store.front.want("profiles", bool(store.cfg["keyboard"]["profiles"] or store.cfg["mouse"]["profiles"]))
 
     def engine_event(kind, payload):
         if kind == "wheel_mode":
@@ -285,7 +285,7 @@ def main(argv=None):
     bridge.ring.connect(overlay.handle)
     bridge.ring_turn.connect(overlay.turn)
     overlay.opened.connect(engine.set_ring_open)
-    overlay.triggered.connect(engine.trigger_action)
+    overlay.triggered.connect(engine.ring_action)
     overlay.cue.connect(engine.feedback)
 
     # Started in the background (the service does that) the program keeps running without a window:
@@ -295,7 +295,7 @@ def main(argv=None):
     window = MainWindow(store, hide_on_close=stays)
     service = api.Service(store, overlay, window.show_and_raise, app)
     service.set_enabled(cfg["app"]["api"])
-    store.front.want("profiles", bool(cfg["keyboard"]["profiles"]))
+    store.front.want("profiles", bool(cfg["keyboard"]["profiles"] or cfg["mouse"]["profiles"]))
     bridge.event.connect(engine_event)
     app.setQuitOnLastWindowClosed(not stays)
 

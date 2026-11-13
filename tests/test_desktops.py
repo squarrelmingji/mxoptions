@@ -1,12 +1,14 @@
 """What depends on the desktop besides the actions: the way to the clipboard, the watcher of the screen
 edges, the kind of window the ring is drawn in. The desktops themselves are stand-ins here."""
 
+import json
 import os
 import stat
 import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -306,6 +308,39 @@ class RingInAProgramOfItsOwn(unittest.TestCase):
         self.assertFalse(self.proxy.open())  # no ring of the user's has been told
         self.assertTrue(self.proxy.open([{"label": "x", "icon": "", "color": "", "action": {"type": "hook", "name": "x"}}]))
         self.assertTrue(self.wait(lambda: ("opened", True) in self.heard))
+
+    def test_a_ring_s_number_goes_there_and_a_bad_one_is_dropped(self):
+        self.proxy.configure({"size": 1.0, "style": "bubbles", "bubbles": [
+            {"label": "", "icon": "", "color": "", "action": {"type": "keys", "keys": ["KEY_A"]}}]})
+        self.assertTrue(self.wait(lambda: self.proxy.available))
+        opened = lambda: [value for kind, value in self.heard if kind == "opened"]  # noqa: E731
+        bubbles = [{"label": "x", "icon": "", "color": "", "action": {"type": "hook", "name": "x"}}]
+        for bad in ("1", 1.5, True, [1]):
+            self.proxy._send("handle", event="down", session=bad, bubbles=bubbles)
+        self.proxy._send("handle", event="down", session=5, bubbles=["nothing usable"])
+        self.proxy.handle("down", 6, bubbles)
+        self.assertTrue(self.wait(lambda: opened() == [True]))
+        self.proxy.handle("cancel", 5)  # an earlier ring's: this one stays
+        self.proxy.handle("cancel", 6)
+        self.assertTrue(self.wait(lambda: opened() == [True, False]))
+        self.assertTrue(self.proxy.open(bubbles))  # another program's ring
+        self.assertTrue(self.wait(lambda: opened() == [True, False, True]))
+        self.proxy.handle("cancel", 99)
+        self.proxy.handle("cancel")
+        self.assertTrue(self.wait(lambda: opened() == [True, False, True, False]))
+
+    def test_a_pick_from_there_counts_only_with_a_ring_number_it_may_have(self):
+        picks = []
+        self.proxy.triggered.connect(lambda action, session: picks.append((action, session)))
+        action = {"type": "hook", "name": "x"}
+        lines = [{"event": "triggered", "action": action, "session": 3}, {"event": "triggered", "action": action, "session": None},
+                 {"event": "triggered", "action": action}, {"event": "triggered", "action": action, "session": "3"},
+                 {"event": "triggered", "action": action, "session": 1.5}, {"event": "triggered", "action": action, "session": True},
+                 {"event": "triggered", "action": "x", "session": 3}]
+        data = b"".join(json.dumps(line).encode("utf-8") + b"\n" for line in lines)
+        with mock.patch.object(self.proxy._process, "readAllStandardOutput", lambda: data):
+            self.proxy._read()
+        self.assertEqual(picks, [(action, 3), (action, None)])
 
     def test_it_is_started_again_when_it_dies(self):
         self.assertTrue(self.wait(lambda: self.proxy.available))

@@ -1,4 +1,4 @@
-"""Which app is in front, for the app profiles of the keyboard (the settings' "keyboard.profiles").
+"""Which app is in front, for the app profiles of the keyboard and the mouse ("keyboard.profiles", "mouse.profiles").
 
 Every desktop tells it in its own way, or not at all:
 
@@ -12,7 +12,7 @@ Every desktop tells it in its own way, or not at all:
   windows   the program of GetForegroundWindow, by the name of its file, twice a second.
 
 GNOME on Wayland tells no program which window is in front, short of an extension of the shell, which this
-program does not bring: there the profiles are not offered, and the keys do what they do in every app.
+program does not bring: there the profiles are not offered, and keys and buttons do what they do in every app.
 
 Only the name an app goes by is kept, lowercase (config.app_id); the title of a window never is. Which app is
 in front never goes to the log, and is not part of what other programs can ask (api.py). The desktop is only
@@ -270,9 +270,9 @@ def _make(kind, parent):
 
 
 class Front(QObject):
-    """Tells the engine which app is in front (Engine.set_front) while something wants that: the keyboard has app
-    profiles, or the page that makes them is open. ``last_other`` is the app last in front that is not this
-    program, for that page to offer."""
+    """Tells the engine which app is in front (Engine.set_front) while something wants that: the keyboard or the
+    mouse has app profiles, or a page that makes them is open. ``last_other`` is the app last in front that is not
+    this program, for that page to offer."""
 
     changed = Signal()  # last_other changed
 
@@ -291,7 +291,7 @@ class Front(QObject):
         return self.kind is not None
 
     def want(self, who, on):
-        """``who`` ("profiles", "page") does, or no longer does, need to know."""
+        """``who`` ("profiles", "page", a page's app chooser) does, or no longer does, need to know."""
         if on:
             self._wanted.add(who)
         else:

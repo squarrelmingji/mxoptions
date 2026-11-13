@@ -30,6 +30,7 @@ class Store(QObject):
     state_changed = Signal(object)  # engine state (connection, battery, capabilities)
     pressed_changed = Signal(object)  # frozenset of buttons held down right now
     gesture_changed = Signal(object)  # a gesture in progress or just finished (see Listener.on_gesture)
+    mouse_app_changed = Signal()  # mouse_app changed
 
     def __init__(self, cfg, engine, sounds=None, parent=None):
         super().__init__(parent)
@@ -38,6 +39,7 @@ class Store(QObject):
         self.sounds = sounds  # WheelSounds, for the pages that let the user hear a click
         self.flow = None      # flow_service.FlowService, once the program has made it
         self.front = None     # front.Front, once the program has made it: which app is in front
+        self.mouse_app = None  # the app whose mouse settings the pages show; None: all apps. Never saved.
         self.state = {"connected": False, "known": False, "name": "", "uinput": True, "rivals": [], "battery": None,
                       "current_host": 0, "hosts": [], "dpi": cfg["pointer"]["dpi"], "wheel_mode": "", "caps": None,
                       "keyboard": None}
@@ -112,6 +114,68 @@ class Store(QObject):
             self._push()
         return True
 
+    def set_mouse_app(self, app):
+        """Show the mouse settings of ``app`` on the Buttons and Ring pages (None: of all apps)."""
+        if app != self.mouse_app:
+            self.mouse_app = app
+            self.mouse_app_changed.emit()
+
+    def mouse_profile(self, app):
+        """The mouse profile of ``app`` (see config.DEFAULTS), or None."""
+        return config.mouse_profile_of(self.cfg, app)
+
+    def add_mouse_profile(self, app):
+        """Give ``app`` mouse settings of its own, none to begin with. False, and nothing changed, if it cannot."""
+        profiles = self.cfg["mouse"]["profiles"]
+        if not config.app_id(app) or self.mouse_profile(app) is not None or len(profiles) >= config.MAX_PROFILES:
+            return False
+        profiles.append({"app": app, "name": app[:config.MAX_PROFILE_NAME], "buttons": {}, "ring": None})
+        self._push()
+        return True
+
+    def remove_mouse_profile(self, app):
+        profiles = self.cfg["mouse"]["profiles"]
+        kept = [profile for profile in profiles if profile["app"] != app]
+        if len(kept) != len(profiles):
+            self.cfg["mouse"]["profiles"] = kept
+            self._push()
+        if self.mouse_app == app:
+            self.set_mouse_app(None)
+
+    def set_profile_button(self, app, key, action):
+        """What button ``key`` does while ``app`` is in front: an action, config.NATIVE for its own function, or None
+        for what it does in every app. False, and nothing changed, for what the settings would not keep."""
+        profile = self.mouse_profile(app)
+        if profile is None or key not in config.BUTTONS:
+            return False
+        buttons = profile["buttons"]
+        if action is None:
+            if buttons.pop(key, None) is not None:
+                self._push()
+            return True
+        if not config.profile_button_action(action):
+            log.warning("button %s: action refused", key)
+            return False
+        if buttons.get(key) != action:
+            buttons[key] = copy.deepcopy(action)
+            self._push()
+        return True
+
+    def set_profile_ring(self, app, bubbles):
+        """The Actions Ring while ``app`` is in front: bubbles of its own, or None for the ring of all apps. False,
+        and nothing changed, for no profile or nothing usable."""
+        profile = self.mouse_profile(app)
+        if profile is None:
+            return False
+        if bubbles is not None:
+            bubbles = config.clean_bubbles(bubbles)
+            if not bubbles:
+                return False
+        if profile["ring"] != bubbles:
+            profile["ring"] = bubbles
+            self._push()
+        return True
+
     def restore_keyboard(self):
         """Every key does what it always does, in every app: no profile is left either. Notices stay as they are."""
         self.set_section("keyboard", dict(self.cfg["keyboard"], keys={}, profiles=[]))
@@ -167,7 +231,7 @@ class Store(QObject):
             return False
         if isinstance(value, str) and stored != value:
             return False
-        if parts[0] == "keyboard" and stored != value:  # a key, an id or an action a key cannot have: refused, not dropped
+        if parts[0] in ("keyboard", "mouse") and stored != value:  # what a key or a profile cannot have: refused, not dropped
             return False
         if cfg != self.cfg:
             self.replace(cfg)

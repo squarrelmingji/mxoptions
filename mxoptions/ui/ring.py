@@ -551,7 +551,7 @@ class RingOverlay(QObject):
       WINDOW  Wayland with neither: an ordinary maximised window. It takes the focus while it is open,
               and the desktop may animate it."""
 
-    triggered = Signal(object)  # action to run
+    triggered = Signal(object, object)  # action to run, number of the ring it was picked in (None: not the engine's)
     cue = Signal(int)           # haptic waveform to play
     opened = Signal(bool)       # the menu appeared / went away
 
@@ -561,6 +561,7 @@ class RingOverlay(QObject):
         self.kind = kind or overlay_kind()
         self._root = []
         self._shown = []        # the bubbles on screen at the top level: the user's ring, or a visitor's
+        self._session = None    # the engine's number of the ring on screen; None: another program opened it
         self._path = []         # folders entered, outermost first
         self._size = RING_BASE
         self._style = "bubbles"
@@ -661,15 +662,19 @@ class RingOverlay(QObject):
 
     # -- driven by the mouse button (engine events) -----------------------
 
-    def handle(self, event):
+    def handle(self, event, session=None, bubbles=None):
+        """From the engine: "down" opens ``bubbles`` (checked; None: the user's ring) as ring number ``session``.
+        "cancel" with a number closes only an engine ring up to that number, never one another program opened."""
         if not self.available:
             return
         if event == "down":
             if self._open:  # a second press closes a menu left open by a tap
                 self._swallow_up = True
                 self.close()
-            elif self._root:
-                self._show(self._root)
+            else:
+                root = self._root if bubbles is None else bubbles
+                if root:
+                    self._show(root, session)
         elif event == "up":
             self._held = False
             if self._swallow_up:
@@ -678,7 +683,8 @@ class RingOverlay(QObject):
                 self._released()
         elif event == "cancel":
             self._swallow_up = False
-            self.close()
+            if session is None or (self._session is not None and self._session <= session):
+                self.close()
 
     def open(self, bubbles=None):
         """Open the menu at the pointer with no button held, as another program asked; it waits for a
@@ -686,12 +692,13 @@ class RingOverlay(QObject):
         root = self._root if bubbles is None else bubbles
         if not self.available or self._open or not root:
             return False
-        self._show(root)
+        self._show(root, None)
         self._held = False
         return True
 
-    def _show(self, root):
+    def _show(self, root, session):
         self._open = True
+        self._session = session
         self._held = True
         self._shown = root
         self._path = []
@@ -774,6 +781,7 @@ class RingOverlay(QObject):
             timer.stop()
         self._grow.stop()
         self._held = False
+        self._session = None
         if self._open:
             self._open = False
             self._ring.setProperty("shown", False)
@@ -827,10 +835,11 @@ class RingOverlay(QObject):
         action = actions.SCROLLS[bubble["scroll"]][4] if is_dial(bubble) else bubble.get("action")
         if not action:
             return  # a dial without a click action
+        session = self._session  # before close() forgets which ring it was
         self.close()
         self.cue.emit(device.WAVE_CONFIRM)
         # Let the overlay unmap first so the action lands in the application below.
-        QTimer.singleShot(ACTION_DELAY[self.kind], lambda: self.triggered.emit(action))
+        QTimer.singleShot(ACTION_DELAY[self.kind], lambda: self.triggered.emit(action, session))
 
     # -- driven by the pointer (QML) ---------------------------------------
 
@@ -933,7 +942,7 @@ class RingOverlay(QObject):
             self._angle = (self._angle + (30.0 if forward else -30.0)) % 360.0
             self._ring.set_spin(index, self._angle)
             self.cue.emit(device.WAVE_TICK)
-            self.triggered.emit(up if forward else down)
+            self.triggered.emit(up if forward else down, self._session)
 
 
 class RingProxy(QObject):
@@ -945,7 +954,7 @@ class RingProxy(QObject):
     from here and told over its standard input what the overlay would be told: one line of JSON each
     way per call or signal."""
 
-    triggered = Signal(object)
+    triggered = Signal(object, object)
     cue = Signal(int)
     opened = Signal(bool)
 
@@ -1011,8 +1020,9 @@ class RingProxy(QObject):
                     self._send("look", look=self._look)
                 if self._config is not None:
                     self._send("configure", ring=self._config)
-            elif event == "triggered" and isinstance(message.get("action"), dict):
-                self.triggered.emit(message["action"])
+            elif (event == "triggered" and isinstance(message.get("action"), dict) and "session" in message
+                  and valid_session(message["session"])):
+                self.triggered.emit(message["action"], message["session"])
             elif event == "cue" and isinstance(message.get("wave"), int):
                 self.cue.emit(message["wave"])
             elif event == "opened":
@@ -1030,8 +1040,8 @@ class RingProxy(QObject):
     def refresh(self):
         pass  # the look is passed on by set_look, and the other program repaints for itself
 
-    def handle(self, event):
-        self._send("handle", event=event)
+    def handle(self, event, session=None, bubbles=None):
+        self._send("handle", event=event, session=session, bubbles=bubbles)
 
     def turn(self, clicks):
         self._send("turn", clicks=clicks)
@@ -1052,6 +1062,11 @@ class RingProxy(QObject):
         self._process.closeWriteChannel()  # it leaves when nothing more can be said to it
         if not self._process.waitForFinished(1500):
             self._process.kill()
+
+
+def valid_session(session):
+    """A ring number as it may cross to or from the overlay's own program: an int, or None."""
+    return session is None or type(session) is int
 
 
 def create_overlay(parent=None):

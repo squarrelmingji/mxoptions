@@ -1368,7 +1368,7 @@ class RingFromAKey(unittest.TestCase):
         if not vinput:
             rig.engine.vinput = None
         self.rings = []
-        rig.listener.on_ring = self.rings.append
+        rig.listener.on_ring = lambda event, *_: self.rings.append(event)
         return rig.start()
 
     def mouse_buttons(self, rig, *cids):
@@ -1828,7 +1828,7 @@ class FollowsMouse(unittest.TestCase):
         rig = self.make()
         rig.engine.cfg["keyboard"]["keys"]["0x0f01"] = {"type": "ring"}
         rings = []
-        rig.listener.on_ring = rings.append
+        rig.listener.on_ring = lambda event, *_: rings.append(event)
         rig.kb._on_keys({0x0F01})
         self.stays("held")
         rig.kb._on_keys(set())

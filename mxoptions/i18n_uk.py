@@ -970,4 +970,23 @@ STRINGS = {
         "Поточні налаштування повернуто.",
     "Nothing was imported: the settings could not be saved ({}). They are as they were.":
         "Нічого не імпортовано: не вдалося зберегти налаштування ({}). Вони лишилися як були.",
+    "Settings for": "Налаштування для",
+    "Remove the settings of this app": "Вилучити налаштування цієї програми",
+    "Remove the settings of {}? There the mouse then works as in every app.":
+        "Вилучити налаштування {}? Там миша працюватиме як в усіх програмах.",
+    "This desktop does not tell which app is in front, so settings for one app cannot work here.":
+        "Це робоче середовище не повідомляє, яка програма попереду, тому налаштування для однієї програми тут не працюють.",
+    "While {} is in front. \"As in all apps\": as set for all apps. \"Default\": the button's own function, even "
+    "where all apps change it.":
+        "Поки попереду {}. «Як в усіх програмах»: як задано для всіх програм. «Типово»: власна функція кнопки, навіть "
+        "якщо для всіх програм її змінено.",
+    "To give an app its own settings, add it: {} was in front last.":
+        "Щоб дати програмі власні налаштування, додайте її: останньою попереду була {}.",
+    "To give an app its own settings, switch to it, then come back and add it.":
+        "Щоб дати програмі власні налаштування, перейдіть до неї, потім поверніться й додайте її.",
+    "{} uses the ring for all apps.": "{} використовує кільце для всіх програм.",
+    "Make a ring for this app": "Створити кільце для цієї програми",
+    "Use the ring for all apps": "Використовувати кільце для всіх програм",
+    "Use the ring for all apps in {}? Its own ring goes.": "Використовувати в {} кільце для всіх програм? Власне кільце зникне.",
+    "Size and style are shared by all apps.": "Розмір і вигляд спільні для всіх програм.",
 }

@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 
-from . import config, device, environment, gestures, hidpp, keyboard, vinput
+from . import APP_ID, config, device, environment, gestures, hidpp, keyboard, vinput
 from .actions import Executor, here, keys
 
 if sys.platform == "win32":
@@ -86,8 +86,10 @@ class Listener:
     def on_config(self, cfg):
         """The engine changed the configuration itself (first-run seeding)."""
 
-    def on_ring(self, event):
-        """The button that opens the Actions Ring: event is "down", "up" or "cancel"."""
+    def on_ring(self, event, session=None, bubbles=None):
+        """The Actions Ring from a button or a key. "down" opens ``bubbles`` (checked) as ring number ``session``;
+        "up" and "cancel" without a number are for the ring held; "cancel" with a number closes every ring of the
+        engine up to it."""
 
     def on_pressed(self, keys):
         """Buttons held down right now, as a frozenset of button keys (plus "left"/"right")."""
@@ -161,6 +163,12 @@ class Engine:
         self._rumble = {"level": 0.0, "next": 0.0}  # the strength a game asks for now, and when the next pulse is due
         self.keyboard = keyboard.KeyboardSide(self)  # the keyboard, found and handled next to the mouse
         self._front = None         # (the app in front, when it counts) not handed to the keyboard yet (see set_front)
+        self._app = None           # the app in front whose mouse profile counts (see _mouse_front); never saved or told
+        self._buttons = {}         # button key -> what it does now: one object until its action changes (see _effective_buttons)
+        self._ring_session = 0     # rings opened by a button or key so far: the number of the last one
+        self._ring_floor = 0       # rings up to this number showed bubbles the app in front no longer has: their picks run nothing
+        self._ring_bubbles = None  # what the rings after the floor showed
+        self._effective_buttons()
 
     # -- thread-safe API --------------------------------------------------
 
@@ -192,6 +200,10 @@ class Engine:
 
     def trigger_action(self, action):
         self._queue.put(("trigger", copy.deepcopy(action)))
+
+    def ring_action(self, action, session=None):
+        """A bubble picked in the Actions Ring number ``session`` (None: a ring another program opened)."""
+        self._queue.put(("ring_action", copy.deepcopy(action), session))
 
     def switch_host(self, host):
         self._queue.put(("host", host))
@@ -323,6 +335,10 @@ class Engine:
                 self._play(item[1])
         elif kind == "trigger":
             self.executor.trigger(item[1])
+        elif kind == "ring_action":  # only a pick from a ring whose bubbles still count runs
+            session = item[2]
+            if session is None or (type(session) is int and self._ring_floor < session <= self._ring_session):
+                self.executor.trigger(item[1])
         elif kind == "front":
             self._front = (item[1], time.monotonic() + FRONT_DELAY)
         elif kind == "host":
@@ -434,6 +450,58 @@ class Engine:
         if self._front is not None and now >= self._front[1]:
             app, self._front = self._front[0], None
             self.keyboard.front_changed(app)
+            if app != APP_ID:  # this program's own window in front keeps the mouse as it was
+                self._mouse_front(app)
+
+    def _mouse_front(self, app):
+        """``app`` is in front now: the buttons and the ring do what its mouse profile says. Only the buttons that
+        change and report otherwise are written to the mouse."""
+        if app == self._app:
+            return
+        self._app = app
+        old = self._effective_buttons()
+        changed = self._remap_buttons(old)
+        writes = [key for key in changed if self._reporting(old[key]) != self._reporting(self._buttons[key])]
+        if writes and self.mouse and self.online:
+            self._apply(["buttons"], keys=writes)
+        self._ring_check()
+        log.debug("the app in front changed")
+
+    def _effective_buttons(self):
+        """Make _buttons what the buttons do now. A button whose action stays equal keeps the very object every
+        earlier press used (Executor.cancel goes by it); a changed one gets a copy of its own. Returns the mapping
+        before."""
+        old = self._buttons
+        self._buttons = {key: old[key] if old.get(key) == action else copy.deepcopy(action)
+                         for key, action in config.mouse_buttons(self.cfg, self._app).items()}
+        return old
+
+    def _remap_buttons(self, old):
+        """The buttons whose action changed from ``old``: what they hold is let go of and their macros stop; a gesture
+        held is called off, the ring they hold closes. The others stay as they are. Returns the changed keys."""
+        changed = [key for key in config.BUTTONS if old[key] != self._buttons[key]]
+        for key in changed:
+            cid = config.BUTTONS[key]
+            if self._gesture is not None and self._gesture["cid"] == cid:
+                gesture, self._gesture = self._gesture, None
+                self._show_gesture(gesture, "cancelled")
+            if self._ring_by == ("mouse", cid):
+                self._ring_by = None
+                self.listener.on_ring("cancel", self._ring_session)  # a ring another program opened stays
+            held = self._held_actions.pop(cid, None)
+            if held is not None and self.executor:
+                self.executor.release(held)
+            if self.executor:
+                self.executor.cancel(old[key])  # every macro started from it: playing, queued, held or let go
+        return changed
+
+    def _ring_check(self):
+        """The ring the app in front has differs from what the open rings showed: their picks run nothing now, and
+        they close (on screen or on their way there); a ring another program opened stays."""
+        if self._ring_bubbles is None or self._ring_bubbles == config.ring_bubbles(self.cfg, self._app):
+            return  # the same ring: picks stay valid, across apps too
+        self._ring_bubbles, self._ring_floor, self._ring_by = None, self._ring_session, None
+        self.listener.on_ring("cancel", self._ring_floor)
 
     # -- discovery --------------------------------------------------------
 
@@ -591,10 +659,13 @@ class Engine:
         so one device letting go never closes what the other holds."""
         if event == "down":
             self._ring_by = owner
-        elif owner != self._ring_by:
+            self._ring_session += 1
+            self._ring_bubbles = config.ring_bubbles(self.cfg, self._app)
+            self.listener.on_ring("down", self._ring_session, copy.deepcopy(self._ring_bubbles))
             return
-        else:
-            self._ring_by = None
+        if owner != self._ring_by:
+            return
+        self._ring_by = None
         self.listener.on_ring(event)
 
     def _ring_gone(self, device):
@@ -611,6 +682,7 @@ class Engine:
             self._seed = False
             config.seed_from_device(self.cfg, mouse)
             self.listener.on_config(copy.deepcopy(self.cfg))
+        self._effective_buttons()  # settings changed in place (not through set_config) count from here too
         self._reset_input_state()
         self._wheel_quiet = time.monotonic() + 1.0  # applying the settings may move the ratchet: not worth a click
         if self._apply(SECTIONS):
@@ -619,20 +691,24 @@ class Engine:
         self._publish()
 
     def _apply_config(self, cfg):
-        changed = [s for s in SECTIONS if _wire(cfg, s) != _wire(self.cfg, s)]
+        changed = [s for s in SECTIONS if s != "buttons" and _wire(cfg, s) != _wire(self.cfg, s)]
         if "pointer" in changed:
             self._dpi_override = None  # the user moved the slider: that wins
+        self._effective_buttons()  # settings changed in place (not through set_config) taken first: no change here
         old, self.cfg = self.cfg, cfg
+        if self._remap_buttons(self._effective_buttons()):  # what the buttons do here, the app in front's profile too
+            changed.insert(0, "buttons")
         self.keyboard.config_changed(old, cfg)
         self._sync_watcher()  # the click or the API may have been switched on or off
         self._sync_rumble()
+        self._ring_check()
         if self.mouse and self.online and changed:
             self._apply(changed)
 
-    def _apply(self, sections):
-        """Returns True when the device took the settings."""
+    def _apply(self, sections, keys=None):
+        """Returns True when the device took the settings. ``keys``: of the buttons, only these."""
         appliers = {
-            "buttons": self._apply_buttons, "pointer": self._apply_pointer, "wheel": self._apply_wheel,
+            "buttons": lambda: self._apply_buttons(keys), "pointer": self._apply_pointer, "wheel": self._apply_wheel,
             "thumbwheel": self._apply_thumbwheel, "haptics": self._apply_haptics,
         }
         try:
@@ -652,20 +728,24 @@ class Engine:
         self._set_online(True)
         return True
 
-    def _apply_buttons(self):
+    def _apply_buttons(self, keys=None):
         mouse = self.mouse
         for key, cid in config.BUTTONS.items():
-            if cid not in mouse.controls:
+            if cid not in mouse.controls or (keys is not None and key not in keys):
                 continue
-            kind = self.cfg["buttons"][key].get("type")
-            does = here(self.cfg["buttons"][key]).get("type")  # what an action of the desktop's comes to on this one
-            needs_input = does in ("keys", "button") and self.vinput is None
-            divert = kind != "default" and not needs_input
-            mouse.set_cid_reporting(cid, divert, raw_xy=kind == "gestures")  # raw XY freezes the cursor: gestures only
-            if divert and kind == "gestures":
+            divert, raw_xy = self._reporting(self._buttons[key])
+            mouse.set_cid_reporting(cid, divert, raw_xy=raw_xy)
+            if divert and raw_xy:
                 self._raw_fresh.add(cid)
             else:
                 self._raw_fresh.discard(cid)
+
+    def _reporting(self, action):
+        """How a button doing ``action`` reports: (diverted to this program, with its raw movement)."""
+        kind = action.get("type")
+        does = here(action).get("type")  # what an action of the desktop's comes to on this one
+        needs_input = does in ("keys", "button") and self.vinput is None
+        return kind != "default" and not needs_input, kind == "gestures"  # raw XY freezes the cursor: gestures only
 
     def _current_dpi(self):
         pointer = self.cfg["pointer"]
@@ -1006,7 +1086,8 @@ class Engine:
         key = config.BUTTON_BY_CID.get(cid)
         if key is None:
             return
-        action = self.cfg["buttons"][key]
+        self._effective_buttons()  # settings changed in place (not through set_config) count from this press
+        action = self._buttons[key]
         kind = action.get("type")
         if kind == "gestures":
             # x, y: movement not yet used up by a recognised swipe; total: all of it, for the live view

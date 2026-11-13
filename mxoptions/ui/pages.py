@@ -89,6 +89,111 @@ class ScrollPage(QWidget):
         self.body.addStretch(1)
 
 
+class AppChooser(QWidget):
+    """Whose mouse settings a page shows: all apps, or one app's (store.mouse_app), with adding and removing."""
+
+    def __init__(self, store, label, parent=None):
+        super().__init__(parent)
+        self.store = store
+        self.when_chosen = lambda app: ""  # the hint while ``app`` is chosen; the page says what it means there
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(8)
+        line = QHBoxLayout()
+        line.setSpacing(8)
+        text = QLabel(label)
+        self.apps = QComboBox()
+        self.apps.setAccessibleName(label)
+        text.setBuddy(self.apps)
+        self.add_app = QPushButton(_("Add app"))
+        self.remove_app = QPushButton(_("Remove"))
+        self.remove_app.setAccessibleName(_("Remove the settings of this app"))
+        for button in (self.add_app, self.remove_app):
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+        line.addWidget(text)
+        line.addWidget(self.apps, 1)
+        line.addWidget(self.add_app)
+        line.addWidget(self.remove_app)
+        outer.addLayout(line)
+        self.hint = hint_label("")
+        outer.addWidget(self.hint)
+        self.apps.currentIndexChanged.connect(self._chosen)
+        self.add_app.clicked.connect(self._add)
+        self.remove_app.clicked.connect(self._remove)
+        store.changed.connect(self.refresh)
+        store.mouse_app_changed.connect(self.refresh)
+        if store.front is not None:
+            store.front.changed.connect(self.refresh)
+        self.refresh()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if self.store.front is not None:
+            self.store.front.want(self, True)  # to know which app to offer to add
+
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        if self.store.front is not None:
+            self.store.front.want(self, False)
+
+    def refresh(self):
+        front = self.store.front
+        supported = front is None or front.supported
+        app = self.store.mouse_app
+        if app is not None and (not supported or self.store.mouse_profile(app) is None):
+            self.store.set_mouse_app(None)  # its profile went: all apps again
+            return
+        profiles = self.store.cfg["mouse"]["profiles"] if supported else []
+        entries = [(_("All apps"), None)] + [(profile["name"] or profile["app"], profile["app"]) for profile in profiles]
+        if [(self.apps.itemText(i), self.apps.itemData(i)) for i in range(self.apps.count())] != entries:
+            self.apps.blockSignals(True)
+            self.apps.clear()
+            for name, entry in entries:
+                self.apps.addItem(name, entry)
+            self.apps.blockSignals(False)
+        self.apps.blockSignals(True)
+        self.apps.setCurrentIndex(next(i for i, (_name, entry) in enumerate(entries) if entry == app))
+        self.apps.blockSignals(False)
+        self.apps.setEnabled(supported)
+        last = front.last_other if front is not None else None
+        self.add_app.setEnabled(bool(supported and last and self.store.mouse_profile(last) is None
+                                     and len(profiles) < config.MAX_PROFILES))
+        self.remove_app.setEnabled(app is not None)
+        if not supported:
+            text = _("This desktop does not tell which app is in front, so settings for one app cannot work here.")
+        elif app is not None:
+            text = self.when_chosen(app)
+        elif last and self.store.mouse_profile(last) is None:
+            text = _("To give an app its own settings, add it: {} was in front last.").format(last)
+        else:
+            text = _("To give an app its own settings, switch to it, then come back and add it.")
+        self.hint.setText(text)
+        self.hint.setVisible(bool(text))
+
+    def _chosen(self, index):
+        self.store.set_mouse_app(self.apps.itemData(index))
+
+    def _add(self):
+        front = self.store.front
+        app = front.last_other if front is not None else None
+        if app and self.store.add_mouse_profile(app):
+            self.store.set_mouse_app(app)
+
+    def _remove(self):
+        profile = self.store.mouse_profile(self.store.mouse_app)
+        if profile is None:
+            return
+        answer = QMessageBox.question(self, APP_NAME, _(
+            "Remove the settings of {}? There the mouse then works as in every app.").format(profile["name"] or profile["app"]))
+        if answer == QMessageBox.StandardButton.Yes:
+            self.store.remove_mouse_profile(profile["app"])
+
+
+def chosen_profile(store):
+    """The mouse profile the pages show (store.mouse_app), or None: the settings for all apps."""
+    return store.mouse_profile(store.mouse_app)
+
+
 class ButtonsPage(QWidget):
     def __init__(self, store, parent=None):
         super().__init__(parent)
@@ -102,6 +207,11 @@ class ButtonsPage(QWidget):
         left.setContentsMargins(34, 28, 24, 20)
         left.setSpacing(8)
         left.addLayout(_header(_("Buttons"), _("Pick a button to choose what it does.")))
+        self.apps = AppChooser(store, _("Settings for"))
+        self.apps.when_chosen = lambda app: _(
+            "While {} is in front. \"As in all apps\": as set for all apps. \"Default\": the button's own function, "
+            "even where all apps change it.").format(app)
+        left.addWidget(self.apps)
         titles = {key: _(title) for key, (title, _value) in FIXED_BUTTONS.items()}
         titles.update((key, _(title)) for key, title in BUTTON_TITLES.items())
         self.view = MouseView(titles)
@@ -129,10 +239,17 @@ class ButtonsPage(QWidget):
         self.view.selected.connect(self._select)
         self.picker.changed.connect(self._changed)
         store.changed.connect(self._refresh)
+        store.mouse_app_changed.connect(self._app_changed)
         store.state_changed.connect(self._state)
         store.pressed_changed.connect(self.view.set_pressed)
         self._refresh()
         self.view.select("gesture")
+
+    def _app_changed(self):
+        self.apps.refresh()  # the list first: a page may be refreshed before its chooser
+        self._refresh()
+        if self._key is not None:
+            self._select(self._key)
 
     def _select(self, key):
         self._key = key
@@ -143,11 +260,20 @@ class ButtonsPage(QWidget):
                 "so this one cannot be given another action."
             ) + "\n\n" + _("The other way round works: any other button can be made a left or right click in its own list."))
         else:
-            self.picker.edit(_(BUTTON_TITLES[key]), self.store.cfg["buttons"][key], _(BUTTON_HINTS[key]) if BUTTON_HINTS[key] else "")
+            hint = _(BUTTON_HINTS[key]) if BUTTON_HINTS[key] else ""
+            profile = chosen_profile(self.store)
+            if profile is None:
+                self.picker.edit(_(BUTTON_TITLES[key]), self.store.cfg["buttons"][key], hint)
+            else:  # gesture settings are for all apps only
+                self.picker.edit(_(BUTTON_TITLES[key]), profile["buttons"].get(key), hint, inherit=True, hide=("gestures",))
 
     def _changed(self, action):
         if self._key and self._key not in FIXED_BUTTONS:
-            self.store.set_button(self._key, action)
+            profile = chosen_profile(self.store)
+            if profile is None:
+                self.store.set_button(self._key, action)
+            else:
+                self.store.set_profile_button(profile["app"], self._key, action)
 
     def _download_photo(self):
         self._photo_error = ""
@@ -172,11 +298,13 @@ class ButtonsPage(QWidget):
             self.photo_text.setText(_(
                 "Logitech's own picture of the mouse can be shown here instead of this model. It is not included "
                 "with the program: download it from logitech.com (about 2.5 MB)."))
+        profile = chosen_profile(self.store)
+        buttons = config.mouse_buttons(self.store.cfg, profile["app"] if profile else None)
         for key in self.view.keys():
             if key in FIXED_BUTTONS:
                 self.view.set_value(key, _(FIXED_BUTTONS[key][1]))
             else:
-                self.view.set_value(key, actions.describe(self.store.cfg["buttons"][key]))
+                self.view.set_value(key, actions.describe(buttons[key]))
 
     def _state(self, state):
         caps = state.get("caps")

@@ -89,6 +89,7 @@ class ActionList(QWidget):
         self._group.setExclusive(True)
         self._sections = []  # (category label, [(row, extra widget shown under it or None)])
         self._rows = {}  # preset id -> row
+        self._hidden = frozenset()  # rows of the presets not offered for the control being edited (see set_hidden)
         self._current = None
         # Offered for a key of an app profile only: what the key does in every app (picked as None)
         self.inherit_row = self._row(_("As in all apps"), "edit-undo")
@@ -242,12 +243,17 @@ class ActionList(QWidget):
             self.macro_summary.setText(preview or _("Empty macro. Click \"Macro\" to edit."))
         self._sync_custom()
 
+    def set_hidden(self, ids):
+        """Offer none of the presets ``ids``, a search finding them neither."""
+        self._hidden = frozenset(self._rows[preset] for preset in ids if preset in self._rows)
+        self._filter(self.search.text())
+
     def _filter(self, text):
         needle = text.strip().lower()
         for label, rows in self._sections:
             any_visible = False
             for row, extra in rows:
-                visible = not needle or needle in row.text().lower()
+                visible = row not in self._hidden and (not needle or needle in row.text().lower())
                 row.setVisible(visible)
                 any_visible = any_visible or visible
             label.setVisible(any_visible)
@@ -433,9 +439,11 @@ class ActionPicker(QFrame):
         self.fixed_text.setText(text)
         self.stack.setCurrentIndex(2)
 
-    def edit(self, title, action, subtitle="", inherit=False):
-        """``inherit``: offer "As in all apps" too, picked as None (``action`` None: it is the one chosen)."""
+    def edit(self, title, action, subtitle="", inherit=False, hide=()):
+        """``inherit``: offer "As in all apps" too, picked as None (``action`` None: it is the one chosen). ``hide``:
+        preset ids not offered this time."""
         self.list.inherit_row.setVisible(inherit)
+        self.list.set_hidden(hide)
         self._action = copy.deepcopy(action)
         self.title.setText(title)
         self.about.set_text(subtitle)
