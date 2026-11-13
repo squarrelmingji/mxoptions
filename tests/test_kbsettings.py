@@ -1617,6 +1617,49 @@ class SettingsCommon(SettingsBase):
         self.assertEqual(control(rig, "disable"), dict(control(rig, "disable"), value=["caps_lock", "num_lock"],
                                                        writable=False, outcome="unconfirmed"))
 
+    def test_the_earlier_value_goes_back_only_where_the_read_back_lets_it(self):  # restore admission
+        def unsettable(kb):
+            kb.settings[MP]["info"] = bytes([0]) + kb.settings[MP]["info"][1:]  # no longer settable by software
+
+        def layout_gone(kb):
+            kb.settings[MP]["descriptors"][2] = descriptor(0, 2, 0x6000)
+
+        def layout_two_gone(kb):
+            kb.settings[MP]["descriptors"][3] = descriptor(0, 3, 0x0400)
+
+        def super_gone(kb):
+            kb.settings[DK]["caps"] = 0x0F
+
+        def bit_0x20_gone(kb):
+            kb.settings[DK]["caps"] = 0x9F
+
+        cases = (  # (disable bits, taken, change after each setter, name, asked, setters sent, value then, outcome)
+            ((0x1F, 0x00), [0], unsettable, "platform", 2, [b"\x00\x02"], 0, "unconfirmed"),
+            ((0x1F, 0x00), [0], layout_gone, "platform", 2, [b"\x00\x02"], 0, "unconfirmed"),
+            ((0x1F, 0x10), [0x01], super_gone, "disable", {"caps_lock": True}, [b"\x11"], ["caps_lock"], "unconfirmed"),
+            ((0x1F, 0x00), [0], layout_two_gone, "platform", 2, [b"\x00\x02", b"\x00\x01"], 1, "restored"),
+            ((0xBF, 0x81), [0x03], bit_0x20_gone, "disable", {"num_lock": True}, [b"\x83", b"\x81"], ["caps_lock"],
+             "restored"),  # the unnamed bit 0x80 goes back with it, as the keyboard still has it
+        )
+        for disable, taken, change, name, asked, setters, value, outcome in cases:
+            with self.subTest(change.__name__):
+                kb = settings_keyboard(disable=disable, platform=multi())
+                feature, setter = (MP, 3) if name == "platform" else (DK, 2)
+                kb.taken[feature] = list(taken)
+
+                def changing(feat_idx, function, params, kb=kb, answer=kb.answer, sets=(feature, setter), change=change):
+                    reply = answer(feat_idx, function, params)
+                    if feat_idx < len(kb.features) and (kb.features[feat_idx], function) == sets:
+                        change(kb)
+                    return reply
+
+                kb.answer = changing
+                rig = self.make(kb)
+                self.ask(name, asked)
+                self.assertEqual(self.setters(feature), setters)
+                self.assertEqual(control(rig, name), dict(control(rig, name), value=value, outcome=outcome))
+                rig.stop()
+
     def test_a_wish_calls_the_change_off_and_it_follows_merged(self):  # GX08
         rig = self.make()
         entered, release = self.hold(lambda request: request[0] is DisableCodec.read)

@@ -683,8 +683,9 @@ class KeyboardSide:
         keyboard then has something else again, send back what it had and read that. Returns None when the
         keyboard has the value asked for, or why not: "unknown" (not read: nothing sent), "unsupported",
         "not-applied" (it kept what it had), "restored" (it took another value, and the earlier one was sent back),
-        "unconfirmed" (it did not say what it has now; read again after RECOVERY_RETRY). Until the setter is on
-        its way, the task may be called off (see _want) and the value asked for stays to be sent; from then on it
+        "unconfirmed" (it did not say what it has now, read again after RECOVERY_RETRY; or it took another value
+        and, as read back, does not let the earlier be set or no longer has it: nothing sent back). Until the setter
+        is on its way, the task may be called off (see _want) and the value asked for stays to be sent; from then on it
         is seen to its end, unless no setting may be changed any more (see rivals_changed): then nothing more is
         sent, as before the setter and before sending back what it had (see _settings_held)."""
         try:
@@ -726,6 +727,10 @@ class KeyboardSide:
             log.info("keyboard setting %s: the keyboard did not take the change", name)
             return "not-applied"
         if self._settings_held():
+            return "unconfirmed"  # shown as the keyboard has it: nothing sent back
+        now, allows = self._controls[name], getattr(codec, "allows", None)  # as read back: may it have the earlier?
+        if not now["writable"] or (allows is not None and not allows(now, before["value"])):
+            log.warning("keyboard setting %s: the keyboard took another value, and no longer lets the earlier be", name)
             return "unconfirmed"  # shown as the keyboard has it: nothing sent back
         log.warning("keyboard setting %s: the keyboard took another value; the earlier one is sent back", name)
         outcome = yield from self._send(name, codec, host, before["value"])

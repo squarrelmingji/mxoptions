@@ -166,6 +166,11 @@ class DisableCodec:
         return mask
 
     @staticmethod
+    def allows(read, mask):
+        """Whether the keyboard, as ``read``, can have the whole set ``mask``: no bit it says cannot be."""
+        return not mask & ~read["caps"]
+
+    @staticmethod
     def write(dev, host, mask):
         dev.call(device.DISABLE_KEYS, 2, mask)
 
@@ -244,9 +249,14 @@ class PlatformCodec:
     @staticmethod
     def target(before, request):
         """``request`` itself, where the keyboard lets it be set and has it. Unsupported otherwise."""
-        if not before.get("writable") or request not in {choice["index"] for choice in before["choices"]}:
+        if not before.get("writable") or not PlatformCodec.allows(before, request):
             raise Unsupported("not a platform it lets be set")
         return request
+
+    @staticmethod
+    def allows(read, index):
+        """Whether the keyboard, as ``read``, has platform ``index``."""
+        return index in {choice["index"] for choice in read["choices"]}
 
     @staticmethod
     def write(dev, host, index):
