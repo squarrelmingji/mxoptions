@@ -174,7 +174,7 @@ Buttons additionally take `{"type": "default"}` (leave it to the mouse), `{"type
 | `ring.bubbles`, `ring.style`, `ring.size` | The user's Actions Ring. |
 | `flow.enabled`, `flow.push_mm`, `flow.corner`, `flow.fullscreen` | Flow: on/off, millimetres to push past the edge, percent of the edge kept free at each end, whether to cross under a full-screen window. |
 | `flow.peers` | The other computers of Flow, two at most, each with `name`, `address`, `edge` (`left`, `right`, `top`, `bottom`: the side it stands on) and `key`, the pairing key: treat that as a password. A single field is addressed like `flow.peers.0.edge`. |
-| `keyboard.keys` | What the keys of the keyboard do: an object from key id to action, the id being the key's control id as `0x` and four lowercase hex digits (`"0x00c7"`). A key that is not listed does what it always does. Keys take every action above except `wheel_mode`, `dpi_cycle`, `dpi_shift`, `flow`, `gestures` and `ring`; `host` moves the keyboard, not the mouse. At most 128. |
+| `keyboard.keys` | What the keys of the keyboard do: an object from key id to action, the id being the key's control id as `0x` and four lowercase hex digits (`"0x00c7"`). A key that is not listed does what it always does. Keys take every action above except `wheel_mode`, `dpi_cycle`, `dpi_shift`, `flow` and `gestures`; `host` moves the keyboard, not the mouse; `ring` (exactly `{"type": "ring"}`) opens the Actions Ring at the pointer. At most 128. |
 | `keyboard.profiles` | Keys of their own for single apps, at most 32: a list of `{"app", "name", "keys"}`. `app` is the name the app goes by on this desktop, lowercase, 1 to 128 characters (KDE: its window class; sway: its `app_id`, else its X11 class; Hyprland and other X11 desktops: its class; Windows: its program file, like `firefox.exe`), one profile each. `name` is shown in the window, at most 64 characters. `keys` is like `keyboard.keys`, plus `{"type": "default"}`: the key does what it always does in that app, even where `keyboard.keys` changes it. A key a profile does not list does what `keyboard.keys` says. While that app is in front, the first profile for it counts. GNOME on Wayland does not say which app is in front: there only `keyboard.keys` counts. Which app is in front is not offered here. |
 | `flow.clipboard`, `flow.files`, `flow.files_max_mb`, `flow.cue_arrived`, `flow.cue_failed` | Flow: whether copied text and pictures go along, whether files do, the most megabytes in one go, and the vibration patterns for files that have arrived and files that could not be brought over. |
 
@@ -200,6 +200,22 @@ macro of 1 to 64 steps, each complete (a `delay` a whole number of `ms` from 0 t
 a mouse button, a `text` or `command` text, an `action` one complete action of type `keys`, `button`,
 `shortcut`, `desktop`, `command`, `script` or `hook`, a `haptic` a `waveform` the mouse's haptic
 feature names); no empty command, script, shortcut or hook name.
+
+A key set to `{"type": "ring"}` opens the Actions Ring as the mouse's ring button does: held, it runs
+the bubble under the pointer when let go; tapped, the ring stays open for a click; pressed again, it
+closes. Bubbles are picked with the pointer. The ring belongs to the button or key that opened it
+last: only that one's release counts, and the keyboard going away never closes a ring the mouse
+holds, nor the other way round. A held ring closes, running nothing, when the key's action changes:
+new settings, or another app in front with a profile that changes that key. Where the ring is an
+ordinary window (`MXOPTIONS_RING=window`, or a Wayland desktop with neither layer-shell nor an X
+server for X11 programs), that window takes the focus and MX Options becomes the app in front: a
+key that has the ring from an app's profile, held, closes it after a moment. Tap such a key there
+instead, or give it the ring in `keyboard.keys`.
+
+Versions of MX Options with keyboard support from before keys could open the ring do not keep `ring`
+on a key: such a key does what it always does there, and the first setting they save takes it out
+of `keyboard.keys` and of every profile for good. Before going back to one, export the settings
+(*Device & app → Settings file*); importing that file again in this version brings those keys back.
 
 Macro steps, for a button or a key:
 

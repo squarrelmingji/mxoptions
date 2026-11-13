@@ -493,7 +493,10 @@ class KeyboardSide:
         for cid, action in list(self._held.items()):  # a key held down lets go of what it did: its key-up does nothing
             if config.key_id(cid) in changed:
                 del self._held[cid]
-                self.executor.release(action)
+                if action.get("type") == "ring":
+                    self.engine._ring_event(("keyboard", cid), "cancel")  # closes, running nothing
+                else:
+                    self.executor.release(action)
         for cid in [cid for cid in self._started if config.key_id(cid) in changed]:
             for action in self._started.pop(cid):
                 self.executor.cancel(action)
@@ -639,6 +642,7 @@ class KeyboardSide:
         self._stop_task()
         if self.executor:
             self.executor.reset()
+        self.engine._ring_gone("keyboard")
         if self.device is not None and self.online:  # here, on this thread, within SHUTDOWN_BUDGET
             dev = _view(self.device, self.transport, self._timeout(self.transport), threading.Event(), SHUTDOWN_BUDGET)
             try:
@@ -1010,6 +1014,7 @@ class KeyboardSide:
             yield from self._configure()
             return
         self.executor.reset()
+        self.engine._ring_gone("keyboard")
         self._sent_at = time.monotonic()  # it may be gone before the answer is back: then it went because of this
         try:
             yield (device.Mouse.change_host, host)
@@ -1079,6 +1084,9 @@ class KeyboardSide:
             log.info("key %s down", config.key_id(cid))
             if action and config.keyboard_action(action) and action.get("type") != "none":
                 self._held[cid] = action
+                if action.get("type") == "ring":
+                    self.engine._ring_event(("keyboard", cid), "down")
+                    continue
                 if action.get("type") == "macro":  # the same object each time, until the settings change
                     started = self._started.setdefault(cid, [])
                     if not any(one is action for one in started):
@@ -1088,7 +1096,10 @@ class KeyboardSide:
             action = self._held.pop(cid, None)
             if action:
                 log.info("key %s up", config.key_id(cid))
-                self.executor.release(action)
+                if action.get("type") == "ring":
+                    self.engine._ring_event(("keyboard", cid), "up")
+                else:
+                    self.executor.release(action)
         self._pressed = pressed
         if self._pending and not (pressed or self._held) and self._task is None:
             self._next_task()  # a change of a setting waited for the key to be let go
@@ -1369,6 +1380,7 @@ class KeyboardSide:
         self._stop_task()
         if self.executor:
             self.executor.reset()
+        self.engine._ring_gone("keyboard")
         self._slots.get(self.transport, {}).pop(self.device.devidx, None)
         self._seen = (self.device.name, self._keys(), device.keyboard_settings(self.device))
         self.last_drop = (now, sent) if self.link else None

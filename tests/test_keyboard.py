@@ -1349,6 +1349,228 @@ class MacroSteps(unittest.TestCase):
         self.assertEqual(made._queue.get_nowait(), ("haptic", 7, False))
 
 
+RING = {"type": "ring"}
+
+
+class RingFromAKey(unittest.TestCase):
+    """A key given the Actions Ring opens it as the mouse's ring button does. The ring belongs to whichever pressed
+    it last, mouse button or key; only that one's release, reset or going away closes it."""
+
+    def setUp(self):
+        self.kb, self.mouse = keyboard_device(), mouse_device()
+
+    def rig(self, keys=None, profiles=(), mouse_ring=True, vinput=True):
+        rig = Rig(self, {1: self.kb, 2: self.mouse}, keys={"0x0f01": RING, "0x0053": RING, "0x0f02": COPY,
+                                                           "0x0f04": {"type": "host", "host": 1}} if keys is None else keys)
+        rig.engine.cfg["keyboard"]["profiles"] = copy.deepcopy(list(profiles))
+        if mouse_ring:
+            rig.engine.cfg["buttons"]["back"] = RING  # the mouse's back button is control 0x0053 too
+        if not vinput:
+            rig.engine.vinput = None
+        self.rings = []
+        rig.listener.on_ring = self.rings.append
+        return rig.start()
+
+    def mouse_buttons(self, rig, *cids):
+        rig.note(2, self.mouse, device.REPROG_CONTROLS_V4, struct.pack("!HHHH", *(list(cids) + [0, 0, 0, 0])[:4]))
+
+    def test_a_key_opens_and_lets_go_of_the_ring_and_runs_nothing(self):
+        rig = self.rig()
+        self.assertTrue(rig.key(0x0F01)["active"])
+        with mock.patch.object(rig.kb.executor, "press") as press, mock.patch.object(rig.kb.executor, "release") as release:
+            rig.keys_down(1, self.kb, 0x0f01)
+            self.assertEqual(self.rings, ["down"])
+            rig.keys_down(1, self.kb)
+        self.assertEqual(self.rings, ["down", "up"])
+        press.assert_not_called()
+        release.assert_not_called()
+        self.assertEqual(rig.input.sent, [])
+        self.assertEqual(rig.mouse_actions.ran, [])
+        told = [kind for kind, payload in rig.listener.events if (kind, payload[0]) != ("flow", "keyboard")]
+        self.assertEqual(told, [])  # no button event for other programs
+
+    def test_the_same_report_again_changes_nothing(self):
+        rig = self.rig()
+        rig.keys_down(1, self.kb, 0x0f01)
+        rig.keys_down(1, self.kb, 0x0f01)
+        rig.keys_down(1, self.kb)
+        rig.keys_down(1, self.kb)
+        self.assertEqual(self.rings, ["down", "up"])
+
+    def test_a_ring_of_one_app_only_works_there(self):
+        rig = self.rig(keys={"0x0f02": RING}, profiles=[profile("kate", {"0x0f01": RING, "0x0f02": NATIVE})])
+        for app in (None, "kate", "browser", None, "kate"):
+            with self.subTest(app=app):
+                front(rig, app)
+                in_kate = app == "kate"  # there the ring of every app's key is not this app's
+                self.assertEqual((rig.key(0x0F01)["active"], rig.key(0x0F02)["active"]), (in_kate, not in_kate))
+                for cid in (0x0F01, 0x0F02):
+                    del self.rings[:]
+                    rig.keys_down(1, self.kb, cid)
+                    rig.keys_down(1, self.kb)
+                    self.assertEqual(self.rings, ["down", "up"] if (cid == 0x0F01) == in_kate else [])
+
+    def test_another_app_in_front_closes_a_held_ring_and_runs_nothing(self):
+        rig = self.rig(keys={"0x0f01": RING}, profiles=[profile("kate", {"0x0f01": COPY})])
+        rig.keys_down(1, self.kb, 0x0f01)
+        front(rig, "kate")
+        self.assertEqual(self.rings, ["down", "cancel"])
+        rig.keys_down(1, self.kb)  # its key-up: nothing
+        self.assertEqual(self.rings, ["down", "cancel"])
+        self.assertEqual(rig.input.sent, [])
+
+    def test_new_settings_close_a_held_ring_and_its_key_up_does_nothing(self):
+        rig = self.rig()
+        rig.keys_down(1, self.kb, 0x0f01)
+        new = copy.deepcopy(rig.engine.cfg)
+        new["keyboard"]["keys"]["0x0f01"] = COPY
+        rig.engine._apply_config(new)
+        rig.settle()
+        self.assertEqual(self.rings, ["down", "cancel"])
+        rig.keys_down(1, self.kb)
+        self.assertEqual(self.rings, ["down", "cancel"])
+        self.assertEqual(rig.input.sent, [])  # neither a press nor a release of the new action
+
+    def test_new_settings_that_keep_the_key_s_ring_keep_it_open(self):
+        rig = self.rig()
+        rig.keys_down(1, self.kb, 0x0f01)
+        new = copy.deepcopy(rig.engine.cfg)
+        new["keyboard"]["keys"]["0x0f02"] = CTRL
+        rig.engine._apply_config(new)
+        rig.settle()
+        rig.keys_down(1, self.kb)
+        self.assertEqual(self.rings, ["down", "up"])
+
+    def test_the_keyboard_going_away_closes_its_own_ring(self):
+        rig = self.rig()
+        rig.keys_down(1, self.kb, 0x0f01)
+        rig.link(1, False)
+        self.assertIsNone(rig.kb.device)
+        self.assertEqual(self.rings, ["down", "cancel"])
+        self.assertTrue(rig.engine.online)
+        self.assertEqual(rig.mouse_actions.ran, [])
+
+    def test_the_keyboard_going_away_leaves_the_mouse_s_ring(self):
+        rig = self.rig()
+        self.mouse_buttons(rig, 0x0053)
+        rig.link(1, False)
+        self.assertEqual(self.rings, ["down"])
+        self.mouse_buttons(rig)
+        self.assertEqual(self.rings, ["down", "up"])
+
+    def test_the_mouse_starting_over_leaves_the_key_s_ring(self):
+        rig = self.rig()
+        rig.keys_down(1, self.kb, 0x0053)  # the same control id as the mouse's ring button
+        rig.engine._reset_input_state()
+        self.assertEqual(self.rings, ["down"])
+        rig.keys_down(1, self.kb)
+        self.assertEqual(self.rings, ["down", "up"])
+
+    def test_the_key_pressed_after_the_mouse_holds_the_ring(self):
+        rig = self.rig()
+        self.mouse_buttons(rig, 0x0053)
+        rig.keys_down(1, self.kb, 0x0053)
+        self.mouse_buttons(rig)  # the mouse's release: not its ring any more
+        rig.engine._reset_input_state()
+        self.assertEqual(self.rings, ["down", "down"])
+        rig.keys_down(1, self.kb)
+        self.assertEqual(self.rings, ["down", "down", "up"])
+
+    def test_the_mouse_pressed_after_the_key_holds_the_ring(self):
+        rig = self.rig()
+        rig.keys_down(1, self.kb, 0x0053)
+        self.mouse_buttons(rig, 0x0053)
+        rig.keys_down(1, self.kb)  # the key's release: not its ring any more
+        self.assertEqual(self.rings, ["down", "down"])
+        rig.link(1, False)
+        self.assertEqual(self.rings, ["down", "down"])
+        self.mouse_buttons(rig)
+        self.assertEqual(self.rings, ["down", "down", "up"])
+
+    def test_of_two_ring_keys_the_last_pressed_holds_it(self):
+        rig = self.rig()
+        rig.keys_down(1, self.kb, 0x0f01)
+        rig.keys_down(1, self.kb, 0x0f01, 0x0053)
+        rig.keys_down(1, self.kb, 0x0053)  # the first one up: not its ring any more
+        self.assertEqual(self.rings, ["down", "down"])
+        rig.keys_down(1, self.kb)
+        self.assertEqual(self.rings, ["down", "down", "up"])
+
+    def test_easy_switch_and_fn_never_open_it(self):
+        protected = {config.key_id(cid): RING for cid in device.CID_PROTECTED}
+        rig = self.rig(keys=protected)
+        self.assertEqual(self.kb.sets, [])
+        self.assertIsNone(rig.saved())
+        rig.keys_down(1, self.kb, 0x00D1, 0x0034)
+        rig.keys_down(1, self.kb)
+        self.assertEqual((self.rings, rig.kb._held), ([], {}))
+        self.assertIsNone(rig.saved())
+
+    def test_without_input_access_the_ring_key_still_works(self):
+        rig = self.rig(keys={"0x0f01": RING, "0x0f02": COPY}, vinput=False)
+        self.assertEqual(diverts(self.kb), [(0x0F01, True)])  # a key that types needs input access
+        rig.keys_down(1, self.kb, 0x0f01)
+        rig.keys_down(1, self.kb)
+        self.assertEqual(self.rings, ["down", "up"])
+
+    def test_the_mouse_s_ring_button_alone_is_as_before(self):
+        rig = self.rig()
+        self.mouse_buttons(rig, 0x0053)
+        self.mouse_buttons(rig)
+        self.mouse_buttons(rig, 0x0053)
+        rig.engine._reset_input_state()
+        self.mouse_buttons(rig)
+        self.assertEqual(self.rings, ["down", "up", "down", "cancel"])
+        rig.engine.cfg["buttons"]["forward"] = RING  # two ring buttons: the last pressed holds it
+        del self.rings[:]
+        for press, cid in ((True, device.CID_BACK), (True, device.CID_FORWARD), (False, device.CID_BACK),
+                           (False, device.CID_FORWARD)):
+            (rig.engine._button_down if press else rig.engine._button_up)(cid)
+        self.assertEqual(self.rings, ["down", "down", "up"])
+
+    def test_on_exit_the_key_s_ring_closes_and_the_mouse_s_is_left(self):
+        for holder in ("key", "mouse"):
+            with self.subTest(holder=holder):
+                self.kb = keyboard_device()
+                rig = self.rig()
+                rig.engine.executor = actions.Executor(rig.input, rig.engine._device_action)
+                if holder == "key":
+                    rig.keys_down(1, self.kb, 0x0053)
+                else:
+                    self.mouse_buttons(rig, 0x0053)
+                rig.engine._shutdown()
+                self.assertEqual(self.rings, ["down", "cancel"] if holder == "key" else ["down"])
+
+    def test_easy_switch_from_a_key_closes_the_key_s_ring_only(self):
+        for holder in ("key", "mouse"):
+            with self.subTest(holder=holder):
+                self.kb = keyboard_device()
+                rig = self.rig()
+                if holder == "key":
+                    rig.keys_down(1, self.kb, 0x0f01)
+                    rig.keys_down(1, self.kb, 0x0f01, 0x0f04)
+                else:
+                    self.mouse_buttons(rig, 0x0053)
+                    rig.keys_down(1, self.kb, 0x0f04)
+                rig.settle()
+                self.assertEqual(self.kb.switched, [1])
+                self.assertEqual(self.rings, ["down", "cancel"] if holder == "key" else ["down"])
+                if holder == "mouse":
+                    self.mouse_buttons(rig)
+                    self.assertEqual(self.rings, ["down", "up"])
+
+    def test_a_keyboard_that_cannot_give_its_keys_back_keeps_its_ring(self):
+        rig = self.rig()
+        self.kb.failing[(device.REPROG_CONTROLS_V4, 3)] = 4
+        rig.keys_down(1, self.kb, 0x0f01)
+        rig.keys_down(1, self.kb, 0x0f01, 0x0f04)
+        rig.settle()
+        self.assertEqual((self.kb.switched, rig.state()["failed"]), ([], "switch"))
+        self.assertEqual(self.rings, ["down"])
+        rig.keys_down(1, self.kb)
+        self.assertEqual(self.rings, ["down", "up"])
+
+
 class Picker(unittest.TestCase):
     def test_a_key_is_offered_nothing_it_cannot_do(self):
         from mxoptions.ui import keyboard_page
@@ -1359,6 +1581,7 @@ class Picker(unittest.TestCase):
                     self.assertIn(preset.id, keyboard_page.KEYBOARD_EXCLUDE)
                 else:
                     self.assertNotIn(preset.id, keyboard_page.KEYBOARD_EXCLUDE)
+        self.assertEqual(set(keyboard_page.KEYBOARD_EXCLUDE), {"gestures", "wheel_mode", "dpi_cycle", "dpi_shift", "flow"})
 
 
 # -- the keyboard following the mouse (KeyboardSide.follow) ----------------------------------------------------------
@@ -1600,6 +1823,16 @@ class FollowsMouse(unittest.TestCase):
         self.stays("held")
         self.assertEqual(self.ioctls.calls, [])
         self.assertTrue(rig.key(0x0F01)["active"])
+
+    def test_a_ring_key_held_keeps_it_and_its_ring(self):
+        rig = self.make()
+        rig.engine.cfg["keyboard"]["keys"]["0x0f01"] = {"type": "ring"}
+        rings = []
+        rig.listener.on_ring = rings.append
+        rig.kb._on_keys({0x0F01})
+        self.stays("held")
+        rig.kb._on_keys(set())
+        self.assertEqual(rings, ["down", "up"])
 
     def test_called_off_while_the_keys_are_read(self):
         rig = self.make()

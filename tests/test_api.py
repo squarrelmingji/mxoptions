@@ -126,9 +126,22 @@ class Settings(unittest.TestCase):
             with self.subTest(value=value):
                 self.assertFalse(self.api.Set("keyboard.keys", json.dumps(value)))
                 self.assertEqual(self.store.cfg, before)
-        self.assertFalse(self.api.Set("keyboard.keys.0x00c7", json.dumps({"type": "ring"})))
+        self.assertFalse(self.api.Set("keyboard.keys.0x00c7", json.dumps({"type": "ring", "x": 1})))
         self.assertFalse(self.api.Set("keyboard", json.dumps({"keys": {"0x00c7": {"type": "dpi_shift"}}})))
         self.assertEqual(self.store.cfg, before)
+
+    def test_a_key_may_open_the_actions_ring_and_trigger_still_may_not(self):
+        listed = self.api.ListActions()
+        self.api.Set("keyboard.keys", json.dumps({"0x00c7": self.COPY}))
+        self.assertTrue(self.api.Set("keyboard.keys.0x00c7", json.dumps({"type": "ring"})))
+        self.assertEqual(self.keys(), {"0x00c7": {"type": "ring"}})
+        self.assertTrue(self.api.Set("keyboard.keys", json.dumps({"0x00c8": {"type": "ring"}})))
+        self.assertFalse(self.api.Set("keyboard.keys", json.dumps({"0x00c8": {"type": "ring", "bubbles": []}})))
+        self.assertEqual(self.keys(), {"0x00c8": {"type": "ring"}})
+        self.assertFalse(self.api.Trigger(json.dumps({"type": "ring"})))
+        self.assertFalse(self.api.Trigger("ring"))
+        self.assertNotIn("ring", listed)
+        self.assertEqual(self.api.ListActions(), listed)
 
     def test_a_key_with_an_action_that_cannot_run_is_refused_everywhere(self):
         self.api.Set("keyboard.keys", json.dumps({"0x00c7": self.COPY}))

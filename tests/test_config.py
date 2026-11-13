@@ -228,21 +228,24 @@ class Keyboard(unittest.TestCase):
             "0x00cb": {"type": "desktop", "do": "overview"}, "0x00cc": {"type": "command", "command": "true"},
             "0x00cd": {"type": "script", "name": "s", "script": "echo"},
             "0x00ce": {"type": "macro", "name": "m", "repeat": True, "steps": [{"do": "keys", "keys": ["KEY_A"]}]},
-            "0x00cf": {"type": "host", "host": 1}, "0x00d0": {"type": "hook", "name": "h"},
+            "0x00cf": {"type": "host", "host": 1}, "0x00d0": {"type": "hook", "name": "h"}, "0x00d1": {"type": "ring"},
         }
         self.assertEqual(config.clean({"keyboard": {"keys": copy.deepcopy(good)}})["keyboard"]["keys"], good)
+        profiles = [{"app": "kate", "name": "Kate", "keys": {"0x00c7": {"type": "ring"}}}]
+        self.assertEqual(config.clean({"keyboard": {"profiles": copy.deepcopy(profiles)}})["keyboard"]["profiles"], profiles)
 
     def test_what_keys_may_not_do_or_are_not_is_dropped(self):
         bad = {
             "0x00C7": self.COPY, "199": self.COPY, "0x0c7": self.COPY, "0x000c7": self.COPY,  # not a key id
-            "0x0001": {"type": "default"}, "0x0002": {"type": "gestures"}, "0x0003": {"type": "ring"},
+            "0x0001": {"type": "default"}, "0x0002": {"type": "gestures"}, "0x0003": {"type": "ring", "x": 1},
             "0x0004": {"type": "wheel_mode"}, "0x0005": {"type": "dpi_cycle"}, "0x0006": {"type": "dpi_shift"},
             "0x0007": {"type": "flow"}, "0x0008": "copy", "0x0009": {"type": "keys", "keys": []},
             "0x000a": {"type": "keys", "keys": [1]}, "0x000b": {"type": "button", "button": "KEY_A"},
             "0x000c": {"type": "host", "host": "1"}, "0x000d": {"type": "host", "host": True},
             "0x000e": {"type": "host", "host": 99}, "0x000f": {"type": "command"}, "0x0010": {"type": "hook", "name": 3},
             "0x0011": {"type": "macro", "steps": [{"do": "warp"}]}, "0x0012": {"type": "macro", "steps": "x"},
-            "0x0013": {"type": "shortcut", "name": "n"},
+            "0x0013": {"type": "shortcut", "name": "n"}, "0x0014": {"type": "Ring"}, "0x0015": {"type": ["ring"]},
+            "0x0016": {"type": "ring", "bubbles": []},
         }
         self.assertEqual(config.clean({"keyboard": {"keys": bad}})["keyboard"]["keys"], {})
         for section in ("nonsense", ["list"], {"keys": "nonsense"}, {"keys": ["0x00c7"]}):

@@ -127,7 +127,7 @@ class Engine:
         self._gesture = None
         self._gesture_dry = False  # the gestures page is practising: recognise, but do not act
         self._raw_fresh = set()    # buttons whose raw XY reporting was (re)armed and not used since
-        self._ring_cid = None
+        self._ring_by = None  # who holds the Actions Ring: ("mouse" | "keyboard", control id), or None
         self._ring_open = False
         self._dpi_alt = False
         self._dpi_shift = False
@@ -573,10 +573,25 @@ class Engine:
         self._dpi_shift = False
         self._flow_arm(None)
         self._rumble["level"] = 0.0
-        if self._ring_cid is not None:
-            self._ring_cid = None
-            self.listener.on_ring("cancel")
+        self._ring_gone("mouse")
         self._publish_pressed()
+
+    def _ring_event(self, owner, event):
+        """The Actions Ring from a mouse button or a key: ``owner`` is ("mouse" | "keyboard", control id), ``event``
+        "down", "up" or "cancel". "down" makes ``owner`` the one holding it; "up" and "cancel" count only from that one,
+        so one device letting go never closes what the other holds."""
+        if event == "down":
+            self._ring_by = owner
+        elif owner != self._ring_by:
+            return
+        else:
+            self._ring_by = None
+        self.listener.on_ring(event)
+
+    def _ring_gone(self, device):
+        """``device`` ("mouse" | "keyboard") went away or starts over: the ring it holds closes, the other's stays."""
+        if self._ring_by is not None and self._ring_by[0] == device:
+            self._ring_event(self._ring_by, "cancel")
 
     # -- applying settings -------------------------------------------------
 
@@ -992,8 +1007,7 @@ class Engine:
             self._raw_fresh.discard(cid)
             self._show_gesture(self._gesture)
         elif kind == "ring":
-            self._ring_cid = cid
-            self.listener.on_ring("down")
+            self._ring_event(("mouse", cid), "down")
         elif kind not in ("default", "none"):
             self._held_actions[cid] = action
             self.executor.press(action)
@@ -1002,9 +1016,8 @@ class Engine:
         if self._gesture and self._gesture["cid"] == cid:
             gesture, self._gesture = self._gesture, None
             self._show_gesture(gesture, self._finish_gesture(gesture))
-        elif self._ring_cid == cid:
-            self._ring_cid = None
-            self.listener.on_ring("up")
+        elif self._ring_by == ("mouse", cid):
+            self._ring_event(self._ring_by, "up")
         else:
             action = self._held_actions.pop(cid, None)
             if action:

@@ -407,8 +407,15 @@ class Settings(unittest.TestCase):
         self.assertTrue(store.set_profile_key("kate", "0x0f01", NATIVE))
         self.assertTrue(store.set_profile_key("kate", "0x0f02", COPY))
         self.assertTrue(store.set_profile_key("kate", "0x0f02", None))  # as in all apps
-        for key, action in (("0x0F01", COPY), ("0x0f01", {"type": "default", "x": 1}), ("0x0f01", {"type": "ring"}), ("0x0f01", [])):
+        self.assertTrue(store.set_profile_key("kate", "0x0f03", {"type": "ring"}))
+        self.assertTrue(store.set_profile_key("kate", "0x0f03", None))
+        for key, action in (("0x0F01", COPY), ("0x0f01", {"type": "default", "x": 1}), ("0x0f01", {"type": "ring", "x": 1}),
+                            ("0x0f01", {"type": "gestures"}), ("0x0f01", [])):
             self.assertFalse(store.set_profile_key("kate", key, action))
+        self.assertTrue(store.set_key("0x0f04", {"type": "ring"}))
+        self.assertFalse(store.set_key("0x0f04", {"type": "ring", "x": 1}))
+        self.assertEqual(store.cfg["keyboard"]["keys"], {"0x0f04": {"type": "ring"}})
+        self.assertTrue(store.set_key("0x0f04", {"type": "default"}))
         self.assertFalse(store.set_profile_key("gimp", "0x0f01", COPY))  # no profile
         self.assertEqual(self.profiles()[0]["keys"], {"0x0f01": NATIVE})
         for n in range(config.MAX_PROFILES - 1):
@@ -500,6 +507,21 @@ class Page(unittest.TestCase):
         self.assertEqual((self.apps(page), page.apps.currentIndex()), (["All apps"], 0))
         page.hide()
         self.assertEqual(self.store.front.wanted[-1], ("page", False))
+
+    def test_a_key_is_given_the_actions_ring_by_its_name_in_each_language(self):
+        from mxoptions import i18n
+        self.addCleanup(i18n.setup, "en")
+        for language, label in (("en", "Actions Ring"), ("uk", "Кільце дій")):
+            with self.subTest(language=language):
+                i18n.setup(language)
+                page = self.keys_page()
+                row = page.picker.list._rows["ring"]
+                self.assertEqual(row.text(), label)
+                row.click()
+                self.assertEqual(self.store.cfg["keyboard"]["keys"]["0x0f01"], {"type": "ring"})
+                self.assertEqual(page.strip.caps["0x0f01"].accessibleDescription(), label)
+                for hidden in ("gestures", "wheel_mode", "dpi_cycle", "dpi_shift", "flow"):
+                    self.assertNotIn(hidden, page.picker.list._rows)
 
     def test_where_the_desktop_does_not_say_the_page_says_why(self):
         page = self.keys_page(supported=False)

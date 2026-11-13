@@ -284,6 +284,23 @@ class RingInAProgramOfItsOwn(unittest.TestCase):
         self.assertTrue(self.wait(lambda: ("opened", False) in self.heard))
         self.assertTrue(any(kind == "cue" for kind, _value in self.heard))
 
+    def test_press_release_and_cancel_as_a_mouse_button_or_a_key_sends_them(self):
+        self.proxy.configure({"size": 1.0, "style": "bubbles", "bubbles": [
+            {"label": "", "icon": "", "color": "", "action": {"type": "keys", "keys": ["KEY_A"]}}]})
+        self.assertTrue(self.wait(lambda: self.proxy.available))
+        opened = lambda: [value for kind, value in self.heard if kind == "opened"]  # noqa: E731
+        self.proxy.handle("down")  # held open
+        self.assertTrue(self.wait(lambda: opened() == [True]))
+        self.proxy.handle("up")    # let go over no bubble: left open for a click
+        self.proxy.handle("down")  # pressed again: closed, and its release does nothing
+        self.assertTrue(self.wait(lambda: opened() == [True, False]))
+        self.proxy.handle("up")
+        self.proxy.handle("down")
+        self.assertTrue(self.wait(lambda: opened() == [True, False, True]))
+        self.proxy.handle("cancel")
+        self.assertTrue(self.wait(lambda: opened() == [True, False, True, False]))
+        self.assertEqual(opened(), [True, False, True, False])
+
     def test_a_ring_of_the_callers_own(self):
         self.assertTrue(self.wait(lambda: self.proxy.available))
         self.assertFalse(self.proxy.open())  # no ring of the user's has been told

@@ -223,8 +223,8 @@ GESTURE_BUTTONS = ("gesture", "panel")  # the two thumb buttons whose roles can 
 RING_STYLES = ("bubbles", "pie", "grid")
 MAX_SAVED_RINGS = 16
 # What a key of the keyboard can do: everything but what only makes sense on the mouse (its wheel, its pointer
-# speed, gestures, the ring, Flow). Easy-Switch from a key moves the keyboard.
-KEYBOARD_ACTIONS = ("none", "keys", "button", "shortcut", "desktop", "command", "script", "macro", "host", "hook")
+# speed, gestures, Flow). Easy-Switch from a key moves the keyboard; the Actions Ring opens at the pointer.
+KEYBOARD_ACTIONS = ("none", "keys", "button", "shortcut", "desktop", "command", "script", "macro", "host", "hook", "ring")
 MAX_KEYBOARD_KEYS = 128
 KEY_ID = re.compile(r"0x[0-9a-f]{4}\Z")  # how the keys of the keyboard are named in the settings: key_id(control id)
 MAX_COMBO = 16          # key names in one combination
@@ -477,6 +477,8 @@ def keyboard_action(action):
         return type(host) is int and 0 <= host <= 15
     if kind == "hook":
         return _text(action.get("name"))
+    if kind == "ring":
+        return action == {"type": "ring"}
     return kind == "none"
 
 
