@@ -469,6 +469,18 @@ def battery_status(data):
     return data[0], data[2] if data[2] <= BATTERY_SLOW_CHARGE else BATTERY_DISCHARGING
 
 
+HAPTIC_SAVING = 10  # percent: at or below it battery saving keeps the mouse from vibrating; above it, it vibrates again
+
+
+def saving_battery(enabled, battery):
+    """Whether battery saving keeps the mouse from vibrating now: ``enabled`` (haptics.battery_saving) and the
+    mouse's last ``battery`` (percent, status) at HAPTIC_SAVING percent or below, charging or not. A percent of 0
+    tells no level, so it counts as unknown, as anything else that is no reading: vibration stays."""
+    if enabled is not True or not isinstance(battery, (tuple, list)) or len(battery) != 2:
+        return False
+    return type(battery[0]) is int and 1 <= battery[0] <= HAPTIC_SAVING
+
+
 def keyboard_settings(dev):
     """The KEYBOARD_SETTINGS names whose features ``dev`` lists, in that order. Asks the device nothing."""
     return [name for name, features in KEYBOARD_SETTINGS if any(dev.has(feature) for feature in features)]

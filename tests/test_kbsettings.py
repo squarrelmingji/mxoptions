@@ -4760,6 +4760,72 @@ class TrayMessages(unittest.TestCase):
         self.i18n.setup("uk")
         self.assertEqual([self.app.notice_message(notice) for notice, _en, _uk in cases], [uk for _n, _en, uk in cases])
 
+    MOUSE_LOW = "The battery of Synthetic mouse is low ({}%). Charge it soon."
+
+    def mouse(self, battery=(80, device.BATTERY_DISCHARGING), connected=True):
+        return {"connected": connected, "name": "Synthetic mouse", "battery": battery}
+
+    def test_a_low_mouse_is_said_once_as_the_keyboard_is(self):
+        low = (15, device.BATTERY_DISCHARGING)
+        self.assertEqual(self.app.mouse_messages(True, self.mouse(low), []), (False, [(self.MOUSE_LOW.format(15), "warning")]))
+        self.assertEqual(self.app.mouse_messages(False, self.mouse((9, device.BATTERY_DISCHARGING)), []), (False, []))  # once
+        self.assertEqual(self.app.mouse_messages(True, self.mouse((16, device.BATTERY_DISCHARGING)), []), (True, []))
+        self.assertEqual(self.app.mouse_messages(False, self.mouse((10, device.BATTERY_CHARGING)), []), (True, []))  # re-armed
+        self.assertEqual(self.app.mouse_messages(False, self.mouse((16, device.BATTERY_DISCHARGING)), []), (True, []))
+
+    def test_a_mouse_that_is_away_or_tells_no_level_is_not_said_and_keeps_its_latch(self):
+        for armed in (True, False):
+            for mouse in (self.mouse((10, 0), connected=False), self.mouse((0, 0)), self.mouse(None), {}):
+                with self.subTest(armed=armed, mouse=mouse):
+                    self.assertEqual(self.app.mouse_messages(armed, mouse, []), (armed, []))
+        armed, _said = self.app.mouse_messages(True, self.mouse((12, 0)), [])
+        armed, _gone = self.app.mouse_messages(armed, self.mouse((12, 0), connected=False), [])
+        self.assertEqual(self.app.mouse_messages(armed, self.mouse((12, 0)), []), (False, []))  # back, still low: not again
+
+    def test_both_low_at_once_is_one_warning_after_the_notice(self):
+        notice, low = locks_told(1, caps_lock=True), (10, device.BATTERY_DISCHARGING)
+        armed, seen, messages = self.app.tray_messages(True, 0, self.found(notice, low))
+        mouse_armed, messages = self.app.mouse_messages(True, self.mouse((12, 0)), messages)
+        self.assertEqual((armed, seen, mouse_armed), (False, 1, False))
+        self.assertEqual(messages, [("Caps Lock on", "info"), (
+            "The battery of Synthetic keyboard is low (10%). Charge it soon.\n" + self.MOUSE_LOW.format(12), "warning")])
+        _armed, _seen, messages = self.app.tray_messages(True, 1, self.found(notice))
+        self.assertEqual(self.app.mouse_messages(True, self.mouse((12, 0)), messages),
+                         (False, [(self.MOUSE_LOW.format(12), "warning")]))  # after a notice alone: its own warning
+
+    def test_each_one_low_later_than_the_other_is_said_alone(self):
+        low = (10, device.BATTERY_DISCHARGING)
+        kb_armed, _seen, messages = self.app.tray_messages(True, 0, self.found(None, low))
+        mouse_armed, messages = self.app.mouse_messages(True, self.mouse(), messages)
+        self.assertEqual((kb_armed, mouse_armed, [kind for _text, kind in messages]), (False, True, ["warning"]))
+        kb_armed, _seen, messages = self.app.tray_messages(kb_armed, 0, self.found(None, low))
+        mouse_armed, messages = self.app.mouse_messages(mouse_armed, self.mouse(low), messages)
+        self.assertEqual((kb_armed, mouse_armed, messages), (False, False, [(self.MOUSE_LOW.format(10), "warning")]))
+        mouse_armed, _messages = self.app.mouse_messages(True, self.mouse(low), [])
+        kb_armed, _seen, messages = self.app.tray_messages(True, 0, self.found(None, low))
+        self.assertEqual(self.app.mouse_messages(mouse_armed, self.mouse(low), messages)[1],
+                         [("The battery of Synthetic keyboard is low (10%). Charge it soon.", "warning")])
+
+    def test_the_latches_are_each_their_own(self):
+        low, charging = (10, device.BATTERY_DISCHARGING), (10, device.BATTERY_CHARGING)
+        kb_armed, _seen, _messages = self.app.tray_messages(True, 0, self.found(None, low))
+        mouse_armed, _messages = self.app.mouse_messages(True, self.mouse(low), [])
+        mouse_armed, _messages = self.app.mouse_messages(mouse_armed, self.mouse(charging), [])  # the mouse charges
+        self.assertEqual((kb_armed, mouse_armed), (False, True))
+        self.assertEqual(self.app.tray_messages(kb_armed, 0, self.found(None, low))[2], [])  # the keyboard: not again
+        kb_armed, _seen, _messages = self.app.tray_messages(kb_armed, 0, self.found(None, charging))
+        self.assertEqual(self.app.mouse_messages(False, self.mouse(low), []), (False, []))  # the mouse: not again
+        self.assertTrue(kb_armed)
+
+    def test_the_mouse_in_ukrainian(self):
+        self.addCleanup(self.i18n.setup, "en")
+        self.i18n.setup("uk")
+        low = (10, device.BATTERY_DISCHARGING)
+        _armed, _seen, messages = self.app.tray_messages(True, 0, self.found(None, low))
+        self.assertEqual(self.app.mouse_messages(True, self.mouse(low), messages)[1], [(
+            "Акумулятор Synthetic keyboard майже розряджений (10%). Зарядіть його найближчим часом.\n"
+            "Акумулятор Synthetic mouse майже розряджений (10%). Зарядіть його найближчим часом.", "warning")])
+
 
 class NoticePage(unittest.TestCase):
     """The notice switches for Fn lock and the lock keys on the Keyboard page (Qt offscreen)."""

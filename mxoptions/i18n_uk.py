@@ -183,6 +183,12 @@ STRINGS = {
     "Vibration feedback from the thumb panel.": "Вібровідгук сенсорної панелі.",
     "Feedback": "Відгук",
     "Haptic feedback": "Вібровідгук",
+    "Battery saving": "Економія заряду",
+    "At {percent}% battery or less the mouse does not vibrate, not even for patterns you try or for games; "
+    "above {percent}% it does again. What the mouse does by itself, as when it is switched on, stays.":
+        "При заряді {percent}% або менше миша не вібрує, навіть для візерунків, які ви пробуєте, чи для ігор; "
+        "понад {percent}% вона знову вібрує. Те, що миша робить сама, як-от під час увімкнення, не змінюється.",
+    "Vibration is off now to save the battery.": "Зараз вібрацію вимкнено, щоб зберегти заряд.",
     "Intensity": "Інтенсивність",
     "Subtle": "Ледь чутно",
     "Low": "Слабко",

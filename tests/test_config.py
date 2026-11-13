@@ -168,6 +168,58 @@ class KeyboardNotices(unittest.TestCase):
         self.assertIs(config._merge(before, stored)["keyboard"]["notices"], True)
 
 
+class BatterySaving(unittest.TestCase):
+    """haptics.battery_saving: on at first, off only for a JSON false, in the same settings version."""
+
+    load = Migration.load
+
+    def test_on_at_first_and_off_only_for_false(self):
+        self.assertIs(config.DEFAULTS["haptics"]["battery_saving"], True)
+        self.assertEqual(config.DEFAULTS["version"], 6)
+        for value, kept in ((True, True), (False, False), (0, True), (1, True), ("false", True), (None, True),
+                            ([], True), ({}, True), (0.0, True)):
+            with self.subTest(value=value):
+                self.assertIs(config.clean({"haptics": {"battery_saving": value}})["haptics"]["battery_saving"], kept)
+
+    def test_settings_from_before_it_load_with_it_on_and_are_not_written_back(self):
+        stored = copy.deepcopy(config.DEFAULTS)
+        del stored["haptics"]["battery_saving"]
+        stored["haptics"]["level"] = 30
+        stored["keyboard"]["notices"] = True
+        loaded, saved = self.load(stored)
+        self.assertIs(loaded["haptics"]["battery_saving"], True)
+        self.assertEqual((loaded["haptics"]["level"], loaded["keyboard"]["notices"], loaded["version"]), (30, True, 6))
+        self.assertEqual(saved, stored)  # the same version: nothing was written back
+
+    def test_it_goes_into_a_settings_file_and_back_with_everything_else(self):
+        cfg = copy.deepcopy(config.DEFAULTS)
+        cfg["haptics"]["battery_saving"] = False
+        cfg["keyboard"].update(notices=True, keys={"0x0f01": Keyboard.COPY},
+                               profiles=[{"app": "kate", "name": "Kate", "keys": {"0x0f02": Keyboard.COPY}}])
+        cfg["flow"].update(id="here", channel=2)
+        current = copy.deepcopy(config.DEFAULTS)
+        current["flow"].update(id="in use", channel=1)
+        raw = config.export_data(cfg)
+        self.assertIs(json.loads(raw)["config"]["haptics"]["battery_saving"], False)
+        imported = config.import_data(raw, current)
+        self.assertIs(imported["haptics"]["battery_saving"], False)
+        self.assertEqual(imported["keyboard"], cfg["keyboard"])
+        self.assertEqual({key: imported["flow"][key] for key in config.LOCAL_FLOW},
+                         {key: current["flow"][key] for key in config.LOCAL_FLOW})  # Flow's own fields stay as in use
+        data = json.loads(raw)
+        del data["config"]["haptics"]["battery_saving"]  # a file from before it
+        self.assertIs(config.import_data(json.dumps(data).encode(), current)["haptics"]["battery_saving"], True)
+        data["config"]["haptics"]["battery_saving"] = "no"
+        self.assertIs(config.import_data(json.dumps(data).encode(), current)["haptics"]["battery_saving"], True)
+
+    def test_it_survives_the_build_before(self):
+        stored = copy.deepcopy(config.DEFAULTS)
+        stored["haptics"]["battery_saving"] = False
+        before = copy.deepcopy(config.DEFAULTS)
+        del before["haptics"]["battery_saving"]  # its defaults: the merge it does keeps what it does not know
+        self.assertIs(config._merge(before, stored)["haptics"]["battery_saving"], False)
+
+
 class LockAndFnNotices(unittest.TestCase):
     """keyboard.lock_notices and keyboard.fn_notices: each as keyboard.notices, on its own, in the same version."""
 

@@ -165,9 +165,12 @@ class MouseApi(QObject):
 
     @Slot(str, result=bool)
     def PlayHaptic(self, pattern):
-        """Play a vibration pattern, given by name ("knock") or number. False if the mouse cannot play it."""
+        """Play a vibration pattern, given by name ("knock") or number. False if the mouse cannot play it, or battery
+        saving keeps it still."""
         waveform = find_pattern(pattern)
-        if waveform is None or waveform not in self._patterns() or not self._store.state["connected"]:
+        state = self._store.state
+        if (waveform is None or waveform not in self._patterns() or not state["connected"]
+                or device.saving_battery(self._store.cfg["haptics"]["battery_saving"], state.get("battery"))):
             return False
         self._store.engine.play_haptic(waveform)
         return True

@@ -65,7 +65,7 @@ dbus-monitor --session "type='signal',interface='org.mxoptions.Mouse1'"
 
 | Method | Returns | What it does |
 |---|---|---|
-| `PlayHaptic(s pattern)` | `b` | Plays a vibration pattern, given by name (`knock`, `sharp-collision`) or number (`12`, `0x0c`). |
+| `PlayHaptic(s pattern)` | `b` | Plays a vibration pattern, given by name (`knock`, `sharp-collision`) or number (`12`, `0x0c`). `false` also while battery saving keeps the mouse still; the program checks again on the mouse's latest reading before it plays. |
 | `ListHaptics()` | `as` | Names of the patterns the connected mouse can play. |
 | `SetDpi(i dpi)` | `b` | Pointer speed until further notice. The user's setting is left alone; `0` returns to it, and so does the user moving the speed slider. |
 | `SetWheelMode(s mode)` | `b` | `ratchet`, `freespin`, `toggle`, or `auto` to return to what the settings say. |
@@ -168,6 +168,7 @@ Buttons additionally take `{"type": "default"}` (leave it to the mouse), `{"type
 | `wheel_click.mode` | `off`, `haptic`, `sound` or `both`: the click when the wheel changes mode. |
 | `thumbwheel.function` | `hscroll`, `zoom`, `volume`, `tabs`, `desktops`, `brightness`. |
 | `haptics.enabled`, `haptics.level` | Vibration on/off and strength (1–100). |
+| `haptics.battery_saving` | `true` (default): no vibration at 10 % battery or less, charging or not; above 10 % it vibrates again. Never sent to the mouse; ignored by older versions. |
 | `rumble.enabled`, `rumble.light`, `rumble.medium`, `rumble.strong`, `rumble.interval`, `rumble.gain` | Rumble from games on the mouse: on/off (a virtual gamepad appears while it is on), the pattern numbers for weak, medium and strong rumble, milliseconds between pulses, sensitivity (0.5–2.0). |
 | `buttons.<button>` | The action of `middle`, `back`, `forward`, `gesture`, `smartshift`, `panel`. |
 | `gestures.trigger`, `gestures.min_mm`, `gestures.far_mm`, `gestures.dead`, `gestures.bias` | How swipes are read. |

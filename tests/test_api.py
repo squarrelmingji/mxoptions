@@ -222,5 +222,134 @@ class KeyChooser(unittest.TestCase):
         self.assertEqual(page._key["id"], "0x0f01")
 
 
+class BatterySaving(unittest.TestCase):
+    """haptics.battery_saving as other programs and the Haptics page see it: from the settings and the state the
+    engine last sent; the engine itself decides again before it plays (tests.test_rumble.BatterySaving)."""
+
+    HINT = ("At 10% battery or less the mouse does not vibrate, not even for patterns you try or for games; above 10% "
+            "it does again. What the mouse does by itself, as when it is switched on, stays.")
+
+    def setUp(self):
+        played = self.played = []
+
+        class Engine:
+            def play_haptic(self, waveform):
+                played.append(waveform)
+
+            def __getattr__(self, name):
+                return lambda *args: None
+        self.store = Store(copy.deepcopy(config.DEFAULTS), Engine())
+        self.store.flush = lambda: None  # made-up settings: never written anywhere
+        self.store._save_timer.timeout.disconnect()
+        self.api = api.MouseApi(self.store, None, lambda: None)
+
+    def mouse(self, battery=(82, device.BATTERY_DISCHARGING), connected=True, waveforms=(0x0C, 0x1B)):
+        self.store.update_state(dict(self.store.state, connected=connected, known=True, name="Synthetic mouse",
+                                     battery=battery, caps={"waveforms": list(waveforms), "force": None}))
+
+    def page(self):
+        from mxoptions.ui.pages import HapticsPage
+        page = HapticsPage(self.store)
+        self.addCleanup(page.deleteLater)
+        page.show()
+        return page
+
+    def test_another_program_is_told_no_while_it_keeps_the_mouse_still(self):
+        self.mouse()
+        listed = self.api.ListHaptics()
+        self.assertEqual(listed, ["knock", "whisper-collision"])
+        for battery, saving, connected, told in (((10, 0), True, True, False), ((1, 0), True, True, False),
+                                                 ((10, device.BATTERY_CHARGING), True, True, False),
+                                                 ((11, 0), True, True, True), ((10, 0), False, True, True),
+                                                 ((0, 0), True, True, True), (None, True, True, True),
+                                                 ((50, 0), True, False, False), ((10, 0), False, False, False)):
+            with self.subTest(battery=battery, saving=saving, connected=connected):
+                self.played.clear()
+                self.store.set("haptics", "battery_saving", saving)
+                self.mouse(battery, connected)
+                self.assertIs(self.api.PlayHaptic("knock"), told)
+                self.assertEqual(self.played, [0x0C] if told else [])
+                self.assertEqual(self.api.ListHaptics(), listed)  # what it can play is the same
+
+    def test_other_programs_switch_it_with_a_true_or_false_only(self):
+        self.assertEqual(json.loads(self.api.Get("haptics.battery_saving")), True)
+        for value in ("1", "0", '"false"', "[]"):
+            with self.subTest(value=value):
+                self.assertFalse(self.api.Set("haptics.battery_saving", value))
+                self.assertIs(self.store.cfg["haptics"]["battery_saving"], True)
+        self.assertTrue(self.api.Set("haptics.battery_saving", "false"))
+        self.assertIs(self.store.cfg["haptics"]["battery_saving"], False)
+        self.assertIs(self.store.cfg["haptics"]["enabled"], True)
+
+    def test_defaults_put_it_back_on(self):
+        self.store.set("haptics", "battery_saving", False)
+        self.store.restore_defaults()
+        self.assertIs(self.store.cfg["haptics"]["battery_saving"], True)
+
+    def test_the_switch_on_the_haptics_page(self):
+        self.mouse()
+        page = self.page()
+        rows = page.feedback_card._rows
+        self.assertEqual(rows[0].title.text(), "Haptic feedback")
+        self.assertIs(rows[1], page.saving_row)  # right under it
+        self.assertIs(page.saving_row.control, page.saving)
+        self.assertEqual((page.saving_row.title.text(), page.saving.accessibleName()), ("Battery saving", "Battery saving"))
+        self.assertEqual(page.saving_row.info.text(), self.HINT)
+        self.assertEqual(page.saving_row.note.text(), "Vibration is off now to save the battery.")
+        self.assertTrue(page.saving.isChecked())
+        page.saving.click()
+        self.assertIs(self.store.cfg["haptics"]["battery_saving"], False)
+        self.store.set("haptics", "battery_saving", True)
+        self.assertTrue(page.saving.isChecked())
+        self.store.set("haptics", "enabled", False)
+        self.assertFalse(page.saving_row.isEnabled())
+        self.store.set("haptics", "enabled", True)
+        self.assertTrue(page.saving_row.isEnabled())
+        self.mouse(waveforms=())
+        self.assertTrue(page.feedback_card.isHidden())  # a mouse without a motor: no word of it
+
+    def test_the_page_says_when_it_keeps_the_mouse_still_now(self):
+        page = self.page()
+        for battery, connected, saving, enabled, said in (((82, 0), True, True, True, False),
+                                                          ((10, 0), True, True, True, True),
+                                                          ((10, device.BATTERY_CHARGING), True, True, True, True),
+                                                          ((11, 0), True, True, True, False),
+                                                          ((0, 0), True, True, True, False),
+                                                          ((10, 0), False, True, True, False),
+                                                          ((10, 0), True, False, True, False),
+                                                          ((10, 0), True, True, False, False),
+                                                          ((5, 0), True, True, True, True)):
+            with self.subTest(battery=battery, connected=connected, saving=saving, enabled=enabled):
+                self.store.set("haptics", "battery_saving", saving)
+                self.store.set("haptics", "enabled", enabled)
+                self.mouse(battery, connected)
+                self.assertEqual(not page.saving_row.note.isHidden(), said)
+
+    def test_in_ukrainian(self):
+        from mxoptions import i18n
+        self.addCleanup(i18n.setup, "en")
+        i18n.setup("uk")
+        self.mouse((9, 0))
+        page = self.page()
+        self.assertEqual((page.saving_row.title.text(), page.saving.accessibleName()), ("Економія заряду", "Економія заряду"))
+        self.assertEqual(page.saving_row.info.text(), (
+            "При заряді 10% або менше миша не вібрує, навіть для візерунків, які ви пробуєте, чи для ігор; понад 10% "
+            "вона знову вібрує. Те, що миша робить сама, як-от під час увімкнення, не змінюється."))
+        self.assertEqual(page.saving_row.note.text(), "Зараз вібрацію вимкнено, щоб зберегти заряд.")
+        self.assertFalse(page.saving_row.note.isHidden())
+
+    def test_other_pages_that_vibrate_say_nothing_of_it(self):
+        from PySide6.QtWidgets import QAbstractButton, QLabel
+        from mxoptions.ui import flow_page, gestures_page
+        self.mouse((5, 0))
+        for made in (gestures_page.GesturesPage, flow_page.FlowPage):
+            with self.subTest(page=made.__name__):
+                page = made(self.store)
+                self.addCleanup(page.deleteLater)
+                texts = [widget.text() for widget in page.findChildren(QLabel)]
+                names = [widget.accessibleName() for widget in page.findChildren(QAbstractButton)]
+                self.assertFalse([text for text in texts + names if "Battery saving" in text or "save the battery" in text])
+
+
 if __name__ == "__main__":
     unittest.main()

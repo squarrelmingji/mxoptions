@@ -426,6 +426,15 @@ class HapticsPage(ScrollPage):
         self.enabled = Switch()
         self.enabled.toggled.connect(lambda on: self.store.set("haptics", "enabled", on))
         card.add(Row(_("Haptic feedback"), None, self.enabled))
+        self.saving = Switch()
+        self.saving.setAccessibleName(_("Battery saving"))
+        self.saving.toggled.connect(lambda on: self.store.set("haptics", "battery_saving", on))
+        self.saving_row = card.add(Row(
+            _("Battery saving"),
+            _("At {percent}% battery or less the mouse does not vibrate, not even for patterns you try or for games; "
+              "above {percent}% it does again. What the mouse does by itself, as when it is switched on, stays.").format(
+                percent=device.HAPTIC_SAVING),
+            self.saving, note=_("Vibration is off now to save the battery.")))
         self.presets = Segmented([(value, _(label)) for value, label in HAPTIC_PRESETS])
         self.presets.selected.connect(self._preset)
         self.presets_row = card.add(Row(_("Intensity"), None, self.presets))
@@ -528,10 +537,14 @@ class HapticsPage(ScrollPage):
     def _refresh(self):
         haptics = self.store.cfg["haptics"]
         self.enabled.set_checked_silently(haptics["enabled"])
+        self.saving.set_checked_silently(haptics["battery_saving"])
+        state = self.store.state
+        self.saving_row.note.setVisible(haptics["enabled"] and device.saving_battery(
+            haptics["battery_saving"], state.get("battery") if state.get("connected") else None))
         self.presets.set_value(haptics["level"])
         self.level.set_value(haptics["level"])
         self.feedback.set_checked_silently(haptics["feedback"])
-        for widget in (self.presets_row, self.level, self.feedback_row, self.pattern_card):
+        for widget in (self.saving_row, self.presets_row, self.level, self.feedback_row, self.pattern_card):
             widget.setEnabled(haptics["enabled"])
         if self._force_range and haptics.get("force"):
             low, high = self._force_range

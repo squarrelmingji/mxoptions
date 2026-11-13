@@ -156,6 +156,20 @@ def tray_messages(armed, seen, found):
     return armed, seen, messages
 
 
+def mouse_messages(armed, state, messages):
+    """``messages`` (tray_messages) with a low battery of the mouse (``state``, the engine's) added, said as
+    keyboard.low_battery says it of the keyboard, with an ``armed`` of its own; a percent of 0 tells no level.
+    Both low at once: one warning of both, so that neither takes the other's place. Returns (armed, messages)."""
+    battery = state.get("battery") if state.get("connected") else None
+    armed, low = keyboard.low_battery(armed, battery if battery and battery[0] else None)
+    if not low:
+        return armed, messages
+    line = _("The battery of {name} is low ({percent}%). Charge it soon.").format(name=state["name"], percent=battery[0])
+    if messages and messages[-1][1] == "warning":
+        return armed, messages[:-1] + [(messages[-1][0] + "\n" + line, "warning")]
+    return armed, messages + [(line, "warning")]
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog=APP_ID, description=f"{APP_NAME} {__version__}")
     parser.add_argument("--background", action="store_true",
@@ -337,13 +351,14 @@ def main(argv=None):
         if reason == QSystemTrayIcon.ActivationReason.Trigger else None
     )
 
-    low = {"armed": True}
+    low = {"armed": True, "mouse": True}
     shown = {"notice": 0}  # the number of the last notice of a change the keyboard reported that was said
 
     def tray_state(state):
         tray.setToolTip(_tray_tooltip(state))
         tray_look()
         low["armed"], shown["notice"], messages = tray_messages(low["armed"], shown["notice"], state.get("keyboard"))
+        low["mouse"], messages = mouse_messages(low["mouse"], state, messages)
         for text, kind in messages if tray.isVisible() else ():  # hidden: said to no one, and not said later either
             tray.showMessage(APP_NAME, text, QSystemTrayIcon.MessageIcon.Warning if kind == "warning"
                              else QSystemTrayIcon.MessageIcon.Information)

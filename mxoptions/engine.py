@@ -69,6 +69,14 @@ THUMB_STEPS = {
 }
 
 
+def _wire(cfg, section):
+    """What of ``section`` goes to the mouse: battery saving is the program's alone and is never sent."""
+    part = cfg.get(section)
+    if section == "haptics" and isinstance(part, dict):
+        part = {key: value for key, value in part.items() if key != "battery_saving"}
+    return part
+
+
 class Listener:
     """Callbacks from the engine thread. Subclass and override."""
 
@@ -466,6 +474,7 @@ class Engine:
                 log.info("found %s on %s slot %s", mouse.name, path, mouse.devidx)
                 if not is_receiver:
                     self._known_direct = mouse
+                self._battery = None  # what an earlier mouse said of its battery is not this one's
                 self.mouse = mouse
                 self._configure()
                 self.keyboard.after_scan(transport, mouse.devidx, others)
@@ -610,7 +619,7 @@ class Engine:
         self._publish()
 
     def _apply_config(self, cfg):
-        changed = [s for s in SECTIONS if cfg.get(s) != self.cfg.get(s)]
+        changed = [s for s in SECTIONS if _wire(cfg, s) != _wire(self.cfg, s)]
         if "pointer" in changed:
             self._dpi_override = None  # the user moved the slider: that wins
         old, self.cfg = self.cfg, cfg
@@ -808,6 +817,8 @@ class Engine:
         return haptics["enabled"] and haptics["feedback"]
 
     def _play(self, waveform, wait=True):
+        if device.saving_battery(self.cfg["haptics"].get("battery_saving"), self._battery):
+            return  # every vibration comes through here: while battery saving holds, none reaches the mouse
         if self.mouse and self.online and self.mouse.haptic_waveforms:
             try:
                 self.mouse.play_haptic(waveform, wait)
