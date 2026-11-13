@@ -325,8 +325,9 @@ DEFAULTS = {
     # The keyboard: what its keys do, by key_id(control id). A key that is not listed does what it always does.
     # "profiles": [{"app", "name", "keys"}], the first one for the app in front changing what its keys do there
     # (NATIVE: what the key always does); a key a profile does not list does what "keys" says. "notices": say on
-    # screen what the keyboard reports it changed (its brightness), never what made it change.
-    "keyboard": {"keys": {}, "profiles": [], "notices": False},
+    # screen what the keyboard reports it changed (its brightness), never what made it change. "lock_notices": the
+    # same when it reports a lock key (Caps Lock, Num Lock, Scroll Lock) on or off; "fn_notices": for its Fn lock.
+    "keyboard": {"keys": {}, "profiles": [], "notices": False, "lock_notices": False, "fn_notices": False},
 }
 
 
@@ -640,6 +641,8 @@ def _sanitize(cfg):
     cfg["keyboard"]["keys"] = _keyboard_keys(cfg["keyboard"].get("keys"))
     cfg["keyboard"]["profiles"] = _keyboard_profiles(cfg["keyboard"].get("profiles"))
     cfg["keyboard"]["notices"] = cfg["keyboard"].get("notices") is True
+    cfg["keyboard"]["lock_notices"] = cfg["keyboard"].get("lock_notices") is True
+    cfg["keyboard"]["fn_notices"] = cfg["keyboard"].get("fn_notices") is True
     return cfg
 
 

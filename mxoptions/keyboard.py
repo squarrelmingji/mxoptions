@@ -124,14 +124,50 @@ def low_battery(armed, battery):
     return False, armed
 
 
-def level_notice(seen, found):
-    """What to say now of a brightness the keyboard reported: (``seen``, None), or (the notice's number, (level, top))
-    once for each notice, and only while the keyboard is connected. ``seen``: the number last said (0 at first);
-    ``found``: the keyboard's state (KeyboardSide.state), or None."""
+def new_notice(seen, found):
+    """What to say now of a change the keyboard reported: (``seen``, None), or (the notice's number, a copy of the
+    notice, see KeyboardSide.state) once for each notice, and only while the keyboard is connected. ``seen``: the
+    number last said (0 at first); ``found``: the keyboard's state (KeyboardSide.state), or None."""
     notice = found.get("notice") if found and found.get("connected") else None
     if notice is None or notice["seq"] <= seen:
         return seen, None
-    return notice["seq"], (notice["level"], notice["top"])
+    return notice["seq"], dict(notice)
+
+
+class Reported:
+    """A state the keyboard reports changes of (its Fn lock, its lock keys), as the reads that count settle it: the
+    state last settled (seen; None: none yet), the reports counted (event), how many of them are settled (handled),
+    the count of reports a failed read was given its one read more for (retried; None: none since the last change
+    sent), and whether a change this program sent is not read back yet (own). A read counts only if no report came
+    while it was made, and only on the record it was started on: there is one for each connection and each turn of
+    its notices on or off, and a read started on another settles nothing here."""
+
+    __slots__ = ("seen", "event", "handled", "retried", "own")
+
+    def __init__(self):
+        self.seen, self.event, self.handled, self.retried, self.own = None, 0, 0, None, False
+
+    def read(self, start, now):
+        """A read that said ``now``, started once ``start`` reports were counted, settles it: True if that is a change
+        to tell. A report while it was read comes first: then nothing settles, and the read that report made due says
+        more. A change of this program's is settled by it without a word, as is the first state read."""
+        if self.event != start:
+            return False
+        said = not self.own and self.seen is not None and start > self.handled and now != self.seen
+        self.seen, self.handled, self.own = now, start, False
+        return said
+
+    def failed(self):
+        """A read failed (neither the link gone nor unanswered): True, once for each report or change sent still to be
+        settled, where it is to be read once more. Nothing else changes."""
+        if (self.own or self.event > self.handled) and self.retried != self.event:
+            self.retried = self.event
+            return True
+        return False
+
+    def sent(self):
+        """This program sends a change now: what is reported until a read settles it is taken as that change."""
+        self.own, self.retried = True, None
 
 
 def _set_reporting(dev, cid, divert):
@@ -272,7 +308,7 @@ class KeyboardSide:
         self._outcomes = {}     # name -> how the last change went, when not as asked (see _change)
         self._settings_at = float("inf")  # time.monotonic from which its settings are to be read again
         self._committing = None  # the setting whose new value is on its way: that task is not called off
-        self._notice_seq = 0    # notices of a brightness the keyboard reported, made so far (never counts down)
+        self._notice_seq = 0    # notices of changes the keyboard reported, made so far (never counts down)
         self._level_reset()
         self._seen = None       # (name, keys, settings) of the keyboard last connected, while it is away
         self._slots = {}        # transport -> {devidx: what is there, see device.probe_slot; "pending" while looked at}
@@ -399,9 +435,17 @@ class KeyboardSide:
             self.engine._publish()
         elif feature == device.WIRELESS_DEVICE_STATUS and event == 0 and data[1] == 1:
             self._again(True)  # power-cycled: loaded again, and what its keys report read afresh
+        elif feature == device.LOCK_KEY_STATE:
+            if self._watch_locks():  # a lock key turned on or off, it says: a fresh read says which (see _read_locks)
+                self._locks.event += 1
+                self._settings_at = 0.0
+                if self._task is None:
+                    self._next_task()
         elif any(feature in codec.features for codec in kbsettings.CODECS.values()):
             if feature == device.BACKLIGHT_2 and event == 0:
                 self._level_event += 1  # its brightness changed, it says: a fresh read compares (see _brightness)
+            if feature in kbsettings.FnCodec.features:
+                self._fn.event += 1  # its Fn lock changed, maybe: a fresh read compares (see _read_one)
             self._settings_at = 0.0  # changed on the keyboard, maybe: read again, never taken from the report
             if self._task is None:
                 self._next_task()
@@ -417,6 +461,16 @@ class KeyboardSide:
         if not new_cfg["flow"]["keyboard_follows_mouse"]:
             self.follow_cancel(None)
         self._remap(effective_keys(old_cfg["keyboard"], self._front), effective_keys(new_cfg["keyboard"], self._front))
+        was, now, read = old_cfg["keyboard"], new_cfg["keyboard"], False
+        if (was.get("fn_notices") is True) != (now.get("fn_notices") is True):
+            own, self._fn = self._fn.own, Reported()  # a record of its own: reads started before settle nothing in it
+            self._fn.own = own  # a change sent and not read back yet stays this program's
+            read = now.get("fn_notices") is True and self.device is not None and kbsettings.FnCodec.supported(self.device)
+        if (was.get("lock_notices") is True) != (now.get("lock_notices") is True):
+            self._locks = Reported()  # off: forgotten; on: settled afresh
+            read = read or self._watch_locks()
+        if read:
+            self._read_soon()  # what it is now, settled without a word before a change can be told
 
     def front_changed(self, app):
         """Another app is in front: ``app`` (see config.app_id), or None when that cannot be told."""
@@ -656,10 +710,12 @@ class KeyboardSide:
     def _read_one(self, name, codec, host=None):
         """A task: read setting ``name`` afresh into self._controls; returns (host, what was read). Where it fails,
         the setting is unknown, and the error is passed on."""
+        fn = self._fn  # the Fn lock's record this read is made for (see _say)
         try:
             if host is None and codec.needs_host(self.device):
                 host = yield (kbsettings.current_host, self._hosts[0])
             events = self._level_event  # the brightness changes reported before this read (see _brightness)
+            fn_start = fn.event
             read = yield (codec.read, host)
         except Exception as e:
             self._controls[name] = {"value": None, "default": None, "writable": False}
@@ -667,12 +723,67 @@ class KeyboardSide:
                 self._level_read = None
                 if not isinstance(e, HidppClosed) and (self._level_own or self._level_event > self._level_handled):
                     self._level_recheck()  # a report or a change of its own is still to be settled: read later
+            if (name == kbsettings.FN and not isinstance(e, (HidppClosed, HidppTimeout)) and fn is self._fn
+                    and self.engine.cfg["keyboard"].get("fn_notices") is True and fn.failed()):
+                self._level_recheck()  # one read more for what is still to be settled
             raise
         self._controls[name] = dict(read, writable=read.get("writable", True) is True)  # where it says, it counts
         if name == kbsettings.BACKLIGHT:
             self._level_read = (read, events)
             self._brightness(read, events)
+        if (name == kbsettings.FN and fn is self._fn and fn.read(fn_start, read["value"])
+                and self.engine.cfg["keyboard"].get("fn_notices") is True):
+            self._say({"kind": "fn", "value": read["value"]})
         return host, read
+
+    # The Fn lock and the lock keys the keyboard reports changed are told the same way: the report only
+    # says that something changed, a read afterwards says to what, and its record (Reported) compares that with what
+    # was settled before. A read counts only where no report came while it was made and its record is still the one
+    # in use: a new connection, and each turn of the notices on or off, makes a new one. The first read of a record
+    # is settled without a word, as is each one from this program's Fn change until a read after it. A read that fails
+    # for another reason than the link going or no answer is tried once more after RECOVERY_RETRY, for each report or
+    # change still to be settled; if that fails too, the change is told only once a later read counts, or not at all.
+    # Nothing here holds up a change, sends a setter, or says what made the change.
+
+    def _say(self, notice):
+        """Make ``notice`` the newest one (state()["notice"]), numbered on from the last."""
+        self._notice_seq += 1
+        self._notice = dict(notice, seq=self._notice_seq)
+        self.engine._publish()
+
+    def _watch_locks(self):
+        """Whether the lock keys are read and told: the settings ask for it and the keyboard has them."""
+        return (self.device is not None and self.engine.cfg["keyboard"].get("lock_notices") is True
+                and self.device.has(device.LOCK_KEY_STATE))
+
+    def _read_soon(self):
+        """Have the settings read now, or once the task under way is over."""
+        if self.device is not None and self.online:
+            self._settings_at = 0.0
+            if self._task is None:
+                self._next_task()
+
+    def _read_locks(self):
+        """A task: which lock keys are on, told where they changed since the last read that counts (see _say).
+        What is read is only compared, never kept anywhere else or written to the log."""
+        locks = self._locks  # replaced meanwhile (turned off or on, gone): this read settles nothing
+        start = locks.event
+        try:
+            now = yield (kbsettings.lock_state,)
+        except HidppClosed:
+            raise
+        except HidppTimeout:
+            self._settings_at = time.monotonic() + RECOVERY_RETRY  # as for the settings
+            return
+        except (HidppError, kbsettings.BadReply, IndexError) as e:
+            log.debug("keyboard lock state not read: %s", type(e).__name__)
+            if locks is self._locks and locks.failed():
+                self._level_recheck()
+            return
+        old = locks.seen
+        if locks is self._locks and locks.read(start, now):
+            self._say({"kind": "locks", "keys": {name: bool(now & bit) for name, bit in kbsettings.LOCK_KEYS
+                                                 if (now ^ old) & bit}})
 
     # The brightness the keyboard reports changed (BACKLIGHT_2 event 0), told as a notice where the settings ask for
     # one. The report only says that it changed: a fresh read says to what, and is compared with the level last
@@ -689,7 +800,9 @@ class KeyboardSide:
         self._level_handled = 0   # of those, settled
         self._level_own = False   # a change of the backlight sent by this program is not settled yet
         self._level_read = None   # (the last backlight read, _level_event before it), None: it failed
-        self._notice = None       # the notice last made: {"seq", "kind", "level", "top"}
+        self._notice = None       # the notice last made (see state)
+        self._fn = Reported()     # the Fn lock as reported and read (see _say)
+        self._locks = Reported()  # the lock keys as reported and read, while they are told
 
     @staticmethod
     def _level_certain(read):
@@ -721,9 +834,7 @@ class KeyboardSide:
         if (self._level_seen is not None and events > self._level_handled and level != self._level_seen
                 and value["on"] and value["mode"] in ("none", "keys", "manual")
                 and self.engine.cfg["keyboard"].get("notices") is True):
-            self._notice_seq += 1
-            self._notice = {"seq": self._notice_seq, "kind": "backlight", "level": level, "top": read["levels"] - 1}
-            self.engine._publish()
+            self._say({"kind": "backlight", "level": level, "top": read["levels"] - 1})
         self._level_seen, self._level_handled = level, events
 
     def _own_settled(self, read, events):
@@ -756,6 +867,9 @@ class KeyboardSide:
                 break
             except (HidppError, kbsettings.BadReply, kbsettings.Unsupported, IndexError) as e:
                 log.debug("keyboard setting %s not read: %s", name, e)
+        else:  # ponytail: a lock report reads every setting; use a lock-only read if traffic becomes noticeable
+            if self._watch_locks():
+                yield from self._read_locks()
         self.engine._publish()
 
     def _write_setting(self, name):
@@ -851,6 +965,8 @@ class KeyboardSide:
     def _send(self, name, codec, host, value):
         """A task: send ``value`` and read the setting back into self._controls. "unconfirmed" when it could not be
         read back, else None."""
+        if name == kbsettings.FN:
+            self._fn.sent()  # what it reports from now on may be this change (see _say)
         try:
             yield (codec.write, host, value)
         except HidppClosed:

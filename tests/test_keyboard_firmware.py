@@ -310,8 +310,8 @@ class Page(unittest.TestCase):
         self.assertFalse(self.page.settings_card.isHidden())
         self.assertEqual(self.rows(), ["backlight", "locks"])
         self.assertEqual(self.page.settings_rows["locks"].title.text(), "Lock keys")
-        for row in self.page.settings_rows.values():
-            self.assertIn("MX Options does not", row.note.text())  # a hint, not a control
+        for name, row in self.page.settings_rows.items():  # a hint, not a control; for the lock keys, only a notice
+            self.assertIn("never saves or logs" if name == "locks" else "MX Options does not", row.note.text())
         self.show(settings=["fn", "unknown"])
         self.assertEqual(self.rows(), ["fn"])
 

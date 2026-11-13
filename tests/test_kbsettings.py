@@ -4,6 +4,7 @@ the mouse. The engine runs on the test's thread with real transports on FakePort
 synthetic (tests/support.py)."""
 
 import copy
+import itertools
 import json
 import logging
 import os
@@ -2727,12 +2728,14 @@ class BrightnessNotice(BacklightBase):
 
     def test_each_notice_is_said_once_and_only_while_connected(self):
         found = {"connected": True, "notice": {"seq": 2, "kind": "backlight", "level": 3, "top": 7}}
-        self.assertEqual(keyboard.level_notice(0, None), (0, None))
-        self.assertEqual(keyboard.level_notice(0, {"connected": True, "notice": None}), (0, None))
-        self.assertEqual(keyboard.level_notice(0, found), (2, (3, 7)))
-        self.assertEqual(keyboard.level_notice(2, found), (2, None))
-        self.assertEqual(keyboard.level_notice(1, dict(found, connected=False)), (1, None))
-        self.assertEqual(keyboard.level_notice(2, dict(found, notice=dict(found["notice"], seq=3, level=0))), (3, (0, 7)))
+        self.assertEqual(keyboard.new_notice(0, None), (0, None))
+        self.assertEqual(keyboard.new_notice(0, {"connected": True, "notice": None}), (0, None))
+        self.assertEqual(keyboard.new_notice(0, found), (2, found["notice"]))
+        self.assertIsNot(keyboard.new_notice(0, found)[1], found["notice"])  # a copy
+        self.assertEqual(keyboard.new_notice(2, found), (2, None))
+        self.assertEqual(keyboard.new_notice(1, dict(found, connected=False)), (1, None))
+        self.assertEqual(keyboard.new_notice(2, dict(found, notice=dict(found["notice"], seq=3, level=0))),
+                         (3, dict(found["notice"], seq=3, level=0)))
 
 
 class BrightnessReports(BacklightBase):
@@ -3626,6 +3629,1208 @@ class BacklightPage(unittest.TestCase):
         for control in wanted:
             self.assertIn(control, reached)
         self.assertEqual(sorted(reached.index(control) for control in wanted), [reached.index(c) for c in wanted])
+
+
+
+# -- the lock keys (0x4220) and the Fn lock, told as notices -----------------------------------------------------------
+
+LKS = device.LOCK_KEY_STATE
+CAPS, NUM, SCROLL = 0x02, 0x01, 0x04
+FN_CHANGE = [(device.HOSTS_INFO, 0), (HOSTS, 0), (HOSTS, 1), (HOSTS, 0)]  # a change of Fn lock: read, set, read back
+FN_READ = [(device.HOSTS_INFO, 0), (HOSTS, 0)]
+
+
+def lock_keyboard(locks=0, disable=False, unit=UNIT_A, **kwargs):
+    """A synthetic keyboard with Fn inversion per channel (channel 0 of three, False there) and the lock key state,
+    answering ``locks``; with ``disable``, keys it can turn off too."""
+    settings = {device.HOSTS_INFO: 0, HOSTS: {0: [1, 1], 1: [0, 1], 2: [1, 1]}}
+    if disable:
+        settings[DK] = {"caps": 0x1F, "current": 0}
+    kb = keyboard_device(unit, hosts=(3, 0), settings=settings, extra=[LKS], **kwargs)
+    kb.replies[(LKS, 0)] = bytes([locks])
+    return kb
+
+
+def fn_read(request):
+    return request[0] is FnCodec.read
+
+
+def lock_read(request):
+    return request[0] is kbsettings.lock_state
+
+
+class NoticeBase(Base):
+    """A rig with a keyboard found and read, its notices as asked before it is found. The settings change afterwards
+    only as the engine takes new ones; time goes on only with Later and the keyboard's tick."""
+
+    hold_nth = BacklightBase.hold_nth
+
+    def make(self, kb=None, locks=False, fns=False, notices=False, **rig):
+        self.dev = kb or lock_keyboard()
+        self.rig = Rig(self, {1: self.dev, 2: mouse_device()}, **rig)
+        self.rig.engine.cfg["keyboard"].update(lock_notices=locks, fn_notices=fns, notices=notices)
+        return self.rig.start()
+
+    def prefs(self, **changes):
+        """The settings change, as from the window or a settings file: the engine takes them."""
+        new = copy.deepcopy(self.rig.engine.cfg)
+        new["keyboard"].update(changes)
+        self.rig.engine._apply_config(new)
+
+    def locks(self, bits):
+        self.dev.replies[(LKS, 0)] = bytes([bits])
+
+    def fn_is(self, value):
+        self.dev.settings[HOSTS][0][0] = 0 if value else 1
+
+    def lock_report(self):
+        self.rig.note(1, self.dev, LKS, b"\x02")  # what it says is never read
+
+    def fn_report(self):
+        self.rig.note(1, self.dev, HOSTS, b"")
+
+    def lock_reads(self):
+        return len(packets(self.rig.port, self.dev, LKS, 0))
+
+    def fn_reads(self):
+        return len(packets(self.rig.port, self.dev, HOSTS, 0))
+
+    def fn_tries(self):
+        """Reads of Fn lock begun: each asks for the channel first."""
+        return len(packets(self.rig.port, self.dev, device.HOSTS_INFO, 0))
+
+    def wire(self, start):
+        """What was asked of the keyboard since packet ``start``, as (feature, function)."""
+        return [(self.dev.features[p[2]], p[3] >> 4) for p in self.rig.port.written[start:] if p[1] == 1]
+
+    def notice(self):
+        return self.rig.state()["notice"]
+
+    def notices(self):
+        """Every notice the window was given so far, once each, in order."""
+        seen = {}
+        for state in self.rig.states:
+            if state and state.get("notice"):
+                seen.setdefault(state["notice"]["seq"], state["notice"])
+        return list(seen.values())
+
+    @staticmethod
+    def record(rec):
+        return rec.seen, rec.event, rec.handled, rec.own, rec.retried
+
+    def later(self, clock, times=1):
+        """RECOVERY_RETRY goes by ``times`` times, the keyboard's clock ticking each time."""
+        for _ in range(times):
+            clock.skip(keyboard.RECOVERY_RETRY + 1)
+            self.rig.kb.tick(time.monotonic())
+            self.rig.settle()
+
+    def idle(self):
+        """Nothing is due before RECOVERY_RETRY is nearly over, but something is then."""
+        due = self.rig.kb.due(time.monotonic())
+        self.assertTrue(keyboard.RECOVERY_RETRY - 5.0 < due <= keyboard.RECOVERY_RETRY, due)
+
+    def nothing_due(self):
+        self.assertEqual(self.rig.kb.due(time.monotonic()), float("inf"))
+
+
+def told(seq, **notice):
+    return dict(notice, seq=seq)
+
+
+def locks_told(seq, **keys):
+    return {"seq": seq, "kind": "locks", "keys": keys}
+
+
+def fn_told(seq, value):
+    return {"seq": seq, "kind": "fn", "value": value}
+
+
+class LockDecode(unittest.TestCase):
+    def test_the_three_named_bits_of_function_0_and_nothing_else(self):
+        self.assertEqual((dict(kbsettings.LOCK_KEYS), kbsettings.LOCK_MASK),
+                         ({"caps_lock": CAPS, "num_lock": NUM, "scroll_lock": SCROLL}, 0x07))
+        for byte, bits in ((0x00, 0), (CAPS, CAPS), (0x07, 0x07), (0xFF, 0x07), (0xF8, 0), (0xFA, CAPS)):
+            with self.subTest(byte=hex(byte)):
+                stub = Stub([LKS], {(LKS, 0): bytes([byte, 0xFF])})
+                self.assertEqual(kbsettings.lock_state(stub), bits)
+                self.assertEqual(stub.calls, [(LKS, 0, b"")])  # function 0 with nothing, and nothing more
+        with self.assertRaises(kbsettings.BadReply):
+            kbsettings.lock_state(Stub([LKS], {(LKS, 0): b""}))
+
+
+class ReportedRecord(unittest.TestCase):
+    """keyboard.Reported, the record a reported state is settled in, alone."""
+
+    def rec(self, seen=None, event=0, handled=0, own=False, retried=None):
+        made = keyboard.Reported()
+        made.seen, made.event, made.handled, made.own, made.retried = seen, event, handled, own, retried
+        return made
+
+    def state(self, rec):
+        return rec.seen, rec.event, rec.handled, rec.own, rec.retried
+
+    def test_a_read_settles_it_only_where_no_report_came_meanwhile(self):
+        self.assertEqual(self.state(keyboard.Reported()), (None, 0, 0, False, None))
+        for before, start, now, said, after in (
+                ((None, 0, 0, False, None), 0, 2, False, (2, 0, 0, False, None)),  # the first read: no word
+                ((None, 1, 0, False, None), 1, 2, False, (2, 1, 1, False, None)),  # first, even with a report
+                ((0, 1, 0, False, None), 0, 2, False, (0, 1, 0, False, None)),     # a report while read: nothing
+                ((0, 1, 0, False, None), 1, 2, True, (2, 1, 1, False, None)),      # reported, and changed: told
+                ((0, 1, 1, False, None), 1, 2, False, (2, 1, 1, False, None)),     # nothing reported: no word
+                ((2, 1, 0, False, None), 1, 2, False, (2, 1, 1, False, None)),     # the same again: no word
+                ((False, 2, 0, True, None), 1, True, False, (False, 2, 0, True, None)),  # its own, overtaken: nothing
+                ((False, 2, 0, True, None), 2, True, False, (True, 2, 2, False, None)),  # its own: settled, no word
+                ((False, 2, 0, True, 1), 2, False, False, (False, 2, 2, False, 1))):
+            with self.subTest(before=before, start=start, now=now):
+                rec = self.rec(*before)
+                self.assertIs(rec.read(start, now), said)
+                self.assertEqual(self.state(rec), after)
+
+    def test_a_failed_read_is_read_once_more_for_each_report_or_change_sent(self):
+        rec = self.rec(0, 1, 0)
+        self.assertEqual([rec.failed(), rec.failed()], [True, False])
+        self.assertEqual(self.state(rec), (0, 1, 0, False, 1))  # only how far it was tried again changes
+        rec.event += 1
+        self.assertEqual([rec.failed(), rec.failed()], [True, False])
+        self.assertEqual(self.state(rec), (0, 2, 0, False, 2))
+        rec = self.rec(0, 1, 1)
+        self.assertIs(rec.failed(), False)  # nothing to settle
+        rec = self.rec(0)
+        rec.sent()
+        self.assertEqual(self.state(rec), (0, 0, 0, True, None))
+        self.assertEqual([rec.failed(), rec.failed()], [True, False])  # its own change, with no report at all
+        rec.sent()
+        self.assertEqual([rec.failed(), rec.failed()], [True, False])  # each change sent: once more
+        self.assertEqual(self.state(rec), (0, 0, 0, True, 0))
+
+
+class LockNotices(NoticeBase):
+    """A lock key the keyboard reports turned on or off is told once, as a fresh read says it is, where the settings
+    ask for it: never what made it change, and nothing of it kept but for that."""
+
+    def test_off_at_first_nothing_is_asked_or_kept(self):
+        rig = self.make(lock_keyboard(CAPS))
+        self.assertIs(rig.engine.cfg["keyboard"]["lock_notices"], False)
+        self.assertEqual(self.lock_reads(), 0)
+        self.assertEqual(rig.state()["settings"], ["fn", "locks"])
+        sent = len(rig.port.written)
+        self.dev.failing[(LKS, 0)] = 5
+        for bits in (0, CAPS, NUM):
+            self.locks(bits)
+            self.lock_report()
+            rig.settle()
+        self.assertEqual(rig.port.written[sent:], [])  # not even read again
+        self.nothing_due()
+        self.assertEqual((self.notices(), rig.kb._locks.seen, self.record(rig.kb._locks)),
+                         ([], None, (None, 0, 0, False, None)))
+        self.assertNotIn("locks", rig.state()["controls"])
+
+    def test_a_keyboard_without_them_is_never_asked_or_read_more_for_them(self):
+        with self.assertNoLogs("mxoptions.keyboard", logging.WARNING):
+            rig = self.make(fn_keyboard(), locks=True)
+            start = len(rig.port.written)
+            self.prefs(lock_notices=False)
+            self.prefs(lock_notices=True)
+            rig.settle()
+            self.assertEqual(rig.port.written[start:], [])
+            self.fn_is(True)
+            self.fn_report()
+            rig.settle()
+            self.assertEqual(self.wire(start), FN_READ)
+        self.assertEqual(rig.state()["settings"], ["fn"])
+
+    def test_a_settings_read_cut_short_by_no_answer_leaves_them_to_the_read_after(self):
+        rig = self.make(locks=True)
+        clock = Later(self)
+        self.dev.failing[(HOSTS, 0)] = None  # Fn lock, read first, unanswered: the reading ends there
+        self.locks(CAPS)
+        reads = self.lock_reads()
+        self.lock_report()
+        rig.settle()
+        self.assertEqual((self.lock_reads(), self.record(rig.kb._locks)), (reads, (0, 1, 0, False, None)))
+        self.idle()
+        del self.dev.failing[(HOSTS, 0)]
+        self.later(clock)
+        self.assertEqual((self.lock_reads(), self.notices()), (reads + 1, [locks_told(1, caps_lock=True)]))
+
+    def test_found_found_again_or_replaced_it_is_read_without_a_word(self):
+        rig = self.make(lock_keyboard(CAPS), locks=True)
+        self.assertEqual(self.lock_reads(), 1)
+        self.assertEqual(self.record(rig.kb._locks), (CAPS, 0, 0, False, None))
+        self.assertIsNone(self.notice())
+        self.locks(CAPS | NUM)
+        self.lock_report()
+        rig.settle()
+        self.assertEqual(self.notices(), [locks_told(1, num_lock=True)])
+        for kb in (self.dev, lock_keyboard(SCROLL, unit=UNIT_B)):
+            rig.link(1, False)
+            self.assertIsNone(self.notice())
+            self.assertIsNone(rig.kb._locks.seen)  # forgotten
+            rig.port.devices[1] = kb
+            rig.link(1, True)
+            rig.settle()
+            self.assertIsNone(self.notice())  # whatever it says now: no word
+        self.dev = kb
+        self.assertEqual(self.record(rig.kb._locks), (SCROLL, 0, 0, False, None))
+        self.locks(0)
+        self.lock_report()
+        rig.settle()
+        self.assertEqual(self.notices(), [locks_told(1, num_lock=True), locks_told(2, scroll_lock=False)])
+        self.assertEqual(rig.kb._notice_seq, 2)
+
+    def test_a_reported_change_is_told_once_as_it_is_now(self):
+        rig = self.make(locks=True)
+        self.locks(CAPS)
+        self.lock_report()
+        rig.settle()
+        self.assertEqual(self.notice(), locks_told(1, caps_lock=True))
+        self.locks(0)
+        self.lock_report()
+        rig.settle()
+        self.assertEqual(self.notice(), locks_told(2, caps_lock=False))
+        self.locks(NUM | CAPS)
+        self.lock_report()
+        rig.settle()
+        self.assertEqual(self.notice(), locks_told(3, caps_lock=True, num_lock=True))
+        self.assertEqual(list(self.notice()["keys"]), ["caps_lock", "num_lock"])  # in the order they are shown
+        self.assertEqual([notice["seq"] for notice in self.notices()], [1, 2, 3])
+        self.assertEqual(self.dev.setting_writes, [])
+
+    def test_the_same_again_is_not_told_and_a_burst_is_one_read_more(self):
+        rig = self.make(locks=True)
+        for _ in range(5):
+            self.lock_report()
+            rig.settle()
+        self.assertEqual((self.notices(), self.record(rig.kb._locks)), ([], (0, 5, 5, False, None)))
+        reads, fns = self.lock_reads(), self.fn_reads()
+        entered, release = self.hold(lock_read)
+        for bits in (CAPS, CAPS | NUM, NUM, 0, SCROLL):
+            self.locks(bits)
+            self.lock_report()
+            if not entered.is_set():
+                self.assertTrue(self.reached(entered))
+        release.set()
+        rig.settle()
+        self.assertEqual((self.lock_reads(), self.fn_reads()), (reads + 2, fns + 2))  # the one under way, one more
+        self.assertEqual(self.notices(), [locks_told(1, scroll_lock=True)])
+
+    def test_keys_not_named_are_never_compared_kept_or_shown(self):
+        rig = self.make(locks=True)
+        self.locks(0xF8)
+        self.lock_report()
+        rig.settle()
+        self.assertEqual((self.notices(), rig.kb._locks.seen), ([], 0))
+        self.locks(0xF8 | CAPS)
+        self.lock_report()
+        rig.settle()
+        self.assertEqual((self.notices(), rig.kb._locks.seen), ([locks_told(1, caps_lock=True)], CAPS))
+        self.assertNotIn("locks", rig.state()["controls"])
+
+    def test_a_report_while_it_is_read_is_settled_by_the_read_after_it(self):
+        rig = self.make(locks=True)
+        first, release_first = self.hold_nth(1, lock_read)
+        second, release_second = self.hold_nth(2, lock_read)
+        self.locks(CAPS)
+        self.lock_report()
+        self.assertTrue(self.reached(first))
+        self.lock_report()  # while it is read; its answer says Caps Lock on already
+        release_first.set()
+        self.assertTrue(self.reached(second))
+        self.assertEqual((self.notices(), self.record(rig.kb._locks)), ([], (0, 2, 0, False, None)))
+        release_second.set()
+        rig.settle()
+        self.assertEqual((self.notices(), self.record(rig.kb._locks)),
+                         ([locks_told(1, caps_lock=True)], (CAPS, 2, 2, False, None)))
+
+    def test_a_read_that_fails_is_read_once_more_then_waits_for_a_report(self):
+        rig = self.make(locks=True)
+        clock = Later(self)
+        self.dev.failing[(LKS, 0)] = 5
+        self.locks(CAPS)
+        reads = self.lock_reads()
+        self.lock_report()
+        rig.settle()
+        self.assertEqual((self.lock_reads(), self.notices()), (reads + 1, []))
+        self.assertEqual(self.record(rig.kb._locks), (0, 1, 0, False, 1))
+        self.idle()  # not at once
+        self.later(clock)
+        self.assertEqual(self.lock_reads(), reads + 2)  # once more, failing still
+        self.nothing_due()
+        self.later(clock, 3)
+        self.assertEqual(self.lock_reads(), reads + 2)  # and no more
+        del self.dev.failing[(LKS, 0)]
+        self.lock_report()
+        rig.settle()
+        self.assertEqual(self.notices(), [locks_told(1, caps_lock=True)])  # against what was settled before
+        self.assertEqual(self.dev.setting_writes, [])
+
+    def test_a_read_unanswered_is_read_again_after_recovery_retry(self):
+        rig = self.make(locks=True)
+        clock = Later(self)
+        self.dev.failing[(LKS, 0)] = None
+        self.locks(CAPS)
+        self.lock_report()
+        rig.settle()
+        self.assertEqual((self.notices(), self.record(rig.kb._locks)), ([], (0, 1, 0, False, None)))
+        self.idle()
+        self.later(clock)  # unanswered still: later still
+        self.idle()
+        del self.dev.failing[(LKS, 0)]
+        self.later(clock)
+        self.assertEqual(self.notices(), [locks_told(1, caps_lock=True)])
+        self.nothing_due()
+
+    def test_a_read_called_off_or_cut_short_settles_nothing(self):
+        for wish in ("configure", "host"):
+            with self.subTest(wish):
+                rig = self.make(locks=True)
+                clock = Later(self)
+                entered, release = self.hold(lock_read)
+                self.locks(CAPS)
+                self.lock_report()
+                self.assertTrue(self.reached(entered))
+                if wish == "configure":
+                    rig.kb.configure()
+                else:
+                    rig.kb.device_action({"type": "host", "host": 1}, "press")
+                release.set()
+                rig.settle()
+                if wish == "host":  # it stayed: once the switch's grace is over, it is read again
+                    self.assertEqual(self.dev.switched, [1])
+                    self.assertEqual(self.record(rig.kb._locks), (0, 1, 0, False, None))
+                    clock.skip(keyboard.SWITCH_GRACE + 1)
+                    rig.kb.tick(time.monotonic())
+                    rig.settle()
+                self.assertEqual(self.notices(), [locks_told(1, caps_lock=True)])
+                self.assertEqual(self.record(rig.kb._locks), (CAPS, 1, 1, False, None))
+                rig.stop()
+        rig = self.make(locks=True)
+        entered, release = self.hold(lock_read)
+        self.locks(CAPS)
+        self.lock_report()
+        self.assertTrue(self.reached(entered))
+        rig.link(1, False)  # gone while it is read: its answer is not taken
+        release.set()
+        self.drain()
+        self.assertIsNone(rig.kb._locks.seen)
+        rig.link(1, True)
+        rig.settle()
+        self.assertEqual((self.notices(), self.record(rig.kb._locks)), ([], (CAPS, 0, 0, False, None)))
+
+    def test_turned_off_a_read_under_way_tells_and_keeps_nothing_turned_on_it_is_read_once(self):
+        rig = self.make(locks=True)
+        entered, release = self.hold(lock_read)
+        self.locks(CAPS)
+        self.lock_report()
+        self.assertTrue(self.reached(entered))
+        self.prefs(lock_notices=False)
+        release.set()
+        rig.settle()
+        self.assertEqual((self.notices(), rig.kb._locks.seen), ([], None))
+        sent = len(rig.port.written)
+        self.prefs(lock_notices=False)  # the same: nothing
+        self.prefs(notices=True)  # the brightness one: nothing either
+        self.lock_report()  # off: not even counted
+        rig.settle()
+        self.assertEqual(rig.port.written[sent:], [])
+        self.prefs(lock_notices=True)  # on while connected: one read, without a word
+        rig.settle()
+        self.assertEqual(self.wire(sent), FN_READ + [(LKS, 0)])
+        self.assertEqual((self.notices(), self.record(rig.kb._locks), self.dev.setting_writes),
+                         ([], (CAPS, 0, 0, False, None), []))
+        self.locks(0)
+        self.lock_report()
+        rig.settle()
+        self.assertEqual(self.notices(), [locks_told(1, caps_lock=False)])
+
+    def test_on_off_and_on_while_its_first_read_is_held_the_old_answer_settles_nothing(self):
+        rig = self.make()
+        first, release_first = self.hold_nth(1, lock_read)
+        second, release_second = self.hold_nth(2, lock_read)
+        self.prefs(lock_notices=True)
+        self.assertTrue(self.reached(first))
+        self.prefs(lock_notices=False)
+        self.prefs(lock_notices=True)
+        self.locks(CAPS)
+        release_first.set()  # what the first record asked: Caps Lock on
+        self.assertTrue(self.reached(second))  # the read the new record asked for, at once after
+        self.assertEqual(self.record(rig.kb._locks), (None, 0, 0, False, None))
+        self.locks(0)
+        self.lock_report()  # while that is held
+        release_second.set()
+        rig.settle()
+        self.assertEqual((self.notices(), self.record(rig.kb._locks)), ([], (0, 1, 1, False, None)))
+        self.locks(CAPS)
+        self.lock_report()
+        rig.settle()
+        self.assertEqual(self.notices(), [locks_told(1, caps_lock=True)])
+
+    def test_turned_off_a_read_under_way_that_fails_asks_nothing_more(self):
+        rig = self.make(locks=True)
+        clock = Later(self)
+        entered, release = self.hold(lock_read)
+        self.locks(CAPS)
+        self.lock_report()
+        self.assertTrue(self.reached(entered))
+        old = rig.kb._locks
+        self.prefs(lock_notices=False)
+        self.dev.failing[(LKS, 0)] = 5
+        release.set()
+        rig.settle()
+        self.assertEqual(self.record(old), (0, 1, 0, False, None))  # the record it was made for: not even tried again
+        sent = len(rig.port.written)
+        self.nothing_due()
+        self.later(clock, 3)
+        self.assertEqual(rig.port.written[sent:], [])
+
+    def test_a_report_before_it_is_turned_off_and_on_is_settled_afresh(self):
+        rig = self.make(lock_keyboard(disable=True), locks=True)
+        entered, release = self.hold(lambda request: request[0] is DisableCodec.write)
+        baseline, release_baseline = self.hold_nth(1, lock_read)
+        rig.kb.set_setting("disable", {"caps_lock": True})
+        self.assertTrue(self.reached(entered))  # another setting's change under way: the read due waits for it
+        self.locks(CAPS)
+        self.lock_report()
+        self.prefs(lock_notices=False)
+        self.prefs(lock_notices=True)
+        release.set()
+        self.assertTrue(self.reached(baseline))  # the read due: the first of the new record
+        self.locks(0)
+        self.lock_report()  # while it is held: the read it makes due settles it, without a word
+        release_baseline.set()
+        rig.settle()
+        self.assertEqual((self.notices(), self.record(rig.kb._locks)), ([], (0, 1, 1, False, None)))
+        self.locks(NUM)
+        self.lock_report()
+        rig.settle()
+        self.assertEqual(self.notices(), [locks_told(1, num_lock=True)])
+        self.assertEqual(len(self.dev.setting_writes), 1)
+
+    def test_only_ever_read(self):
+        rig = self.make(locks=True)
+        for bits in (CAPS, 0, NUM | SCROLL):
+            self.locks(bits)
+            self.lock_report()
+            rig.settle()
+        asked = rig.port.sent(1, self.dev.index(LKS))
+        self.assertEqual(len(asked), 4)
+        self.assertTrue(all(p[3] >> 4 == 0 and not any(p[4:]) for p in asked))  # function 0, with nothing
+        sent = len(rig.port.written)
+        rig.kb.set_setting("locks", True)
+        rig.kb.set_setting(kbsettings.LOCKS, {"caps_lock": True})
+        rig.settle()
+        self.assertEqual((rig.port.written[sent:], self.dev.setting_writes), ([], []))
+
+    def test_a_lock_read_that_fails_never_changes_how_a_change_goes(self):
+        for failing in (5, None):
+            with self.subTest(failing=failing):
+                rig = self.make(locks=True)
+                self.dev.failing[(LKS, 0)] = failing
+                self.locks(CAPS)
+                self.lock_report()
+                rig.settle()
+                start = len(rig.port.written)
+                rig.kb.set_setting("fn", True)
+                rig.settle()
+                self.assertEqual(self.wire(start), FN_CHANGE)  # first, and only that
+                self.assertEqual(self.dev.setting_writes, [(HOSTS, b"\x00\x00")])
+                self.assertEqual(fn(rig), dict(fn(rig), value=True, outcome=None))
+                rig.stop()
+        kb = backlight_keyboard(extra=[LKS])
+        kb.failing[(LKS, 0)] = 5
+        rig = self.make(kb, locks=True, notices=True)
+        self.lock_report()
+        rig.settle()
+        rig.kb.set_setting("backlight", {"level": 6})
+        rig.settle()
+        self.assertEqual([params for feature, params in kb.setting_writes if feature == BL],
+                         [bytes.fromhex("0119ff060c0006003c000504")])
+        self.assertEqual(control(rig, "backlight")["value"]["level"], 6)
+        self.assertIsNone(control(rig, "backlight")["outcome"])
+
+    def test_nothing_of_it_is_logged_saved_or_shown_but_the_notice(self):
+        with self.assertLogs("mxoptions.keyboard", logging.DEBUG) as logs, \
+                mock.patch.object(config, "save", side_effect=AssertionError("saved")), \
+                mock.patch.object(config, "write_durable", side_effect=AssertionError("written")):
+            rig = self.make(lock_keyboard(CAPS), locks=True)
+            before, exported, journal = copy.deepcopy(rig.engine.cfg), config.export_data(rig.engine.cfg), rig.saved()
+            for bits in (CAPS | NUM, SCROLL):
+                self.locks(bits)
+                self.lock_report()
+                rig.settle()
+            self.dev.failing[(LKS, 0)] = 5
+            self.lock_report()
+            rig.settle()
+            self.assertEqual(rig.engine.cfg, before)
+            self.assertEqual(config.export_data(rig.engine.cfg), exported)
+            self.assertEqual(rig.saved(), journal)
+        text = "\n".join(logs.output).lower()
+        self.assertIn("keyboard lock state not read: hidppfeatureerror", text)
+        for private in ("caps", "num_lock", "scroll", "true", "false", "\\x0"):
+            self.assertNotIn(private, text)
+        state = rig.state()
+        self.assertEqual(set(state["controls"]), {"fn"})
+        self.assertEqual(state["notice"], locks_told(2, caps_lock=False, num_lock=False, scroll_lock=True))
+        json.dumps(state)
+        self.prefs(lock_notices=False)
+        self.assertIsNone(rig.kb._locks.seen)  # forgotten once off
+        del self.dev.failing[(LKS, 0)]
+        self.prefs(lock_notices=True)
+        rig.settle()
+        self.assertEqual(rig.kb._locks.seen, SCROLL)
+        rig.link(1, False)
+        self.assertIsNone(rig.kb._locks.seen)  # and once gone
+
+    def test_the_mouse_is_heard_while_the_lock_keys_are_slow(self):
+        rig = self.make(locks=True)
+        mouse = rig.port.devices[2]
+        rig.engine.cfg["buttons"]["back"] = actions.keys("LEFTSHIFT")
+        self.dev.delays = {LKS: 0.2}
+        self.locks(CAPS)
+        self.lock_report()
+        end = time.monotonic() + 3.0
+        while not (rig.kb._asked and rig.kb._asked[0] is kbsettings.lock_state) and time.monotonic() < end:
+            try:
+                rig.engine._handle(rig.engine._queue.get(timeout=0.02))
+            except queue.Empty:
+                pass
+        self.assertIs(rig.kb._asked[0], kbsettings.lock_state)
+        for _ in range(3):
+            time.sleep(0.02)
+            self.assertIsNotNone(rig.kb._asked)  # the keyboard is still being waited for ...
+            rig.mouse_actions.ran.clear()
+            start = time.monotonic()
+            rig.port.notify(bytes([0x11, 2, mouse.index(device.REPROG_CONTROLS_V4), 0]) + struct.pack("!HHHH", 0x0053, 0, 0, 0).ljust(16, b"\0"))
+            while not rig.mouse_actions.ran:  # ... and the mouse is heard meanwhile
+                rig.engine._handle(rig.engine._queue.get(timeout=1.0))
+            self.assertLess(time.monotonic() - start, 0.1)
+            rig.port.notify(bytes([0x11, 2, mouse.index(device.REPROG_CONTROLS_V4), 0]) + bytes(16))
+        rig.settle()
+        self.assertEqual(self.notices(), [locks_told(1, caps_lock=True)])
+
+
+class FnNotices(NoticeBase):
+    """Fn lock the keyboard reports changed is told once, as a fresh read says it is, where the settings ask for it;
+    a change of this program's never, and no change of it waits for, or asks more of the keyboard for, a notice."""
+
+    def spoil(self, how):
+        """The next Fn reads fail: refused, an answer that does not fit, or the channel not certain. Returns the mend."""
+        dev = self.dev
+        where = {"refused": (dev.failing, (HOSTS, 0), 5), "malformed": (dev.replies, (HOSTS, 0), b"\x00\x02\x01"),
+                 "channel": (dev.replies, (device.HOSTS_INFO, 0), b"\x00\x00\x00\x01"),
+                 "unanswered": (dev.failing, (HOSTS, 0), None)}[how]
+        where[0][where[1]] = where[2]
+        return lambda: where[0].pop(where[1])
+
+    def test_off_its_reports_are_read_and_settled_without_a_word(self):
+        rig = self.make()
+        self.fn_is(True)
+        self.fn_report()
+        rig.settle()
+        self.assertEqual((self.notices(), self.record(rig.kb._fn)), ([], (True, 1, 1, False, None)))
+        start = len(rig.port.written)
+        self.prefs(fn_notices=True)  # on: one read, without a word; nothing told of what came before
+        rig.settle()
+        self.assertEqual(self.wire(start), FN_READ)
+        self.assertEqual((self.notices(), self.record(rig.kb._fn)), ([], (True, 0, 0, False, None)))
+        self.fn_is(False)
+        self.fn_report()
+        rig.settle()
+        self.assertEqual(self.notices(), [fn_told(1, False)])
+
+    def test_a_read_that_fails_is_read_once_more_only_where_it_is_told(self):  # off: nothing asked of its own
+        for how in ("refused", "malformed", "channel"):
+            for on in (False, True):
+                with self.subTest(how, fn_notices=on):
+                    rig = self.make(fns=on)
+                    clock = Later(self)
+                    self.spoil(how)
+                    self.fn_is(True)
+                    start = len(rig.port.written)
+                    self.fn_report()
+                    rig.settle()
+                    one = FN_READ[:1] if how == "channel" else FN_READ
+                    self.assertEqual(self.wire(start), one)
+                    if on:
+                        self.idle()
+                    else:
+                        self.nothing_due()  # as before notices of it were known: no read of its own
+                    self.later(clock, 3)
+                    self.assertEqual(self.wire(start), one * (2 if on else 1))
+                    self.assertEqual((self.notices(), self.record(rig.kb._fn)),
+                                     ([], (False, 1, 0, False, 1 if on else None)))
+                    rig.stop()
+
+    def test_a_reported_change_is_told_once(self):
+        rig = self.make(fns=True)
+        self.assertEqual((self.notices(), self.record(rig.kb._fn)), ([], (False, 0, 0, False, None)))
+        self.fn_is(True)
+        self.fn_report()
+        rig.settle()
+        self.assertEqual(self.notice(), fn_told(1, True))
+        for _ in range(3):
+            self.fn_report()
+            rig.settle()
+        self.fn_is(False)
+        self.fn_report()
+        rig.settle()
+        self.assertEqual(self.notices(), [fn_told(1, True), fn_told(2, False)])
+        self.assertEqual(self.dev.setting_writes, [])
+
+    def test_its_own_change_is_never_told(self):
+        for when in ("setter", "read back", "after"):
+            with self.subTest(when):
+                rig = self.make(fns=True)
+                if when == "setter":
+                    entered, release = self.hold(lambda request: request[0] is FnCodec.write)
+                elif when == "read back":
+                    entered, release = self.hold_nth(2, fn_read)
+                rig.kb.set_setting("fn", True)
+                if when != "after":
+                    self.assertTrue(self.reached(entered))
+                    self.assertTrue(rig.kb._fn.own)
+                    self.fn_report()  # reported while it is sent, or read back
+                    release.set()
+                rig.settle()
+                if when == "after":
+                    self.fn_report()
+                    rig.settle()
+                self.assertEqual((self.notices(), self.record(rig.kb._fn)), ([], (True, 1, 1, False, None)))
+                self.assertEqual(self.dev.setting_writes, [(HOSTS, b"\x00\x00")])
+                rig.stop()
+
+    def test_its_own_change_unconfirmed_is_settled_by_a_read_later(self):
+        kb = MuteAfter(controls=(), hosts=(3, 0), settings={device.HOSTS_INFO: 0, HOSTS: {0: [1, 1]}}, extra=[LKS])
+        kb.replies[(LKS, 0)] = b"\x00"
+        kb.mute = (HOSTS, 1)
+        rig = self.make(kb, fns=True)
+        clock = Later(self)
+        rig.kb.set_setting("fn", True)
+        rig.settle()
+        self.assertEqual(fn(rig)["outcome"], "unconfirmed")
+        self.assertEqual(self.record(rig.kb._fn), (False, 0, 0, True, None))
+        self.idle()
+        kb.silent = False
+        self.later(clock)
+        self.assertEqual(self.record(rig.kb._fn), (True, 0, 0, False, None))
+        self.assertEqual((self.notices(), len(kb.setting_writes)), ([], 1))
+        self.later(clock, 2)
+        self.assertEqual(len(packets(rig.port, kb, HOSTS, 0)), 4)  # found, before, read back, later: no more
+        self.fn_is(False)
+        self.fn_report()
+        rig.settle()
+        self.assertEqual(self.notices(), [fn_told(1, False)])
+
+    def test_not_taken_or_read_back_wrongly_its_change_is_never_told(self):
+        rig = self.make(fns=True)
+        clock = Later(self)
+        self.dev.ignore_writes = True
+        rig.kb.set_setting("fn", True)
+        rig.settle()
+        self.assertEqual(fn(rig)["outcome"], "not-applied")
+        self.assertEqual(self.record(rig.kb._fn), (False, 0, 0, False, None))  # the read back settled it
+        self.dev.ignore_writes = False
+        self.dev.taken[HOSTS] = [2]  # takes a state that does not fit: read back wrongly
+        rig.kb.set_setting("fn", True)
+        rig.settle()
+        self.assertEqual(fn(rig)["outcome"], "unconfirmed")
+        self.assertEqual(self.record(rig.kb._fn), (False, 0, 0, True, 0))
+        self.idle()
+        self.fn_is(True)
+        self.later(clock)
+        self.assertEqual(self.record(rig.kb._fn), (True, 0, 0, False, 0))
+        self.assertEqual((self.notices(), len(self.dev.setting_writes)), ([], 2))  # each sent once, never again
+        self.later(clock, 2)
+        self.nothing_due()
+
+    def test_a_report_while_it_is_read_is_settled_by_the_read_after_it(self):
+        rig = self.make(fns=True)
+        first, release_first = self.hold_nth(1, fn_read)
+        second, release_second = self.hold_nth(2, fn_read)
+        self.fn_is(True)
+        self.fn_report()
+        self.assertTrue(self.reached(first))
+        self.fn_report()
+        release_first.set()
+        self.assertTrue(self.reached(second))
+        self.assertEqual((self.notices(), self.record(rig.kb._fn)), ([], (False, 2, 0, False, None)))
+        release_second.set()
+        rig.settle()
+        self.assertEqual((self.notices(), self.record(rig.kb._fn)), ([fn_told(1, True)], (True, 2, 2, False, None)))
+
+    def test_a_read_that_does_not_fit_or_fails_is_read_once_more(self):
+        for how in ("refused", "malformed", "channel"):
+            with self.subTest(how):
+                rig = self.make(fns=True)
+                clock = Later(self)
+                self.fn_is(True)
+                mend = self.spoil(how)
+                self.fn_report()
+                rig.settle()
+                self.assertEqual((self.notices(), self.record(rig.kb._fn)), ([], (False, 1, 0, False, 1)))
+                self.idle()
+                tries = self.fn_tries()
+                mend()
+                self.later(clock)
+                self.assertEqual(self.notices(), [fn_told(1, True)])  # against what was settled before
+                self.later(clock, 2)
+                self.assertEqual(self.fn_tries(), tries + 1)
+                rig.stop()
+
+    def test_other_software_seen_after_its_change_a_read_settles_it_without_a_word(self):
+        rig = self.make(fns=True)
+        entered, release = self.hold_nth(2, fn_read)
+        rig.kb.set_setting("fn", True)
+        self.assertTrue(self.reached(entered))
+        Guarded.rivals(self, "Solaar")
+        self.assertEqual(fn(rig)["outcome"], "unconfirmed")
+        self.assertTrue(rig.kb._fn.own)
+        release.set()
+        rig.settle()
+        self.assertEqual((self.notices(), self.record(rig.kb._fn)), ([], (True, 0, 0, False, None)))
+        self.fn_is(False)
+        self.fn_report()
+        rig.settle()
+        self.assertEqual(self.notices(), [fn_told(1, False)])
+        self.assertEqual(self.dev.setting_writes, [(HOSTS, b"\x00\x00")])  # never sent again or back
+
+    def test_gone_during_its_change_and_found_again_it_says_nothing(self):
+        rig = self.make(fns=True)
+        entered, release = self.hold_nth(2, fn_read)
+        rig.kb.set_setting("fn", True)
+        self.assertTrue(self.reached(entered))
+        rig.link(1, False)
+        release.set()
+        self.drain()
+        self.assertEqual(self.record(rig.kb._fn), (None, 0, 0, False, None))
+        rig.link(1, True)
+        rig.settle()
+        self.assertEqual((self.notices(), self.record(rig.kb._fn)), ([], (True, 0, 0, False, None)))
+        self.fn_is(False)
+        self.fn_report()
+        rig.settle()
+        self.assertEqual(self.notices(), [fn_told(1, False)])
+        self.assertEqual(self.dev.setting_writes, [(HOSTS, b"\x00\x00")])
+
+    def test_a_change_the_keyboard_makes_later_is_told_as_it_is_never_by_whom(self):
+        rig = self.make(fns=True)
+        self.dev.ignore_writes = True
+        rig.kb.set_setting("fn", True)
+        rig.settle()
+        self.assertEqual(fn(rig)["outcome"], "not-applied")
+        self.fn_is(True)  # it takes it after all, and reports it
+        self.fn_report()
+        rig.settle()
+        self.assertEqual(self.notices(), [fn_told(1, True)])
+        self.assertEqual(set(self.notice()), {"seq", "kind", "value"})
+
+    def test_its_change_asks_what_it_did_before_whatever_is_told(self):
+        for locks, fns in itertools.product((False, True), repeat=2):
+            with self.subTest(locks=locks, fns=fns):
+                rig = self.make(locks=locks, fns=fns)
+                start = len(rig.port.written)
+                rig.kb.set_setting("fn", True)
+                rig.settle()
+                self.assertEqual(self.wire(start), FN_CHANGE)
+                rig.stop()
+
+    def test_a_report_while_its_change_is_read_back_waits_for_a_read_that_counts(self):
+        rig = self.make(fns=True)
+        back, release_back = self.hold_nth(2, fn_read)
+        due, release_due = self.hold_nth(3, fn_read)
+        rig.kb.set_setting("fn", True)
+        self.assertTrue(self.reached(back))  # its read back, the setter gone
+        self.assertEqual(self.record(rig.kb._fn), (False, 0, 0, True, None))
+        self.fn_report()
+        release_back.set()  # True, overtaken by the report
+        self.assertTrue(self.reached(due))  # the read the report made due, once the change is over
+        self.assertEqual(self.record(rig.kb._fn), (False, 1, 0, True, None))  # nothing settled
+        self.fn_is(False)  # changed on the keyboard again meanwhile
+        release_due.set()
+        rig.settle()
+        self.assertEqual((self.notices(), self.record(rig.kb._fn)), ([], (False, 1, 1, False, None)))
+        self.fn_is(True)
+        self.fn_report()
+        rig.settle()
+        self.assertEqual(self.notices(), [fn_told(1, True)])
+        self.assertEqual(self.dev.setting_writes, [(HOSTS, b"\x00\x00")])
+
+    def test_a_read_after_its_change_that_fails_is_read_once_more(self):
+        for how in ("refused", "malformed", "channel", "unanswered"):
+            for twice in (False, True):
+                with self.subTest(how, twice=twice):
+                    rig = self.make(fns=True)
+                    clock = Later(self)
+                    back, release_back = self.hold_nth(2, fn_read)
+                    due, release_due = self.hold_nth(3, fn_read)
+                    rig.kb.set_setting("fn", True)
+                    self.assertTrue(self.reached(back))
+                    self.fn_report()
+                    if how == "channel":  # asked before the read the report makes due
+                        mend = self.spoil(how)
+                        release_due.set()
+                    release_back.set()
+                    if how != "channel":
+                        self.assertTrue(self.reached(due))
+                        mend = self.spoil(how)
+                        release_due.set()
+                    rig.settle()
+                    timeout = how == "unanswered"
+                    self.assertEqual((self.notices(), self.record(rig.kb._fn)),
+                                     ([], (False, 1, 0, True, None if timeout else 1)))
+                    self.idle()
+                    tries = self.fn_tries()
+                    if twice:
+                        self.later(clock)  # fails again
+                        self.assertEqual(self.fn_tries(), tries + 1)
+                        self.assertEqual(self.record(rig.kb._fn), (False, 1, 0, True, None if timeout else 1))
+                        if timeout:
+                            self.idle()  # unanswered: once each RECOVERY_RETRY, as for every setting
+                            self.later(clock)
+                            self.assertEqual(self.fn_tries(), tries + 2)
+                            tries += 1
+                        else:
+                            self.nothing_due()
+                            self.later(clock, 3)
+                            self.assertEqual(self.fn_tries(), tries + 1)  # no more
+                        mend()
+                        if timeout:
+                            self.later(clock)
+                        else:
+                            self.fn_is(False)
+                            self.fn_report()  # the next report: settled as its own, without a word
+                            rig.settle()
+                        self.assertEqual(self.notices(), [])
+                        self.assertFalse(rig.kb._fn.own)
+                    else:
+                        mend()
+                        self.later(clock)
+                        self.assertEqual(self.fn_tries(), tries + 1)
+                        self.assertEqual(self.record(rig.kb._fn), (True, 1, 1, False, None if timeout else 1))
+                        self.assertEqual(self.notices(), [])
+                    value = not rig.kb._fn.seen
+                    self.fn_is(value)
+                    self.fn_report()
+                    rig.settle()
+                    self.assertEqual(self.notices(), [fn_told(1, value)])
+                    self.assertEqual(self.dev.setting_writes, [(HOSTS, b"\x00\x00")])
+                    rig.stop()
+
+    def test_turned_on_while_a_read_from_before_is_held_it_tells_nothing_of_it(self):
+        rig = self.make()
+        entered, release = self.hold(fn_read)
+        self.fn_is(True)
+        self.fn_report()
+        self.assertTrue(self.reached(entered))
+        old = rig.kb._fn
+        self.prefs(fn_notices=True)
+        self.assertEqual(self.record(rig.kb._fn), (None, 0, 0, False, None))
+        reads = self.fn_reads()
+        release.set()
+        rig.settle()
+        self.assertEqual(self.fn_reads(), reads + 2)  # the one held, then the new record's first, without a word
+        self.assertEqual((self.notices(), self.record(rig.kb._fn)), ([], (True, 0, 0, False, None)))
+        self.assertEqual(self.record(old), (False, 1, 0, False, None))  # nothing settled on the old one either
+        self.fn_is(False)
+        self.fn_report()
+        rig.settle()
+        self.assertEqual(self.notices(), [fn_told(1, False)])
+
+    def test_turned_off_and_on_while_a_read_is_held_it_settles_nothing(self):
+        rig = self.make(fns=True)
+        entered, release = self.hold(fn_read)
+        self.fn_is(True)
+        self.fn_report()
+        self.assertTrue(self.reached(entered))
+        self.prefs(fn_notices=False)
+        self.prefs(fn_notices=True)
+        reads = self.fn_reads()
+        release.set()
+        rig.settle()
+        self.assertEqual(self.fn_reads(), reads + 2)
+        self.assertEqual((self.notices(), self.record(rig.kb._fn)), ([], (True, 0, 0, False, None)))
+        self.fn_is(False)
+        self.fn_report()
+        rig.settle()
+        self.assertEqual(self.notices(), [fn_told(1, False)])
+
+    def test_turned_off_while_a_read_is_held_its_failure_asks_nothing_more(self):
+        for back_on in (False, True):
+            with self.subTest(back_on=back_on):
+                rig = self.make(fns=True)
+                clock = Later(self)
+                entered, release = self.hold(fn_read)
+                self.fn_is(True)
+                self.fn_report()
+                self.assertTrue(self.reached(entered))
+                old = rig.kb._fn
+                self.prefs(fn_notices=False)
+                if back_on:
+                    self.prefs(fn_notices=True)
+                self.dev.failing[(HOSTS, 0)] = 5
+                release.set()
+                rig.settle()
+                self.assertEqual(self.record(old), (False, 1, 0, False, None))  # not even tried again for it
+                self.nothing_due()
+                tries = self.fn_tries()
+                self.later(clock, 3)
+                self.assertEqual(self.fn_tries(), tries)
+                self.assertEqual(self.notices(), [])
+                rig.stop()
+
+    def test_a_report_before_it_is_turned_on_is_settled_afresh(self):
+        rig = self.make(lock_keyboard(disable=True))
+        entered, release = self.hold(lambda request: request[0] is DisableCodec.write)
+        baseline, release_baseline = self.hold_nth(1, fn_read)
+        rig.kb.set_setting("disable", {"caps_lock": True})
+        self.assertTrue(self.reached(entered))
+        self.fn_is(True)
+        self.fn_report()  # its read waits for the change under way
+        self.prefs(fn_notices=True)
+        release.set()
+        self.assertTrue(self.reached(baseline))
+        self.fn_is(False)
+        self.fn_report()  # while the first read of the new record is held
+        release_baseline.set()
+        rig.settle()
+        self.assertEqual((self.notices(), self.record(rig.kb._fn)), ([], (False, 1, 1, False, None)))
+        self.fn_is(True)
+        self.fn_report()
+        rig.settle()
+        self.assertEqual(self.notices(), [fn_told(1, True)])
+
+    def test_its_own_change_stays_its_own_across_a_turn_on_or_off(self):
+        for start_on, turns in ((True, (False, True)), (False, (True,))):
+            for fails in (False, True):
+                with self.subTest(start_on=start_on, fails=fails):
+                    rig = self.make(fns=start_on)
+                    clock = Later(self)
+                    back, release_back = self.hold_nth(2, fn_read)
+                    first, release_first = self.hold_nth(3, fn_read)
+                    rig.kb.set_setting("fn", True)
+                    self.assertTrue(self.reached(back))
+                    for on in turns:
+                        self.prefs(fn_notices=on)
+                    self.assertEqual(self.record(rig.kb._fn), (None, 0, 0, True, None))  # still its own
+                    release_back.set()
+                    self.assertTrue(self.reached(first))
+                    self.assertEqual(self.record(rig.kb._fn), (None, 0, 0, True, None))  # the read back: nothing
+                    if fails:
+                        self.dev.failing[(HOSTS, 0)] = 5
+                    release_first.set()
+                    rig.settle()
+                    if fails:
+                        self.assertEqual(self.record(rig.kb._fn), (None, 0, 0, True, 0))
+                        self.idle()  # read once more for it
+                        del self.dev.failing[(HOSTS, 0)]
+                        self.later(clock)
+                    self.assertEqual((self.notices(), self.record(rig.kb._fn)),
+                                     ([], (True, 0, 0, False, 0 if fails else None)))
+                    self.nothing_due()
+                    self.fn_is(False)
+                    self.fn_report()
+                    rig.settle()
+                    self.assertEqual(self.notices(), [fn_told(1, False)])
+                    self.assertEqual(self.dev.setting_writes, [(HOSTS, b"\x00\x00")])
+                    rig.stop()
+
+    def test_a_reset_keeps_its_own_change_its_own_and_asks_nothing(self):
+        rig = self.make(locks=True, fns=True)
+        back, release_back = self.hold_nth(2, fn_read)
+        rig.kb.set_setting("fn", True)
+        self.assertTrue(self.reached(back))
+        start, record = len(rig.port.written), rig.kb._fn
+        new = copy.deepcopy(rig.engine.cfg)
+        new["keyboard"] = dict(new["keyboard"], keys={}, profiles=[])  # the keys reset, the notices as they were
+        rig.engine._apply_config(new)
+        self.assertIs(rig.kb._fn, record)
+        new = copy.deepcopy(rig.engine.cfg)
+        new["keyboard"] = copy.deepcopy(config.DEFAULTS["keyboard"])  # all as at first: the notices off too
+        rig.engine._apply_config(new)
+        self.assertEqual((self.record(rig.kb._fn), rig.kb._locks.seen), ((None, 0, 0, True, None), None))
+        self.assertEqual(rig.port.written[start:], [])  # neither asks the keyboard anything
+        release_back.set()
+        rig.settle()
+        self.assertEqual(self.record(rig.kb._fn), (None, 0, 0, True, None))  # still its own
+        self.fn_report()
+        rig.settle()
+        self.assertEqual((self.notices(), self.record(rig.kb._fn)), ([], (True, 1, 1, False, None)))
+        self.assertEqual(self.dev.setting_writes, [(HOSTS, b"\x00\x00")])
+
+    def test_turned_on_while_connected_it_is_read_once_and_otherwise_never(self):
+        rig = self.make()
+        start = len(rig.port.written)
+        self.prefs(fn_notices=True)
+        rig.settle()
+        self.assertEqual(self.wire(start), FN_READ)
+        for change in ({"fn_notices": True}, {"notices": True}, {"fn_notices": False}, {"notices": False}):
+            start = len(rig.port.written)
+            self.prefs(**change)
+            rig.settle()
+            self.assertEqual(self.wire(start), [], change)
+        start = len(rig.port.written)
+        self.prefs(fn_notices=True, lock_notices=True)  # both at once: one read
+        rig.settle()
+        self.assertEqual(self.wire(start), FN_READ + [(LKS, 0)])
+        start = len(rig.port.written)
+        rig.kb.set_setting("fn", True)
+        rig.settle()
+        self.assertEqual(self.wire(start), FN_CHANGE)
+        self.assertEqual(self.notices(), [])
+        rig.link(1, False)
+        start = len(rig.port.written)
+        self.prefs(fn_notices=False)
+        self.prefs(fn_notices=True)
+        self.assertEqual(rig.port.written[start:], [])  # gone: it is read once it is found again anyway
+        rig.stop()
+        kb = keyboard_device(extra=[LKS])  # the lock keys, and no Fn lock
+        kb.replies[(LKS, 0)] = b"\x00"
+        rig = self.make(kb)
+        start = len(rig.port.written)
+        self.prefs(fn_notices=True)
+        rig.settle()
+        self.assertEqual(rig.port.written[start:], [])
+        self.prefs(lock_notices=True)
+        rig.settle()
+        self.assertEqual(self.wire(start), [(LKS, 0)])
+
+
+class NoticesTogether(NoticeBase):
+    def test_two_changes_in_one_read_are_two_notices_one_after_the_other(self):
+        rig = self.make(locks=True, fns=True)
+        entered, release = self.hold(fn_read)
+        self.fn_is(True)
+        self.locks(CAPS)
+        self.fn_report()
+        self.assertTrue(self.reached(entered))
+        self.lock_report()
+        release.set()
+        rig.settle()
+        self.assertEqual(self.notices(), [fn_told(1, True), locks_told(2, caps_lock=True)])  # the window saw both
+        rig.stop()
+        kb = backlight_keyboard(extra=[LKS])
+        kb.replies[(LKS, 0)] = b"\x00"
+        rig = self.make(kb, locks=True, notices=True)
+        entered, release = self.hold(lambda request: request[0] is Backlight.read)
+        self.dev.settings[BL]["info"][1] = 6
+        rig.note(1, self.dev, BL, b"\x00\x07")
+        self.assertTrue(self.reached(entered))
+        self.locks(NUM)
+        self.lock_report()
+        release.set()
+        rig.settle()
+        self.assertEqual(self.notices(), [told(1, kind="backlight", level=6, top=7), locks_told(2, num_lock=True)])
+
+
+class TrayMessages(unittest.TestCase):
+    """What the tray says of the keyboard's notices and its battery (app.tray_messages)."""
+
+    def setUp(self):
+        from mxoptions import app, i18n
+        self.app, self.i18n = app, i18n
+
+    def found(self, notice=None, battery=(80, device.BATTERY_DISCHARGING), connected=True):
+        return {"connected": connected, "name": "Synthetic keyboard", "battery": battery, "notice": notice}
+
+    def test_the_newest_notice_first_and_a_low_battery_last_each_once(self):
+        low, notice = (10, device.BATTERY_DISCHARGING), locks_told(1, caps_lock=True)
+        armed, seen, messages = self.app.tray_messages(True, 0, self.found(notice, low))
+        self.assertEqual((armed, seen, messages), (False, 1, [
+            ("Caps Lock on", "info"), ("The battery of Synthetic keyboard is low (10%). Charge it soon.", "warning")]))
+        self.assertEqual(self.app.tray_messages(armed, seen, self.found(notice, low)), (False, 1, []))  # once
+        self.assertEqual(self.app.tray_messages(True, 0, self.found(notice, connected=False)), (True, 0, []))
+        self.assertEqual(self.app.tray_messages(True, 0, None), (True, 0, []))
+        for odd in ({"kind": "other"}, {"kind": "locks", "keys": {"insert": True}}, {"kind": "locks", "keys": {}},
+                    {"kind": "locks", "keys": ["caps_lock"]}, {"kind": "fn", "value": 1}, {"kind": "fn"}):
+            with self.subTest(odd=odd):  # not known here: taken, and nothing said
+                self.assertEqual(self.app.tray_messages(True, 4, self.found(told(5, **odd))), (True, 5, []))
+
+    def test_each_kind_in_words_in_english_and_ukrainian(self):
+        cases = ((told(1, kind="backlight", level=3, top=7), "Keyboard backlight: level 3 of 7",
+                  "Підсвітка клавіатури: рівень 3 з 7"),
+                 (fn_told(1, True), "Fn lock on: the top row gives F1–F12", "Фіксацію Fn увімкнено: верхній ряд дає F1–F12"),
+                 (fn_told(1, False), "Fn lock off: the top row gives its other functions",
+                  "Фіксацію Fn вимкнено: верхній ряд дає інші функції"),
+                 (locks_told(1, caps_lock=True, num_lock=False), "Caps Lock on, Num Lock off",
+                  "Caps Lock увімкнено, Num Lock вимкнено"),
+                 (locks_told(1, scroll_lock=True), "Scroll Lock on", "Scroll Lock увімкнено"))
+        self.assertEqual([self.app.notice_message(notice) for notice, _en, _uk in cases], [en for _n, en, _uk in cases])
+        self.addCleanup(self.i18n.setup, "en")
+        self.i18n.setup("uk")
+        self.assertEqual([self.app.notice_message(notice) for notice, _en, _uk in cases], [uk for _n, _en, uk in cases])
+
+
+class NoticePage(unittest.TestCase):
+    """The notice switches for Fn lock and the lock keys on the Keyboard page (Qt offscreen)."""
+
+    def setUp(self):
+        Page.setUp(self)
+
+    def show(self, settings=("fn", "locks"), fn_control=True, connected=True):
+        controls = {"fn": {"value": True, "default": None, "writable": True, "busy": False, "outcome": None}}
+        found = {"connected": connected, "known": True, "name": "Synthetic keyboard", "battery": None, "current_host": 0,
+                 "hosts": [], "keys": [], "reason": None, "failed": None, "firmware": None, "settings": list(settings),
+                 "controls": controls if fn_control else {}, "notice": None}
+        self.store.update_state(dict(self.store.state, keyboard=found))
+
+    def test_each_switch_where_the_keyboard_has_what_it_is_for(self):
+        page = self.page
+        rows = page.settings_card._rows
+        self.assertEqual(rows.index(page.fn_notices_row), rows.index(page.settings_rows["fn"]) + 1)  # under Fn lock
+        self.assertIs(page.settings_rows["locks"].control, page.lock_notices)
+        for shown, fn_row, locks_row in ((dict(), True, True), (dict(fn_control=False), False, True),
+                                         (dict(connected=False), False, True), (dict(settings=("fn",)), True, False),
+                                         (dict(settings=("locks",), fn_control=False), False, True)):
+            with self.subTest(shown=shown):
+                self.show(**shown)
+                self.assertEqual((not page.fn_notices_row.isHidden(), not page.settings_rows["locks"].isHidden()),
+                                 (fn_row, locks_row))
+
+    def test_the_switches_are_settings_of_this_program_only(self):
+        page = self.page
+        self.show()
+        for switch, name in ((page.fn_notices, "fn_notices"), (page.lock_notices, "lock_notices")):
+            with self.subTest(name):
+                self.assertFalse(switch.isChecked())
+                switch.click()
+                self.assertIs(self.store.cfg["keyboard"][name], True)
+                before = copy.deepcopy(self.store.cfg)
+                for _ in range(3):
+                    self.show()
+                self.assertEqual(self.store.cfg, before)  # shown again: nothing changed by it
+                self.assertTrue(switch.isChecked())
+                self.store.set("keyboard", name, False)  # changed elsewhere (a settings file): followed
+                self.assertFalse(switch.isChecked())
+        self.assertIs(self.store.cfg["keyboard"]["notices"], False)  # the brightness one stays as it was
+        self.assertEqual(self.calls, [])  # the keyboard is never asked
+
+    def test_names_for_assistive_technology_tab_and_words_translated(self):
+        from PySide6.QtCore import Qt
+        from mxoptions import i18n_uk
+        page = self.page
+        self.show()
+        self.assertEqual(page.fn_notices.accessibleName(), "Show a notice when Fn lock changes on the keyboard")
+        self.assertEqual(page.fn_notices_row.title.text(), "Show a notice when Fn lock changes on the keyboard")
+        self.assertEqual(page.lock_notices.accessibleName(), "Show a notice when a lock key turns on or off")
+        note = page.settings_rows["locks"].note.text()
+        self.assertEqual(note, "The keyboard reports when Caps Lock, Num Lock or Scroll Lock turns on or off. MX Options "
+                               "can show a notice then; it never saves or logs their state.")
+        wanted, reached, widget = [page.fn_switch, page.fn_notices, page.lock_notices], [], page.fn_switch
+        for _ in range(500):
+            if widget.isVisibleTo(page) and widget.isEnabled() and widget.focusPolicy() in (
+                    Qt.FocusPolicy.TabFocus, Qt.FocusPolicy.StrongFocus, Qt.FocusPolicy.WheelFocus):
+                reached.append(widget)
+            widget = widget.nextInFocusChain()
+            if widget is page.fn_switch:
+                break
+        self.assertEqual([control for control in reached if control in wanted], wanted)
+        words = [note, "Show a notice when Fn lock changes on the keyboard", "Show a notice when a lock key turns on or off",
+                 "Fn lock on: the top row gives F1–F12", "Fn lock off: the top row gives its other functions",
+                 "{key} on", "{key} off"]
+        for text in words:
+            self.assertIn(text, i18n_uk.STRINGS)
+            self.assertNotRegex(text + i18n_uk.STRINGS[text], r"0x|4220|40[aA]\d|\bbit|\bbyte")
 
 
 if __name__ == "__main__":

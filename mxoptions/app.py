@@ -125,6 +125,37 @@ def _tray_tooltip(state):
     return _device_line(state) + second
 
 
+LOCK_TITLES = {"caps_lock": "Caps Lock", "num_lock": "Num Lock", "scroll_lock": "Scroll Lock"}  # keycap names: as they are
+
+
+def notice_message(notice):
+    """What the tray says of one notice of the keyboard's (keyboard.new_notice), or None for one not known here."""
+    kind = notice.get("kind")
+    if kind == "backlight":
+        return _("Keyboard backlight: level {level} of {top}").format(level=notice["level"], top=notice["top"])
+    if kind == "fn" and type(notice.get("value")) is bool:
+        return _("Fn lock on: the top row gives F1–F12") if notice["value"] else _(
+            "Fn lock off: the top row gives its other functions")
+    keys = notice.get("keys") if kind == "locks" else None
+    if not isinstance(keys, dict) or not keys or not all(name in LOCK_TITLES for name in keys):
+        return None
+    return ", ".join((_("{key} on") if on else _("{key} off")).format(key=LOCK_TITLES[name]) for name, on in keys.items())
+
+
+def tray_messages(armed, seen, found):
+    """What the tray says of one state of the keyboard (``found``, or None): (armed, seen, [(text, "info" or
+    "warning")]), the newest notice first and a low battery last, so that a notice never takes the warning's place.
+    ``armed``: see keyboard.low_battery; ``seen``: see keyboard.new_notice."""
+    armed, low = keyboard.low_battery(armed, found.get("battery") if found and found["connected"] else None)
+    seen, notice = keyboard.new_notice(seen, found)
+    text = notice_message(notice) if notice else None
+    messages = [(text, "info")] if text else []
+    if low:
+        messages.append((_("The battery of {name} is low ({percent}%). Charge it soon.").format(
+            name=found["name"], percent=found["battery"][0]), "warning"))
+    return armed, seen, messages
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog=APP_ID, description=f"{APP_NAME} {__version__}")
     parser.add_argument("--background", action="store_true",
@@ -307,20 +338,15 @@ def main(argv=None):
     )
 
     low = {"armed": True}
-    shown = {"notice": 0}  # the last notice of a brightness the keyboard reported that was said
+    shown = {"notice": 0}  # the number of the last notice of a change the keyboard reported that was said
 
     def tray_state(state):
         tray.setToolTip(_tray_tooltip(state))
         tray_look()
-        found = state.get("keyboard")
-        low["armed"], say = keyboard.low_battery(low["armed"], found.get("battery") if found and found["connected"] else None)
-        if say and tray.isVisible():
-            tray.showMessage(APP_NAME, _("The battery of {name} is low ({percent}%). Charge it soon.").format(
-                name=found["name"], percent=found["battery"][0]), QSystemTrayIcon.MessageIcon.Warning)
-        shown["notice"], level = keyboard.level_notice(shown["notice"], found)
-        if level and tray.isVisible():
-            tray.showMessage(APP_NAME, _("Keyboard backlight: level {level} of {top}").format(level=level[0], top=level[1]),
-                             QSystemTrayIcon.MessageIcon.Information)
+        low["armed"], shown["notice"], messages = tray_messages(low["armed"], shown["notice"], state.get("keyboard"))
+        for text, kind in messages if tray.isVisible() else ():  # hidden: said to no one, and not said later either
+            tray.showMessage(APP_NAME, text, QSystemTrayIcon.MessageIcon.Warning if kind == "warning"
+                             else QSystemTrayIcon.MessageIcon.Information)
 
     store.state_changed.connect(tray_state)
 

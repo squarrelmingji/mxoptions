@@ -51,7 +51,8 @@ SETTINGS = {
     "platform": ("Operating system layout", "The keyboard can be set up for the layout of another operating system, on "
                  "the keyboard itself as its guide describes. MX Options does not change this yet."),
     "disable": ("Disable keys", "The keyboard can turn some of its keys off. MX Options does not do this yet."),
-    "locks": ("Lock keys", "The keyboard can report the state of its lock keys. MX Options does not show it yet."),
+    "locks": ("Lock keys", "The keyboard reports when Caps Lock, Num Lock or Scroll Lock turns on or off. MX Options can "
+              "show a notice then; it never saves or logs their state."),
 }
 # How a change of a setting went, when not as asked (keyboard.KeyboardSide._change)
 OUTCOMES = {
@@ -530,10 +531,20 @@ class KeyboardPage(ScrollPage):
         self.backlight_switch = Switch()
         self.backlight_switch.setAccessibleName(_("Backlight on"))
         self.backlight_switch.toggled.connect(lambda on: self._backlight_asks({"on": on}))
-        controls = {"fn": self.fn_switch, "platform": self.platform_box, "backlight": self.backlight_switch}
+        self.lock_notices = Switch()  # a setting of this program's: the keyboard is never asked anything for it
+        self.lock_notices.setAccessibleName(_("Show a notice when a lock key turns on or off"))
+        self.lock_notices.toggled.connect(lambda on: self.store.set("keyboard", "lock_notices", on))
+        controls = {"fn": self.fn_switch, "platform": self.platform_box, "backlight": self.backlight_switch,
+                    "locks": self.lock_notices}
         self.settings_rows, self.disable_switches, self.disable_rows = {}, {}, {}
         for name, (title, text) in SETTINGS.items():
             self.settings_rows[name] = card.add(Row(_(title), None, controls.get(name), note=_(text)))
+            if name == "fn":  # its notice, a setting of this program's, under it
+                notice = _("Show a notice when Fn lock changes on the keyboard")
+                self.fn_notices = Switch()
+                self.fn_notices.setAccessibleName(notice)
+                self.fn_notices.toggled.connect(lambda on: self.store.set("keyboard", "fn_notices", on))
+                self.fn_notices_row = card.add(Row(notice, None, self.fn_notices))
             if name == "disable":  # a row of its own for each key it can turn off, under it
                 for key, label, cap in DISABLE_TITLES:
                     switch = self.disable_switches[key] = Switch()
@@ -562,8 +573,15 @@ class KeyboardPage(ScrollPage):
         self.finish()
 
         store.state_changed.connect(self._state)
-        store.changed.connect(lambda: self.notices.set_checked_silently(self.store.cfg["keyboard"].get("notices") is True))
+        store.changed.connect(self._show_notice_switches)
         self._state(store.state)
+
+    def _show_notice_switches(self):
+        """The notice switches as the settings have them; showing them changes nothing."""
+        cfg = self.store.cfg["keyboard"]
+        self.notices.set_checked_silently(cfg.get("notices") is True)
+        self.fn_notices.set_checked_silently(cfg.get("fn_notices") is True)
+        self.lock_notices.set_checked_silently(cfg.get("lock_notices") is True)
 
     def _add_backlight(self, card):
         """The rows under the Backlight row: brightness, its level, the timers, low battery, the notice."""
@@ -798,6 +816,8 @@ class KeyboardPage(ScrollPage):
         self.settings_card.setVisible(any(name in SETTINGS for name in settings))
         controls = (found.get("controls") or {}) if connected else {}
         self._show_fn(controls.get("fn"))
+        self.settings_card.set_row_visible(self.fn_notices_row, "fn" in settings and controls.get("fn") is not None)
+        self._show_notice_switches()
         self._show_disable(controls.get("disable"), "disable" in settings)
         self._show_backlight(controls.get("backlight"), "backlight" in settings, bool(found.get("reason")))
         self._show_platform(controls.get("platform"), bool(found.get("reason")))

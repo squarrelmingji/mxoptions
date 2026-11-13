@@ -412,3 +412,19 @@ class BacklightCodec:
 
 
 CODECS = {FN: FnCodec, DISABLE: DisableCodec, PLATFORM: PlatformCodec, BACKLIGHT: BacklightCodec}
+
+LOCKS = "locks"  # which lock keys are on: only read, never a setting (device.KEYBOARD_SETTINGS names it so too)
+# LOCK_KEY_STATE (0x4220) function 0, byte 0: one bit for each lock key on, in the order they are shown. One public
+# description alone says so: OpenLogi v0.9.0 (crates/openlogi-hidpp/src/feature/lock_key_state.rs), which took it from
+# Logi Options+; the order is that of the HID LED usages (Num Lock, Caps Lock, Scroll Lock), nothing more.
+LOCK_KEYS = (("caps_lock", 0x02), ("num_lock", 0x01), ("scroll_lock", 0x04))
+LOCK_MASK = 0x07  # the bits named above; any other is never compared, kept or shown
+
+
+def lock_state(dev):
+    """The lock keys on, as LOCK_KEYS bits (others masked out). BadReply for an empty answer. Asks function 0 alone,
+    with nothing; there is nothing to set."""
+    reply = dev.call(device.LOCK_KEY_STATE, 0)
+    if len(reply) < 1:
+        raise BadReply("empty")
+    return reply[0] & LOCK_MASK

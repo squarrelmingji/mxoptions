@@ -2,6 +2,7 @@
 change them. The desktops are stood in for: what each says is made up here, as its documentation describes it."""
 
 import copy
+import itertools
 import json
 import os
 import stat
@@ -416,12 +417,18 @@ class Settings(unittest.TestCase):
         store.remove_profile("app0")
         self.assertIsNone(store.profile("app0"))
         store.set_key("0x0f05", COPY)
-        for notices in (False, True):  # the keys go back, never whether notices are shown
-            store.set("keyboard", "notices", notices)
+        for notices, locks, fn in itertools.product((False, True), repeat=3):  # the keys go back, never which notices
+            store.set("keyboard", "notices", notices)                          # are shown
+            store.set("keyboard", "lock_notices", locks)
+            store.set("keyboard", "fn_notices", fn)
             store.set_key("0x0f05", COPY)
             store.restore_keyboard()
-            self.assertEqual(store.cfg["keyboard"], {"keys": {}, "profiles": [], "notices": notices})
+            self.assertEqual(store.cfg["keyboard"], {"keys": {}, "profiles": [], "notices": notices,
+                                                     "lock_notices": locks, "fn_notices": fn})
             self.assertEqual(config.clean(copy.deepcopy(store.cfg)), store.cfg)
+        store.restore_defaults()  # all the settings back as they were at first: every notice off, on purpose
+        self.assertEqual(store.cfg["keyboard"], {"keys": {}, "profiles": [], "notices": False, "lock_notices": False,
+                                                 "fn_notices": False})
 
 
 class FakeFront(QObject):
@@ -512,6 +519,7 @@ class Page(unittest.TestCase):
         store.set_key("0x0f01", COPY)
         store.add_profile("kate")
         store.set("keyboard", "notices", True)
+        store.set("keyboard", "lock_notices", True)
         page = keyboard_page.KeyboardPage(store)
         self.addCleanup(page.deleteLater)
         asked = []
@@ -522,8 +530,19 @@ class Page(unittest.TestCase):
         self.assertIn("single apps", asked[0])
         with mock.patch.object(keyboard_page.QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Yes):
             page._reset()
-        self.assertEqual(store.cfg["keyboard"], {"keys": {}, "profiles": [], "notices": True})  # notices stay
+        self.assertEqual(store.cfg["keyboard"], {"keys": {}, "profiles": [], "notices": True, "lock_notices": True,
+                                                 "fn_notices": False})  # notices stay
         self.assertEqual(config.clean(copy.deepcopy(store.cfg)), store.cfg)
+        for notices, locks, fn in itertools.product((False, True), repeat=3):
+            choice = {"notices": notices, "lock_notices": locks, "fn_notices": fn}
+            for name, on in choice.items():
+                store.set("keyboard", name, on)
+            store.set_key("0x0f01", COPY)
+            with mock.patch.object(keyboard_page.QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Yes):
+                page._reset()
+            self.assertEqual(store.cfg["keyboard"], dict(choice, keys={}, profiles=[]))
+            self.assertEqual((page.notices.isChecked(), page.lock_notices.isChecked(), page.fn_notices.isChecked()),
+                             (notices, locks, fn))  # the switches follow, and changed nothing themselves
 
 
 if __name__ == "__main__":

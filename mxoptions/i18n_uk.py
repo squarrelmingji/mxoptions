@@ -886,8 +886,16 @@ STRINGS = {
         "Розкладка, яку клавіатура використовує для операційної системи на цьому каналі Easy-Switch; кожен канал має "
         "свою. Власне сполучення клавіш клавіатури для неї, як описано в її посібнику, теж її змінює.",
     "Lock keys": "Клавіші фіксації",
-    "The keyboard can report the state of its lock keys. MX Options does not show it yet.":
-        "Клавіатура може повідомляти стан своїх клавіш фіксації. MX Options поки його не показує.",
+    "The keyboard reports when Caps Lock, Num Lock or Scroll Lock turns on or off. MX Options can show a notice then; "
+    "it never saves or logs their state.":
+        "Клавіатура повідомляє, коли Caps Lock, Num Lock чи Scroll Lock вмикається чи вимикається. MX Options може тоді "
+        "показати сповіщення; стан цих клавіш ніколи не зберігається й не записується в журнал.",
+    "Show a notice when a lock key turns on or off": "Показувати сповіщення, коли клавіша фіксації вмикається чи вимикається",
+    "Show a notice when Fn lock changes on the keyboard": "Показувати сповіщення, коли фіксація Fn змінюється на клавіатурі",
+    "Fn lock on: the top row gives F1–F12": "Фіксацію Fn увімкнено: верхній ряд дає F1–F12",
+    "Fn lock off: the top row gives its other functions": "Фіксацію Fn вимкнено: верхній ряд дає інші функції",
+    "{key} on": "{key} увімкнено",
+    "{key} off": "{key} вимкнено",
     "Every key does what it always does": "Кожна клавіша робить те, що й завжди",
     "Restore keyboard defaults": "Відновити типові налаштування клавіатури",
     "Give every key of the keyboard back its own function, in every app? The keys set for single apps go too.":

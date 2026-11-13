@@ -168,6 +168,55 @@ class KeyboardNotices(unittest.TestCase):
         self.assertIs(config._merge(before, stored)["keyboard"]["notices"], True)
 
 
+class LockAndFnNotices(unittest.TestCase):
+    """keyboard.lock_notices and keyboard.fn_notices: each as keyboard.notices, on its own, in the same version."""
+
+    load = Migration.load
+    NAMES = ("lock_notices", "fn_notices")
+
+    def test_off_at_first_and_on_only_for_true_each_on_its_own(self):
+        self.assertEqual(config.DEFAULTS["version"], 6)
+        for name in self.NAMES:
+            self.assertIs(config.DEFAULTS["keyboard"][name], False)
+            for value, kept in ((True, True), (False, False), (1, False), ("true", False), (None, False), ([], False),
+                                ({}, False), (1.0, False)):
+                with self.subTest(name=name, value=value):
+                    cleaned = config.clean({"keyboard": {name: value, "notices": True}})["keyboard"]
+                    self.assertIs(cleaned[name], kept)
+                    self.assertIs(cleaned["notices"], True)  # the brightness one stays as it is
+                    other = next(n for n in self.NAMES if n != name)
+                    self.assertIs(cleaned[other], False)
+
+    def test_settings_from_before_them_load_with_them_off_and_are_not_written_back(self):
+        stored = copy.deepcopy(config.DEFAULTS)
+        for name in self.NAMES:
+            del stored["keyboard"][name]
+        stored["keyboard"]["notices"] = True
+        loaded, saved = self.load(stored)
+        self.assertEqual({name: loaded["keyboard"][name] for name in ("notices", *self.NAMES)},
+                         {"notices": True, "lock_notices": False, "fn_notices": False})
+        self.assertEqual(loaded["version"], 6)
+        self.assertEqual(saved, stored)
+
+    def test_they_go_into_a_settings_file_and_back_and_survive_the_build_before(self):
+        cfg = copy.deepcopy(config.DEFAULTS)
+        cfg["keyboard"].update(lock_notices=True, fn_notices=True)
+        raw = config.export_data(cfg)
+        self.assertEqual({name: json.loads(raw)["config"]["keyboard"][name] for name in self.NAMES},
+                         dict.fromkeys(self.NAMES, True))
+        imported = config.import_data(raw, config.DEFAULTS)["keyboard"]
+        self.assertEqual({name: imported[name] for name in self.NAMES}, dict.fromkeys(self.NAMES, True))
+        data = json.loads(raw)
+        data["config"]["keyboard"].update(lock_notices="yes", fn_notices=1)
+        imported = config.import_data(json.dumps(data).encode(), config.DEFAULTS)["keyboard"]
+        self.assertEqual({name: imported[name] for name in self.NAMES}, dict.fromkeys(self.NAMES, False))
+        before = copy.deepcopy(config.DEFAULTS)
+        for name in self.NAMES:  # the build before: it knows neither, and its merge keeps what it does not know
+            del before["keyboard"][name]
+        merged = config._merge(before, cfg)["keyboard"]
+        self.assertEqual({name: merged[name] for name in self.NAMES}, dict.fromkeys(self.NAMES, True))
+
+
 class Keyboard(unittest.TestCase):
     COPY = {"type": "keys", "keys": ["KEY_LEFTCTRL", "KEY_C"]}
     load = Migration.load
@@ -198,7 +247,8 @@ class Keyboard(unittest.TestCase):
         self.assertEqual(config.clean({"keyboard": {"keys": bad}})["keyboard"]["keys"], {})
         for section in ("nonsense", ["list"], {"keys": "nonsense"}, {"keys": ["0x00c7"]}):
             with self.subTest(section=section):
-                self.assertEqual(config.clean({"keyboard": section})["keyboard"], {"keys": {}, "profiles": [], "notices": False})
+                self.assertEqual(config.clean({"keyboard": section})["keyboard"],
+                                 {"keys": {}, "profiles": [], "notices": False, "lock_notices": False, "fn_notices": False})
 
     def test_malformed_desktop_fields_are_dropped_without_raising(self):
         for value in ([], {}, None, True, 4):
@@ -248,7 +298,7 @@ class Keyboard(unittest.TestCase):
         stored["pointer"]["dpi"] = 1800
         stored["wheel"]["threshold"] = 30
         loaded, saved = self.load(stored)
-        self.assertEqual(loaded["keyboard"], {"keys": {}, "profiles": [], "notices": False})
+        self.assertEqual(loaded["keyboard"], {"keys": {}, "profiles": [], "notices": False, "lock_notices": False, "fn_notices": False})
         for section in config.DEFAULTS:
             if section != "keyboard":
                 self.assertEqual(loaded[section], config.clean(stored)[section])
@@ -335,7 +385,7 @@ class Profiles(unittest.TestCase):
         stored = copy.deepcopy(config.DEFAULTS)
         stored["keyboard"] = {"keys": {"0x0f01": self.COPY}}  # what the build before wrote: version 6, no profiles
         loaded, saved = self.load(stored)
-        self.assertEqual(loaded["keyboard"], {"keys": {"0x0f01": self.COPY}, "profiles": [], "notices": False})
+        self.assertEqual(loaded["keyboard"], {"keys": {"0x0f01": self.COPY}, "profiles": [], "notices": False, "lock_notices": False, "fn_notices": False})
         self.assertEqual(saved, stored)  # the same version: not written back
 
     def test_profiles_survive_the_build_before(self):
