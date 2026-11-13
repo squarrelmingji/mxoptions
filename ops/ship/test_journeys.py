@@ -19,7 +19,7 @@ MARK = str(900000 + os.getpid() % 99999)  # sleep argument that tags every fake-
 
 FAKE = r"""#!/bin/sh
 case "$1" in
---version) echo "MX Options 9.9.9" ;;
+--version) pwd >"$FAKE_DIR/cwd"; echo "MX Options 9.9.9" ;;
 --background)
 	[ "$FAKE_MODE" = exit ] && exit 1
 	touch "$FAKE_DIR/started"
@@ -94,6 +94,11 @@ def run(mode, signum=None):
 def check(name, mode, signum, status, bound):
     driver, took, left, out, folder = run(mode, signum)
     rc = driver.returncode
+    try:
+        with open(os.path.join(folder, "cwd")) as f:
+            cwd = f.read().strip()
+    except OSError:
+        cwd = None
     orphans = fake_processes()
     try:  # never leave our own mess behind, even when the check fails
         os.killpg(driver.pid, signal.SIGKILL)
@@ -114,6 +119,8 @@ def check(name, mode, signum, status, bound):
         problems.append(f"fake app still running: {orphans}")
     if left:
         problems.append(f"private directory left: {left}")
+    if cwd is not None and not cwd.startswith("/tmp/mxj."):  # the app must not run in the caller's directory
+        problems.append(f"app ran in {cwd}")
     print(("PASS " if not problems else "FAIL ") + f"{name} ({took:.1f} s)" + "".join("; " + p for p in problems))
     if problems:
         print("  driver said: " + " | ".join(out.strip().splitlines()[-6:]))

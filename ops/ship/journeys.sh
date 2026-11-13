@@ -42,6 +42,7 @@ export HOME="$T/home" XDG_CONFIG_HOME="$T/home/.config" XDG_DATA_HOME="$T/home/.
 unset DBUS_SESSION_BUS_ADDRESS DISPLAY WAYLAND_DISPLAY MXOPTIONS_LAUNCHER
 mkdir -p "$HOME" "$XDG_RUNTIME_DIR" "$TMPDIR"
 chmod 700 "$XDG_RUNTIME_DIR"
+cd "$T"  # never from the caller's directory: `python -m mxoptions` would import a checkout found there
 
 if [ -n "${MXOPTIONS_BIN:-}" ]; then
 	MX=$MXOPTIONS_BIN
