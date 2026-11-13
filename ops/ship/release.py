@@ -6,8 +6,8 @@
     python3 ops/ship/release.py point TAG                  make a published release latest (rollback, promotion)
     python3 ops/ship/release.py health [TAG]               check a published release (default: latest)
 
-Each call prints one JSON line. Run it from a clean checkout of origin/main tip, never from the commit it
-publishes; publish and point refuse otherwise. It needs git and an authenticated gh, and nothing else.
+Each call prints one JSON line. Run it from a clean checkout of origin/main tip, also when COMMIT is older;
+publish and point refuse otherwise. It needs git and an authenticated gh, and nothing else.
 
 publish refuses before it creates anything when the tag or a release for the version exists, a draft is in
 flight, COMMIT is not on the first-parent history of origin/main, or (without --preview) hwgate.py says the

@@ -124,8 +124,8 @@ gate a stable release through `ops/ship/hardware-gates.json` (see Release eligib
 ## Deploy
 
 - Deploy command per environment: production `python3 ops/ship/release.py publish <commit>`
-  (stable) or `... publish <commit> --preview`, from a clean detached checkout of `main` tip.
-  Never run from the commit it publishes.
+  (stable) or `... publish <commit> --preview`, from a clean detached checkout of `main` tip,
+  also when `<commit>` is older; it refuses any other checkout.
 - Read serving version: `python3 ops/ship/release.py serving`; returns the `latest` tag, its
   commit and tree.
 - Detect in-flight deploy and read one operation: `python3 ops/ship/release.py inflight` (exit 10
@@ -143,7 +143,9 @@ gate a stable release through `ops/ship/hardware-gates.json` (see Release eligib
 - Pass: the release and every file download (a missing release or file is a 404 and fails);
   `SHA256SUMS` verifies; `BUILDINFO.json` commit and tree equal the tag's; the wheel installs into
   a new venv with the pinned constraints and passes J2-J6 headless; the .deb names the right
-  version and carries the installation files. It proves the published files, never a device.
+  version and carries the installation files. It proves the published Linux files, never a
+  device, a Windows build or a .deb installation (`make deb-test` needs unprivileged user
+  namespaces, which the agents' host denies).
 
 ## Rollback
 
