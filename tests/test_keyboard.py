@@ -2128,5 +2128,254 @@ class DeviceHosts(unittest.TestCase):
         self.assertIs(dev.pairing_read, False)
 
 
+# -- what a key's macros are stopped by (KeyboardSide._remap) --------------------------------------------------------
+
+class Gate:
+    """Plays an Executor's macros without typing: each key step is recorded, and the first ``held`` step waits until
+    the gate opens. drained() opens it and returns once every macro queued before has played or been dropped."""
+
+    def __init__(self, test, executor, held="KEY_A"):
+        self.executor, self.held = executor, held
+        self.ran, self.entered, self.open, self.fenced = [], threading.Event(), threading.Event(), threading.Event()
+        executor.macros._step = self.step
+        test.addCleanup(self.close)
+
+    def step(self, step, wake=None):
+        name = step["keys"][0]
+        if name == "KEY_F24":
+            self.fenced.set()
+            return
+        self.ran.append(name)
+        if name == self.held and not self.open.is_set():
+            self.entered.set()
+            assert self.open.wait(5), "the gate never opened"
+
+    def playing(self):
+        assert self.entered.wait(5), "the first macro never started"
+
+    def drained(self):
+        self.open.set()
+        jobs = self.executor.macros._queue
+        with jobs.not_full:  # the fence fits once the runner took a job
+            assert jobs.not_full.wait_for(lambda: jobs._qsize() < 4, 5)
+        self.fenced.clear()
+        self.executor.trigger(macro("KEY_F24"))
+        assert self.fenced.wait(5), "the fence never played"
+        return self.ran
+
+    def close(self):
+        self.open.set()
+        self.executor.close()
+        thread = self.executor.macros._thread
+        if thread is not None:
+            thread.join(5)
+            assert not thread.is_alive(), "a macro thread was left running"
+
+
+class MacroSources(unittest.TestCase):
+    """A key whose action changes stops every macro its presses started, playing, queued or turned away by a full
+    queue, however often equal settings were saved meanwhile; other keys and the mouse play on."""
+
+    def macro_rig(self, keys, profiles=()):
+        self.kb = keyboard_device()
+        rig = Rig(self, {1: self.kb, 2: mouse_device()}, keys=keys)
+        rig.engine.cfg["keyboard"]["profiles"] = copy.deepcopy(list(profiles))
+        rig.start()
+        self.gate = Gate(self, rig.kb.executor)
+        return rig
+
+    def tap(self, rig, cid=0x0F01):
+        rig.keys_down(1, self.kb, cid)
+        rig.keys_down(1, self.kb)
+
+    def apply(self, rig, cfg):
+        rig.engine.set_config(cfg)
+        rig.engine._handle(rig.engine._queue.get(timeout=2.0))
+        rig.settle()
+
+    def save(self, rig):
+        self.apply(rig, copy.deepcopy(rig.engine.cfg))  # nothing changed: every object new
+
+    def change(self, rig, cid="0x0f01", action=COPY):
+        cfg = copy.deepcopy(rig.engine.cfg)
+        cfg["keyboard"]["keys"][cid] = action
+        self.apply(rig, cfg)
+
+    def node_keys(self, rig, *cids):
+        """The keyboard on a node of its own (FollowsMouse.make) reports its keys. Rig.keys_down cannot: a KeyNode
+        has no notify of its own."""
+        rig.ports[KB_PATH].fake.notify(bytes([0x11, 0xFF, self.kb.index(device.REPROG_CONTROLS_V4), 0x00])
+                                       + struct.pack("!HHHH", *(list(cids) + [0, 0, 0, 0])[:4]).ljust(16, b"\0"))
+        rig.engine._handle(rig.engine._queue.get(timeout=2.0))
+
+    def test_a_changed_key_stops_its_macro_after_equal_saves_and_a_press_the_full_queue_turned_away(self):
+        rig = self.macro_rig({"0x0f01": macro("KEY_A", "KEY_B")})
+        self.tap(rig)
+        self.gate.playing()
+        for _ in range(5):
+            self.save(rig)
+            self.tap(rig)
+        self.assertEqual(rig.kb.executor.macros._queue.qsize(), 4)  # the fifth copy's press was turned away
+        self.change(rig)
+        self.assertEqual(self.gate.drained(), ["KEY_A"])
+
+    def test_a_key_held_when_it_changes_stops_every_macro_it_started(self):
+        rig = self.macro_rig({"0x0f01": macro("KEY_A", "KEY_B", repeat=True)})
+        self.tap(rig)
+        self.gate.playing()
+        for _ in range(4):
+            self.save(rig)
+            self.tap(rig)
+        self.save(rig)
+        rig.keys_down(1, self.kb, 0x0F01)  # turned away by the full queue, and held
+        self.assertEqual(rig.kb.executor.macros._queue.qsize(), 4)
+        self.change(rig)
+        rig.keys_down(1, self.kb)
+        self.assertEqual(self.gate.drained(), ["KEY_A"])
+        self.assertEqual(rig.input._holds.held(), set())
+
+    def test_default_in_an_app_stops_the_macros_started_across_apps_and_saves(self):
+        rig = self.macro_rig({"0x0f01": macro("KEY_A", "KEY_B")},
+                             [profile("editor", {"0x0f01": macro("KEY_A", "KEY_B")}), profile("game", {"0x0f01": NATIVE})])
+        front(rig, "editor")
+        self.tap(rig)
+        self.gate.playing()
+        self.save(rig)
+        self.tap(rig)
+        front(rig, "browser")
+        self.tap(rig)
+        self.save(rig)
+        self.tap(rig)
+        front(rig, "editor")
+        self.tap(rig)
+        self.save(rig)
+        self.tap(rig)  # turned away: the queue is full
+        self.assertEqual(rig.kb.executor.macros._queue.qsize(), 4)
+        front(rig, "game")
+        self.assertEqual(self.gate.drained(), ["KEY_A"])
+
+    def test_every_queued_press_of_a_changed_key_stops(self):
+        rig = self.macro_rig({"0x0f01": macro("KEY_A", "KEY_B")})
+        for _ in range(3):
+            self.tap(rig)
+        self.gate.playing()
+        self.change(rig)
+        self.assertEqual(self.gate.drained(), ["KEY_A"])
+
+    def test_a_key_left_alone_plays_every_press_when_another_key_changes(self):
+        rig = self.macro_rig({"0x0f01": macro("KEY_A", "KEY_B"), "0x0f02": CTRL})
+        self.tap(rig)
+        self.gate.playing()
+        for _ in range(5):
+            self.save(rig)
+            self.tap(rig)
+        self.change(rig, "0x0f02", PASTE)
+        self.assertEqual(self.gate.drained(), ["KEY_A", "KEY_B"] * 5)
+
+    def test_two_keys_given_one_action_object_stop_apart(self):
+        rig = self.macro_rig({"0x0f01": CTRL, "0x0f02": CTRL})
+        cfg = copy.deepcopy(rig.engine.cfg)
+        cfg["keyboard"]["keys"]["0x0f01"] = cfg["keyboard"]["keys"]["0x0f02"] = macro("KEY_A", "KEY_B")
+        self.apply(rig, cfg)  # one object for both, through the settings' deep copy too
+        self.tap(rig, 0x0F02)
+        self.gate.playing()
+        self.change(rig, "0x0f01", COPY)
+        self.assertEqual(self.gate.drained(), ["KEY_A", "KEY_B"])
+
+    def test_the_mouse_s_macro_plays_on_when_a_key_changes(self):
+        rig = self.macro_rig({"0x0f01": macro("KEY_A", "KEY_B")})
+        rig.engine.executor = actions.Executor(rig.input, rig.engine._device_action)
+        mouse = Gate(self, rig.engine.executor, held="KEY_M")
+        rig.engine.executor.press(macro("KEY_M", "KEY_N"))
+        mouse.playing()
+        self.tap(rig)
+        self.gate.playing()
+        self.save(rig)
+        self.tap(rig)
+        self.change(rig)
+        self.assertEqual(self.gate.drained(), ["KEY_A"])
+        self.assertEqual(mouse.drained(), ["KEY_M", "KEY_N"])
+
+    def test_equal_saves_keep_no_more_objects_and_a_returning_keyboard_still_stops_its_macro(self):
+        import gc
+        rig = self.macro_rig({"0x0f01": macro("KEY_F13")})
+        self.gate.open.set()
+
+        def count():
+            gc.collect()
+            return sum(1 for one in gc.get_objects() if type(one) is dict and one.get("type") == "macro"
+                       and one.get("steps", [{}])[0].get("keys") == ["KEY_F13"])
+        counts = []
+        for n in range(31):
+            self.change(rig, action=macro("KEY_F13") if n % 2 else macro("KEY_F13", repeat=True))
+            self.save(rig)
+            self.tap(rig)
+            self.gate.drained()
+            counts.append(count())
+        self.assertEqual(counts[-1], counts[1])
+        rig.link(1, False)  # the keyboard is gone: its macros reset, their sources dropped
+        self.assertIsNone(rig.kb.device)
+        rig.link(1, True)
+        rig.settle()
+        self.assertIsNotNone(rig.kb.device)
+        self.gate.open.clear()
+        self.gate.entered.clear()
+        self.gate.ran.clear()
+        self.change(rig, action=macro("KEY_A", "KEY_B"))
+        self.tap(rig)
+        self.gate.playing()
+        self.save(rig)
+        self.tap(rig)
+        self.change(rig)
+        self.assertEqual(self.gate.drained(), ["KEY_A"])
+
+    def test_shutting_down_stops_the_macros_and_their_thread(self):
+        rig = self.macro_rig({"0x0f01": macro("KEY_A", "KEY_B")})
+        self.tap(rig)
+        self.gate.playing()
+        self.save(rig)
+        self.tap(rig)
+        rig.kb.shutdown()  # reset, then closed: the runner ends and nothing plays after
+        self.gate.open.set()
+        thread = rig.kb.executor.macros._thread
+        thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(self.gate.ran, ["KEY_A"])
+
+    @unittest.skipIf(sys.platform == "win32", "the keyboard is asked which keys are down on Linux only")
+    def test_following_switched_off_while_keys_are_given_back_stops_only_the_changed_key_s_macro(self):
+        self.ioctls = bluetooth(self, dict(ZERO))
+        rig = FollowsMouse.make(self)  # the keyboard on a Bluetooth node of its own, following the mouse
+        cfg = copy.deepcopy(rig.engine.cfg)
+        cfg["keyboard"]["keys"].update({"0x0f01": macro("KEY_A", "KEY_B"), "0x0f02": macro("KEY_C", "KEY_D")})
+        self.apply(rig, cfg)
+        keys = Gate(self, rig.kb.executor)
+        rig.engine.executor = actions.Executor(rig.input, rig.engine._device_action)
+        mouse = Gate(self, rig.engine.executor, held="KEY_M")
+        rig.engine.executor.press(macro("KEY_M", "KEY_N"))
+        mouse.playing()
+        self.node_keys(rig, 0x0F01)
+        self.node_keys(rig)
+        keys.playing()
+        self.node_keys(rig, 0x0F02)
+        self.node_keys(rig)  # waits behind the first
+        event = threading.Event()
+        rig.engine.keyboard_follow(1, rig.kb.link, event)
+        rig.engine._handle(rig.engine._queue.get(timeout=2.0))  # Flow's request: the keys are given back first
+        self.assertTrue(rig.kb._following)
+        self.assertEqual(rig.kb._asked, (keyboard._set_reporting, 0x0F01, False))  # its answer not taken yet
+        new = copy.deepcopy(rig.engine.cfg)
+        new["flow"]["keyboard_follows_mouse"] = False
+        new["keyboard"]["keys"]["0x0f01"] = COPY
+        rig.engine._apply_config(copy.deepcopy(new))  # the save is taken before that answer
+        self.assertTrue(event.is_set())
+        self.assertFalse(rig.kb._following)
+        rig.settle()
+        self.assertEqual(keys.drained(), ["KEY_A", "KEY_C", "KEY_D"])
+        self.assertEqual(mouse.drained(), ["KEY_M", "KEY_N"])
+        self.assertEqual((self.kb.switched, self.ioctls.calls), ([], []))  # never sent anywhere
+        self.assertTrue(rig.key(0x0F01)["active"])
+
+
 if __name__ == "__main__":
     unittest.main()

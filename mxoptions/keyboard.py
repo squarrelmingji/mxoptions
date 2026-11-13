@@ -297,7 +297,7 @@ class KeyboardSide:
         self._stalled = False   # the keyboard stopped answering during this round of changes
         self._pressed = set()
         self._held = {}         # cid -> action being held
-        self._started = {}      # cid -> the last few macro actions a press of it started (see _remap)
+        self._actions = {}      # key name -> the action object its presses use (see _effective)
         self._front = None      # the app in front, whose profile counts (see effective_keys)
         self._battery = None
         self._hosts = (0, [])
@@ -395,7 +395,6 @@ class KeyboardSide:
         self._active.clear()
         self._pressed.clear()
         self._held.clear()
-        self._started.clear()
         self._battery, self._hosts, self._failed, self._leaving = battery, hosts, None, 0.0
         self._firmware, self._firmware_due = None, True
         self._controls, self._pending, self._outcomes, self._settings_at = {}, {}, {}, 0.0
@@ -458,9 +457,10 @@ class KeyboardSide:
         self._look()
 
     def config_changed(self, old_cfg, new_cfg):
-        if not new_cfg["flow"]["keyboard_follows_mouse"]:
+        old, new = self._effective(old_cfg), self._effective(new_cfg)  # first: calling a follow off settles the keys
+        if not new_cfg["flow"]["keyboard_follows_mouse"]:               # anew (_wanted), which reads them itself
             self.follow_cancel(None)
-        self._remap(effective_keys(old_cfg["keyboard"], self._front), effective_keys(new_cfg["keyboard"], self._front))
+        self._remap(old, new)
         was, now, read = old_cfg["keyboard"], new_cfg["keyboard"], False
         if (was.get("fn_notices") is True) != (now.get("fn_notices") is True):
             own, self._fn = self._fn.own, Reported()  # a record of its own: reads started before settle nothing in it
@@ -481,8 +481,14 @@ class KeyboardSide:
         log.debug("the app in front changed")  # which one never goes to the log
         self._remap(old, self._effective())
 
-    def _effective(self):
-        return effective_keys(self.engine.cfg["keyboard"], self._front)
+    def _effective(self, cfg=None):
+        """What the keys do (see effective_keys), by ``cfg`` or the settings in use. A key keeps the very object it
+        had while its action stays equal, however often the settings were copied: the macros its presses started
+        are that object's (Executor.cancel). A changed one gets a copy of its own."""
+        kept, self._actions = self._actions, {}
+        for name, action in effective_keys((cfg or self.engine.cfg)["keyboard"], self._front).items():
+            self._actions[name] = kept[name] if kept.get(name) == action else copy.deepcopy(action)
+        return self._actions
 
     def _remap(self, old, new):
         """The keys do ``new`` instead of ``old`` (see effective_keys). A key whose action changed lets go of what it
@@ -497,9 +503,8 @@ class KeyboardSide:
                     self.engine._ring_event(("keyboard", cid), "cancel")  # closes, running nothing
                 else:
                     self.executor.release(action)
-        for cid in [cid for cid in self._started if config.key_id(cid) in changed]:
-            for action in self._started.pop(cid):
-                self.executor.cancel(action)
+        for name in changed & old.keys():  # every macro its presses started: playing, queued or turned away
+            self.executor.cancel(old[name])
         if self._task is not None and self._task.__name__ == "_configure":  # brings the keys in line with the old
             wish = self._wish or "configure"                                # settings: called off, and started over
             self._stop_task()
@@ -1087,10 +1092,6 @@ class KeyboardSide:
                 if action.get("type") == "ring":
                     self.engine._ring_event(("keyboard", cid), "down")
                     continue
-                if action.get("type") == "macro":  # the same object each time, until the settings change
-                    started = self._started.setdefault(cid, [])
-                    if not any(one is action for one in started):
-                        started[:] = started[-4:] + [action]  # no more can be queued or playing (MacroRunner.run)
                 self.executor.press(action)
         for cid in sorted(self._pressed - pressed):
             action = self._held.pop(cid, None)
@@ -1393,7 +1394,6 @@ class KeyboardSide:
         self._active.clear()
         self._pressed.clear()
         self._held.clear()
-        self._started.clear()
         self._battery = self._firmware = None
         self._firmware_due = False
         self._controls, self._pending, self._outcomes, self._settings_at = {}, {}, {}, float("inf")
