@@ -245,8 +245,10 @@ class ActionList(QWidget):
 
     def set_hidden(self, ids):
         """Offer none of the presets ``ids``, a search finding them neither."""
-        self._hidden = frozenset(self._rows[preset] for preset in ids if preset in self._rows)
-        self._filter(self.search.text())
+        hidden = frozenset(self._rows[preset] for preset in ids if preset in self._rows)
+        if hidden != self._hidden:  # unchanged: what the list shows stays as its owner left it
+            self._hidden = hidden
+            self._filter(self.search.text())
 
     def _filter(self, text):
         needle = text.strip().lower()
