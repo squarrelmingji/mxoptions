@@ -4,7 +4,9 @@
 
 The fake app hangs at start (ignoring SIGTERM, with a child of its own), exits at once, or answers
 nothing. Each run must end in bounded time, leave no process of the fake app behind, and remove its
-private directory, also when the driver itself is stopped by SIGINT, SIGTERM or SIGHUP.
+private directory, also when the driver itself is stopped by SIGINT, SIGTERM or SIGHUP. A fake that
+answers on stdout while writing diagnostics on stderr, as Qt and PipeWire do, must be ready; one with
+a wrong answer on stdout, or the right answer but a failing status, must not.
 """
 import glob
 import os
@@ -22,15 +24,23 @@ case "$1" in
 --version) pwd >"$FAKE_DIR/cwd"; echo "MX Options 9.9.9" ;;
 --background)
 	[ "$FAKE_MODE" = exit ] && exit 1
+	echo "fake diagnostic: starting" >&2
+	[ -e "$FAKE_DIR/started" ] && exit 0  # a second start hands over
 	touch "$FAKE_DIR/started"
-	trap '' TERM
+	[ "$FAKE_MODE" = noisy ] || trap '' TERM
 	sleep "$FAKE_MARK" &
 	sleep "$FAKE_MARK"
 	;;
 --call)
 	[ -e "$FAKE_DIR/started" ] || exit 3
 	[ "$FAKE_MODE" = mute ] && exec sleep "$FAKE_MARK"
-	exit 3
+	case "$FAKE_MODE" in noisy | wrong | refuse) ;; *) exit 3 ;; esac
+	echo "fake diagnostic: $2" >&2
+	case "$2" in AppVersion) a=9.9.9 ;; ApiVersion) a=1 ;; Connected) a=false ;; *) exit 2 ;; esac
+	[ "$FAKE_MODE" = wrong ] && { echo "$a" >&2; a=0.0.0; }  # the right answer, but not on stdout
+	echo "$a"
+	[ "$FAKE_MODE" = refuse ] && exit 2
+	exit 0
 	;;
 *) exit 1 ;;
 esac
@@ -91,7 +101,7 @@ def run(mode, signum=None):
     return driver, took, left, text, folder
 
 
-def check(name, mode, signum, status, bound):
+def check(name, mode, signum, status, bound, says=()):
     driver, took, left, out, folder = run(mode, signum)
     rc = driver.returncode
     try:
@@ -119,6 +129,7 @@ def check(name, mode, signum, status, bound):
         problems.append(f"fake app still running: {orphans}")
     if left:
         problems.append(f"private directory left: {left}")
+    problems += [f"no {line!r} line" for line in says if line not in out.splitlines()]
     if cwd is not None and not cwd.startswith("/tmp/mxj."):  # the app must not run in the caller's directory
         problems.append(f"app ran in {cwd}")
     print(("PASS " if not problems else "FAIL ") + f"{name} ({took:.1f} s)" + "".join("; " + p for p in problems))
@@ -139,6 +150,9 @@ def main():
         check("SIGINT during start", "hang", signal.SIGINT, 130, 6),
         check("SIGTERM during start", "hang", signal.SIGTERM, 143, 6),
         check("SIGHUP during start", "hang", signal.SIGHUP, 129, 6),
+        check("stderr diagnostics leave answers exact", "noisy", None, 1, 6, ("PASS J2", "PASS J5")),
+        check("wrong answer on stdout fails", "wrong", None, 1, 8, ("FAIL J2: no answer within 3 s",)),
+        check("failing call status fails", "refuse", None, 1, 8, ("FAIL J2: no answer within 3 s",)),
     ]
     print(f"journeys driver failure checks: {sum(results)} of {len(results)} passed")
     return 0 if all(results) else 1

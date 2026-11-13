@@ -56,7 +56,11 @@ echo "driver $DRIVER @ $(git -C "$DRIVER" rev-parse HEAD 2>/dev/null || echo not
 fails=0
 pass() { echo "PASS $1"; }
 fail() { echo "FAIL $1: $2"; fails=$((fails + 1)); }
-ask() { t=$1; shift; timeout -k 1 "$t" $MX --call "$@" 2>&1; }  # exit 124 when it hangs
+ask() {  # the answer on stdout, only when the call succeeds; exit 124 when it hangs
+	t=$1; shift  # its diagnostics (Qt, PipeWire, "not running") stay on stderr, out of the comparisons
+	r=$(timeout -k 1 "$t" $MX --call "$@") || return
+	printf '%s\n' "$r"
+}
 call() { ask 5 "$@"; }
 start() {  # 0 once it answers; else it is killed and collected before 1 comes back
 	setsid $MX --background >>"$T/app.log" 2>&1 &
