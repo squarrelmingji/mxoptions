@@ -510,11 +510,22 @@ class RingPage(QWidget):
         if kind == now:
             return
         if now == "folder" and current["children"]:
+            def shown():  # whose ring the page shows, a copy of it, whether it is edited here, the bubble chosen in it
+                profile = chosen_profile(self.store)
+                root, editable = self._root()
+                return ((None if profile is None else profile["app"]), copy.deepcopy(root), editable,
+                        self._valid_path(root), self._index)
+
+            before = shown()
             answer = QMessageBox.question(
                 self, APP_NAME, _("Stop this bubble being a folder? The {} bubbles inside it will be removed.").format(len(current["children"]))
             )
             if answer != QMessageBox.StandardButton.Yes:
                 self._refresh()
+                return
+            if shown() != before:  # changed while it asked: not the bubble the user said yes to
+                QMessageBox.information(self, APP_NAME, _(
+                    "Settings changed while this dialog was open. Choose the bubble type again."))
                 return
 
         def change(level, _root):

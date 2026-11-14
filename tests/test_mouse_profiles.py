@@ -1220,6 +1220,125 @@ class Pages(unittest.TestCase):
                         page.deleteLater()
                         APP.sendPostedEvents(page, QEvent.Type.DeferredDelete)
 
+    def test_a_folder_stops_being_one_only_where_it_was_asked(self):
+        """Yes to "Stop this bubble being a folder?" changes that bubble, in the ring the page showed when it asked,
+        and nothing else, in one push. If whose ring that is, the ring itself, whether it is edited here or which
+        bubble is chosen in it changed meanwhile, nothing changes and the page says so. A change elsewhere or an
+        equal copy of the settings does not stop it."""
+        from PySide6.QtCore import QEvent
+        from PySide6.QtWidgets import QPushButton
+
+        message = "Settings changed while this dialog was open. Choose the bubble type again."
+        inner = {"label": "n", "icon": "", "color": "", "children": [bubble("n1"), bubble("n2")]}
+        nest = [{"label": "f", "icon": "", "color": "", "children": [inner, bubble("c2")]}, bubble("a2")]
+        shared = [bubble("g1"), bubble("g2")]
+        cases = {  # case: (ring for all apps equal to Kate's, folder 0 opened first, kind chosen, how it ends)
+            "removed": (False, False, "Action", "stale"), "removed_dial": (False, False, "Dial", "stale"),
+            "removed_equal": (True, False, "Action", "stale"), "other_app": (False, False, "Action", "stale"),
+            "all_apps": (False, False, "Action", "stale"), "inheriting_app": (False, False, "Action", "stale"),
+            "inherits_equal": (True, False, "Action", "stale"), "recreated": (False, False, "Action", "stale"),
+            "edited_inside": (False, False, "Action", "stale"), "edited_beside": (False, False, "Action", "stale"),
+            "reordered": (False, False, "Action", "stale"), "replaced_without": (False, False, "Action", "stale"),
+            "went_up": (False, True, "Action", "stale"), "other_bubble": (False, False, "Action", "stale"),
+            "unchanged": (False, False, "Action", "applied"), "dial": (False, False, "Dial", "applied"),
+            "nested": (False, True, "Action", "applied"), "unrelated_in_place": (False, False, "Action", "applied"),
+            "unrelated_api": (False, False, "Action", "applied"), "equal_replacement": (False, True, "Action", "applied"),
+            "seeded": (False, False, "Action", "applied"), "recreated_equal": (False, False, "Action", "applied"),
+            "no": (False, False, "Action", "kept"), "no_removed": (False, False, "Action", "kept"),
+        }
+
+        def change(case, store, page):
+            choose = page.apps.apps
+            if case in ("removed", "removed_dial", "removed_equal", "no_removed"):
+                store.remove_mouse_profile(KATE)
+            elif case in ("other_app", "all_apps", "inheriting_app"):  # as the user picks
+                choose.setCurrentIndex(choose.findData({"other_app": KONSOLE, "all_apps": None}.get(case, KWRITE)))
+            elif case in ("recreated", "recreated_equal"):
+                store.remove_mouse_profile(KATE)
+                self.assertTrue(store.add_mouse_profile(KATE))
+                self.assertTrue(store.set_profile_ring(KATE, copy.deepcopy(shared if case == "recreated" else nest)))
+                choose.setCurrentIndex(choose.findData(KATE))
+            elif case == "went_up":
+                page.up.click()
+            elif case == "other_bubble":
+                page.preview.bubble_clicked.emit(1)  # what a click on the second bubble sends
+            elif case == "replaced_without":
+                kept = [entry for entry in copy.deepcopy(store.cfg["mouse"]["profiles"]) if entry["app"] != KATE]
+                self.assertTrue(store.set_path("mouse.profiles", kept))
+            elif case in ("inherits_equal", "edited_inside", "edited_beside", "reordered"):  # as another program would
+                own = f"mouse.profiles.{[entry['app'] for entry in store.cfg['mouse']['profiles']].index(KATE)}.ring"
+                path, value = {"inherits_equal": (own, None), "edited_inside": (own + ".0.children.1.label", "edited"),
+                               "edited_beside": (own + ".1.label", "edited"),
+                               "reordered": (own, copy.deepcopy(config.mouse_profile_of(store.cfg, KATE)["ring"])[::-1])}[case]
+                self.assertTrue(store.set_path(path, value))
+            elif case == "unrelated_in_place":
+                store.set("haptics", "battery_saving", False)
+            elif case == "unrelated_api":
+                self.assertTrue(store.set_path("haptics.battery_saving", False))
+            elif case == "equal_replacement":
+                store.replace(copy.deepcopy(store.cfg))
+            elif case == "seeded":  # what the engine sends back after reading the mouse
+                seeded = copy.deepcopy(store.cfg)
+                seeded["pointer"]["dpi"] = 1600
+                store.replace(seeded, push=False)
+
+        for case, (equal, nested, kind, outcome) in cases.items():
+            with self.subTest(case=case):
+                store = Store(copy.deepcopy(config.DEFAULTS), _Told())
+                store.flush = lambda: None
+                store._save_timer.timeout.disconnect()
+                store.front = FakeFront()
+                store.set("ring", "bubbles", copy.deepcopy(nest if equal else shared))
+                for app, own in ((KATE, nest), (KONSOLE, RING_B), (KWRITE, None)):
+                    self.assertTrue(store.add_mouse_profile(app))
+                    if own is not None:
+                        self.assertTrue(store.set_profile_ring(app, copy.deepcopy(own)))
+                store.set_mouse_app(KATE)
+                page = ring_page.RingPage(store)  # owned by this case: gone before the next one
+                page.resize(1100, 700)
+                page.show()
+                try:
+                    if nested:
+                        page.preview.bubble_opened.emit(0)  # what a double click on the folder sends
+                    during = {"asked": 0}
+
+                    def answer(_parent, _title, _text):
+                        during["asked"] += 1
+                        change(case, store, page)
+                        during.update(settings=copy.deepcopy(store.cfg), pushes=len(store.engine.configs),
+                                      selection=store.mouse_app)
+                        no = case.startswith("no")
+                        return QMessageBox.StandardButton.No if no else QMessageBox.StandardButton.Yes
+
+                    button = next(b for b in page.editor.kind.findChildren(QPushButton) if b.text() == kind)
+                    with mock.patch.object(ring_page.QMessageBox, "question", answer), \
+                            mock.patch.object(ring_page.QMessageBox, "information") as information:
+                        button.click()
+                    self.assertEqual(during["asked"], 1)  # it asked, once
+                    self.assertEqual(store.mouse_app, during["selection"])  # the choice is never changed here
+                    if outcome == "applied":
+                        expected = copy.deepcopy(during["settings"])
+                        level = config.mouse_profile_of(expected, KATE)["ring"]
+                        level = level[0]["children"] if nested else level
+                        made = {"scroll": next(iter(actions.SCROLLS))} if kind == "Dial" else {"action": {"type": "none"}}
+                        level[0] = {"label": level[0]["label"], "icon": "", "color": "", **made}
+                        self.assertEqual(store.cfg, expected)  # that bubble only: the other bubbles, rings and the rest kept
+                        self.assertEqual(len(store.engine.configs), during["pushes"] + 1)
+                        self.assertEqual(store.engine.configs[-1], store.cfg)
+                        information.assert_not_called()
+                    else:
+                        self.assertEqual(store.cfg, during["settings"])
+                        self.assertEqual(len(store.engine.configs), during["pushes"])
+                        if outcome == "stale":
+                            information.assert_called_once_with(page, ring_page.APP_NAME, message)
+                        else:
+                            information.assert_not_called()
+                finally:
+                    store._save_timer.stop()
+                    page.hide()
+                    page.deleteLater()
+                    APP.sendPostedEvents(page, QEvent.Type.DeferredDelete)
+
     def test_both_pages_show_the_same_app_and_go_back_when_it_goes(self):
         store = self.make_store()
         store.add_mouse_profile(KATE)
