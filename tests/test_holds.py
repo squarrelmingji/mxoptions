@@ -1249,6 +1249,27 @@ class WaitingSetting(Failing):
         self.assertFalse(test_kbsettings.fn(rig)["busy"])
         self.assertEqual((emit.active, rig.input._holds.held()), (set(), set()))
 
+    def test_a_waiting_setting_queue_failure_preserves_the_first_error(self):
+        for input_failed in (False, True):
+            with self.subTest(input_failed=input_failed):
+                dev = test_kbsettings.fn_keyboard()
+                rig = test_keyboard.Rig(self, {1: dev, 2: test_keyboard.mouse_device()},
+                                        keys={"0x0f01": test_keyboard.COPY}).start()
+                emit = rig.input._holds._emit = Refusing()
+                rig.keys_down(1, dev, 0x0F01)
+                rig.kb.set_setting("fn", True)
+                rig.settle()
+                self.assertEqual(dev.setting_writes, [])
+                self.assertTrue(test_kbsettings.fn(rig)["busy"])
+                if input_failed:
+                    emit.trips[(C, False)] = OSError
+                fault = MemoryError("synthetic queue allocation failure")
+                with mock.patch.object(rig.kb._jobs, "put", side_effect=fault) as put:
+                    error = self.fails(rig.keys_down, 1, dev, error=Exception)
+                    self.assertEqual(put.call_count, 1)
+                self.assertIs(error, emit.raised[0] if input_failed else fault)
+                self.assertEqual((emit.active, rig.input._holds.held()), (set(), set()))
+
 
 if __name__ == "__main__":
     unittest.main()
