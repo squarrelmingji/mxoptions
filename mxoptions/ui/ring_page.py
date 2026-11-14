@@ -454,10 +454,21 @@ class RingPage(QWidget):
                 remove.addAction(entry["name"], lambda n=entry["name"]: self._delete_preset(n))
 
     def _apply_preset(self, name, builder):
+        def shown():  # whose ring the page shows, a copy of it, and whether it is edited here
+            profile = chosen_profile(self.store)
+            root, editable = self._root()
+            return (None if profile is None else profile["app"]), copy.deepcopy(root), editable
+
+        before = shown()
         answer = QMessageBox.question(
             self, APP_NAME, _("Replace the whole ring with the \"{}\" preset? Your current bubbles will be lost.").format(name)
         )
-        if answer == QMessageBox.StandardButton.Yes and self._root()[1]:
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        if shown() != before:  # changed while it asked: not the ring the user said yes to
+            QMessageBox.information(self, APP_NAME, _(
+                "Settings changed while this dialog was open. Choose the preset again."))
+        elif before[2]:
             self._path, self._index = [], 0
             self._store_root(builder())
             self._refresh()

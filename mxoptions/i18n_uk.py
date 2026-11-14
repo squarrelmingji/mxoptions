@@ -1111,4 +1111,6 @@ STRINGS = {
         "Усе інше лишається як є. Щоб скасувати щось із цього, виберіть для нього «Як в усіх програмах».",
     "Settings changed while this dialog was open. Choose Suggested settings again.":
         "Налаштування змінилися, поки це вікно було відкрито. Знову виберіть «Запропоновані налаштування».",
+    "Settings changed while this dialog was open. Choose the preset again.":
+        "Налаштування змінилися, поки це вікно було відкрито. Знову виберіть пресет.",
 }
