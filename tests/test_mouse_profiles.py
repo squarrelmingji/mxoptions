@@ -2086,3 +2086,53 @@ class SuggestedSettings(unittest.TestCase):
                     self.assertEqual(len(store.engine.configs), during["pushes"])
                     information.assert_called_once_with(chooser, pages.APP_NAME, message)
                 store._save_timer.stop()
+
+    def test_app_controls_fit_inside_settings_window(self):
+        from PySide6.QtCore import QEvent
+        from mxoptions import i18n
+        from mxoptions.ui import theme
+        from mxoptions.ui.main_window import MainWindow
+
+        old_style, old_sheet, old_palette = APP.style().objectName(), APP.styleSheet(), APP.palette()
+        self.addCleanup(i18n.setup, "en")
+        try:
+            APP.setStyle("Fusion")
+            theme.apply(APP)
+            for language in ("en", "uk"):
+                i18n.setup(language)
+                store = self.make_store()
+                self.assertTrue(store.add_mouse_profile(KATE))
+                with mock.patch.object(pages.FirmwareQuery, "start"):
+                    window = MainWindow(store, hide_on_close=False)
+                    try:
+                        window.show()
+                        for width in (1180, 1200, 1280):
+                            with self.subTest(language=language, width=width):
+                                window.resize(width, 780)
+                                store.set_mouse_app(None)
+                                for _ in range(8):
+                                    APP.processEvents()
+                                expected_width = window.width()
+                                store.set_mouse_app(KATE)
+                                for _ in range(8):
+                                    APP.processEvents()
+                                self.assertEqual(window.width(), expected_width)
+                                chooser = window.buttons_page.apps
+                                controls = (chooser.apps, chooser.add_app, chooser.remove_app, chooser.suggest)
+                                for control in controls:
+                                    self.assertTrue(chooser.rect().contains(control.geometry()), control.objectName())
+                                for button in controls[1:]:
+                                    self.assertGreaterEqual(button.width(), button.sizeHint().width(), button.text())
+                                for index, control in enumerate(controls):
+                                    for other in controls[index + 1:]:
+                                        self.assertFalse(control.geometry().intersects(other.geometry()))
+                                self.assertIs(chooser.remove_app.nextInFocusChain(), chooser.suggest)
+                    finally:
+                        store._save_timer.stop()
+                        window.hide()
+                        window.deleteLater()
+                        APP.sendPostedEvents(window, QEvent.Type.DeferredDelete)
+        finally:
+            APP.setStyle(old_style)
+            APP.setStyleSheet(old_sheet)
+            APP.setPalette(old_palette)

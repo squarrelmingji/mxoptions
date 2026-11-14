@@ -117,18 +117,23 @@ class AppChooser(QWidget):
         line.addWidget(self.apps, 1)
         line.addWidget(self.add_app)
         line.addWidget(self.remove_app)
+        outer.addLayout(line)
+        self.hint = hint_label("")
         self.suggest = None
-        if suggest:
-            self.suggest = QPushButton(_("Suggested settings"))  # Qt adds the drop-down arrow itself
+        if suggest:  # beside the hint, as the line above is full in some languages
+            self.suggest = QPushButton(_("Suggested settings"), self)  # parent first: Tab after Remove; Qt adds the arrow
             self.suggest.setCursor(Qt.CursorShape.PointingHandCursor)
             menu = QMenu(self.suggest)
             for preset, (name, _buttons, _function) in config.APP_PRESETS.items():
                 menu.addAction(_(name), lambda p=preset: self._suggest(p))
             self.suggest.setMenu(menu)
-            line.addWidget(self.suggest)
-        outer.addLayout(line)
-        self.hint = hint_label("")
-        outer.addWidget(self.hint)
+            below = QHBoxLayout()
+            below.setSpacing(8)
+            below.addWidget(self.hint, 1)
+            below.addWidget(self.suggest, 0, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
+            outer.addLayout(below)
+        else:
+            outer.addWidget(self.hint)
         self.apps.currentIndexChanged.connect(self._chosen)
         self.add_app.clicked.connect(self._add)
         self.remove_app.clicked.connect(self._remove)
