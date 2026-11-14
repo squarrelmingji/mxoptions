@@ -1092,4 +1092,19 @@ STRINGS = {
         "доки ви не відпустите кнопку. Це не жива лупа.",
     "Not available on Wayland desktops.": "Недоступно на стільницях Wayland.",
     "Not available on this desktop.": "Недоступно на цій стільниці.",
+    # Suggested settings for one app
+    "Suggested settings": "Запропоновані налаштування",
+    "Web browser": "Веббраузер",
+    "Spreadsheet": "Електронна таблиця",
+    "Documents and slides": "Документи й слайди",
+    "Apply the suggested settings \"{preset}\" to {app}?": "Застосувати запропоновані налаштування «{preset}» до {app}?",
+    "{control}: stays as set for this app ({value})": "{control}: лишається, як задано для цієї програми ({value})",
+    "Logi Options+ also pans while the middle button is held here. Gestures are set for all apps only, so the "
+    "middle button stays as it is.":
+        "Logi Options+ тут ще й прокручує сторінку, поки утримано середню кнопку. Жести задаються лише для всіх "
+        "програм, тож середня кнопка лишається як є.",
+    "Everything else stays as it is. To undo one of these, choose \"As in all apps\" for it.":
+        "Усе інше лишається як є. Щоб скасувати щось із цього, виберіть для нього «Як в усіх програмах».",
+    "Settings changed while this dialog was open. Choose Suggested settings again.":
+        "Налаштування змінилися, поки це вікно було відкрито. Знову виберіть «Запропоновані налаштування».",
 }

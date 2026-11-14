@@ -590,6 +590,16 @@ only files you trust.
   with neither layer-shell nor XWayland, there are no effects at all. No ring opens while a
   Spotlight button is held. None of this was tried on a desktop yet: tests with made-up screens and
   pictures cover it.
+- **Suggested settings for an app are a first part.** On the Buttons page, an app you added can take
+  one of three sets after Logi Options+: *Web browser* (middle, back and forward buttons as the
+  mouse has them, thumb wheel switches tabs), *Spreadsheet* (back Ctrl+Z, forward Ctrl+Y, thumb
+  wheel scrolls sideways) and *Documents and slides* (the same buttons, thumb wheel zooms). A set
+  only changes what the app does as in all apps; a button or function it has of its own stays, and
+  the dialog lists both before you apply. Logi Options+ also makes the middle button pan in the
+  spreadsheet and document apps: gestures are for all apps only here, so that is left out, as are
+  its sets for Photoshop, Premiere Pro, Final Cut Pro, Zoom and Teams and its rings for single apps.
+  Nothing is matched by the app's name. Ctrl+Z and Ctrl+Y are key positions: on a layout where Z
+  and Y trade places (German, for one) they trade places too.
 - **The haptic panel does not answer while a main button is held.** With the left button down the
   mouse reports nothing for the panel, however hard it is pressed; the gesture button is reported
   all the same. So gestures made while a window is being dragged want the gesture button, not the

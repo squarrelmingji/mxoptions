@@ -8,8 +8,8 @@ import time
 from PySide6.QtCore import QObject, QStandardPaths, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
-    QApplication, QColorDialog, QComboBox, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QMessageBox, QPushButton, QScrollArea,
-    QVBoxLayout, QWidget,
+    QApplication, QColorDialog, QComboBox, QFileDialog, QGridLayout, QHBoxLayout, QLabel, QMenu, QMessageBox, QPushButton,
+    QScrollArea, QVBoxLayout, QWidget,
 )
 
 from .. import APP_NAME, __version__, actions, api, config, desktop, device, firmware
@@ -94,7 +94,8 @@ class ScrollPage(QWidget):
 class AppChooser(QWidget):
     """Whose mouse settings a page shows: all apps, or one app's (store.mouse_app), with adding and removing."""
 
-    def __init__(self, store, label, parent=None):
+    def __init__(self, store, label, parent=None, suggest=False):
+        """``suggest``: offer the suggested settings (config.APP_PRESETS) while an app is chosen."""
         super().__init__(parent)
         self.store = store
         self.when_chosen = lambda app: ""  # the hint while ``app`` is chosen; the page says what it means there
@@ -116,6 +117,15 @@ class AppChooser(QWidget):
         line.addWidget(self.apps, 1)
         line.addWidget(self.add_app)
         line.addWidget(self.remove_app)
+        self.suggest = None
+        if suggest:
+            self.suggest = QPushButton(_("Suggested settings"))  # Qt adds the drop-down arrow itself
+            self.suggest.setCursor(Qt.CursorShape.PointingHandCursor)
+            menu = QMenu(self.suggest)
+            for preset, (name, _buttons, _function) in config.APP_PRESETS.items():
+                menu.addAction(_(name), lambda p=preset: self._suggest(p))
+            self.suggest.setMenu(menu)
+            line.addWidget(self.suggest)
         outer.addLayout(line)
         self.hint = hint_label("")
         outer.addWidget(self.hint)
@@ -161,6 +171,8 @@ class AppChooser(QWidget):
         self.add_app.setEnabled(bool(supported and last and self.store.mouse_profile(last) is None
                                      and len(profiles) < config.MAX_PROFILES))
         self.remove_app.setEnabled(app is not None)
+        if self.suggest is not None:
+            self.suggest.setVisible(app is not None)
         if not supported:
             text = _("This desktop does not tell which app is in front, so settings for one app cannot work here.")
         elif app is not None:
@@ -190,6 +202,39 @@ class AppChooser(QWidget):
         if answer == QMessageBox.StandardButton.Yes:
             self.store.remove_mouse_profile(profile["app"])
 
+    def _suggest(self, preset):
+        """Say what the suggested settings ``preset`` change for the app chosen now, and give them to it on Yes:
+        that app, whichever is chosen by then. The choice itself is never changed here."""
+        app = self.store.mouse_app
+        profile = self.store.mouse_profile(app)
+        if profile is None:
+            return
+        name, buttons, function = config.APP_PRESETS[preset]
+        setting, thumb = config.preset_changes(self.store.cfg, app, preset)
+        stays = _("{control}: stays as set for this app ({value})")
+        lines = [_("Apply the suggested settings \"{preset}\" to {app}?").format(preset=_(name),
+                                                                               app=profile["name"] or app), ""]
+        for key, action in buttons.items():
+            title = _(BUTTON_TITLES[key])
+            lines.append(f"{title}: {actions.describe(action)}" if key in setting else
+                         stays.format(control=title, value=actions.describe(profile["buttons"][key])))
+        own = config.app_thumb_function(self.store.cfg, app)
+        lines.append(f"{_('Thumb wheel')}: {_(THUMB_LABELS[function])}" if thumb is not None else
+                     stays.format(control=_("Thumb wheel"), value=_(THUMB_LABELS[own])))
+        if "middle" not in buttons:
+            lines += ["", _("Logi Options+ also pans while the middle button is held here. Gestures are set for all "
+                            "apps only, so the middle button stays as it is.")]
+        lines += ["", _("Everything else stays as it is. To undo one of these, choose \"As in all apps\" for it.")]
+        if QMessageBox.question(self, APP_NAME, "\n".join(lines)) == QMessageBox.StandardButton.Yes:
+            current = self.store.mouse_profile(app)
+            if current is None:
+                return
+            if current is not profile or config.preset_changes(self.store.cfg, app, preset) != (setting, thumb):
+                QMessageBox.information(self, APP_NAME, _(
+                    "Settings changed while this dialog was open. Choose Suggested settings again."))
+                return
+            self.store.apply_mouse_preset(app, preset)
+
 
 def chosen_profile(store):
     """The mouse profile the pages show (store.mouse_app), or None: the settings for all apps."""
@@ -209,7 +254,7 @@ class ButtonsPage(QWidget):
         left.setContentsMargins(34, 28, 24, 20)
         left.setSpacing(8)
         left.addLayout(_header(_("Buttons"), _("Pick a button to choose what it does.")))
-        self.apps = AppChooser(store, _("Settings for"))
+        self.apps = AppChooser(store, _("Settings for"), suggest=True)
         self.apps.when_chosen = lambda app: _(
             "While {} is in front. \"As in all apps\": as set for all apps. \"Default\": the button's own function, "
             "even where all apps change it.").format(app)

@@ -1843,3 +1843,246 @@ class PressAgainButtons(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _Told(_Engine):
+    """Stands in for the engine behind a Store and keeps every copy of the settings it is given."""
+
+    def __init__(self):
+        self.configs = []
+
+    def set_config(self, cfg):
+        self.configs.append(copy.deepcopy(cfg))
+
+
+class SuggestedSettings(unittest.TestCase):
+    """Suggested settings for one app (config.APP_PRESETS): what they hold, what giving them to an app changes in
+    the Store and then in the engine, and the Buttons page that offers them."""
+
+    UNDO, REDO = actions.keys("LEFTCTRL", "Z"), actions.keys("LEFTCTRL", "Y")
+
+    def make_store(self, supported=True):
+        store = Store(copy.deepcopy(config.DEFAULTS), _Told())
+        store.flush = lambda: None
+        store._save_timer.timeout.disconnect()
+        store.front = FakeFront(supported)
+        return store
+
+    def page(self, store):
+        page = pages.ButtonsPage(store)
+        self.addCleanup(page.deleteLater)
+        page.resize(1100, 700)
+        page.show()
+        return page
+
+    def test_what_each_set_holds(self):
+        from mxoptions import i18n_uk
+        self.assertEqual(config.APP_PRESETS, {
+            "browser": ("Web browser", {"middle": NATIVE, "back": NATIVE, "forward": NATIVE}, "tabs"),
+            "spreadsheet": ("Spreadsheet", {"back": self.UNDO, "forward": self.REDO}, "hscroll"),
+            "documents": ("Documents and slides", {"back": self.UNDO, "forward": self.REDO}, "zoom"),
+        })
+        for preset, (label, buttons, function) in config.APP_PRESETS.items():
+            with self.subTest(preset=preset):
+                self.assertIn(label, i18n_uk.STRINGS)
+                self.assertLessEqual(set(buttons), {"middle", "back", "forward"})  # gesture, wheel mode, panel: never
+                self.assertTrue(all(map(config.profile_button_action, buttons.values())))
+                self.assertIn(function, config.THUMB_FUNCTIONS)
+                self.assertNotEqual(function, "keys")
+        self.assertIs(actions.find_preset(self.UNDO), actions.PRESET_BY_ID["undo"])  # shown as the catalogue's Undo
+
+    def test_only_what_an_app_does_as_in_all_apps_changes(self):
+        store = self.make_store()
+        mine = macro("KEY_F5", name="mine")
+        store.cfg["buttons"]["middle"] = PASTE
+        store.cfg["mouse"]["profiles"] = [profile(KATE, RING_A, back=mine), profile(KONSOLE, forward=COPY)]
+        store.cfg["mouse"]["thumbwheel"] = [own(KONSOLE, "volume")]
+        store.cfg["mouse"]["thumbwheel_keys"] = [{"app": KATE, "up": ["KEY_F1"], "down": []}]
+        before = copy.deepcopy(store.cfg)
+        self.assertEqual(config.preset_changes(store.cfg, KATE, "spreadsheet"), ({"forward": self.REDO}, "hscroll"))
+        self.assertTrue(store.apply_mouse_preset(KATE, "spreadsheet"))
+        expected = copy.deepcopy(before)
+        expected["mouse"]["profiles"][0]["buttons"]["forward"] = self.REDO
+        expected["mouse"]["thumbwheel"].append(own(KATE, "hscroll"))
+        self.assertEqual(store.cfg, expected)  # its macro, ring and keystrokes, other apps, all apps: as they were
+        self.assertEqual(store.engine.configs, [expected])  # in one go
+        self.assertEqual(config.thumbwheel(store.cfg, KATE)["up"], ["KEY_F1"])
+        self.assertTrue(store.apply_mouse_preset(KONSOLE, "browser"))
+        self.assertEqual(store.mouse_profile(KONSOLE)["buttons"], {"forward": COPY, "middle": NATIVE, "back": NATIVE})
+        self.assertEqual(config.app_thumb_function(store.cfg, KONSOLE), "volume")
+        self.assertEqual(store.engine.configs[1:], [store.cfg])  # buttons alone: told too
+        told = len(store.engine.configs)
+        self.assertEqual(config.preset_changes(store.cfg, KATE, "documents"), ({}, None))  # all its own by now
+        self.assertTrue(store.apply_mouse_preset(KATE, "documents"))
+        self.assertFalse(store.apply_mouse_preset(KWRITE, "browser"))  # no profile
+        self.assertEqual(config.preset_changes(store.cfg, KWRITE, "browser"), ({}, None))
+        self.assertEqual(len(store.engine.configs), told)
+        self.assertNotIn(KWRITE, json.dumps(store.cfg))
+        self.assertEqual(store.mouse_profile(KATE)["buttons"], {"back": mine, "forward": self.REDO})
+        self.assertEqual(config.clean(copy.deepcopy(store.cfg)), store.cfg)  # kept as they are when loaded
+
+    def test_each_app_gets_copies_of_its_own(self):
+        store = self.make_store()
+        store.cfg["mouse"]["profiles"] = [profile(KATE), profile(KONSOLE)]
+        for app in (KATE, KONSOLE):
+            store.apply_mouse_preset(app, "spreadsheet")
+        store.mouse_profile(KATE)["buttons"]["forward"]["keys"].append("KEY_F1")
+        store.mouse_profile(KATE)["buttons"]["back"]["keys"].append("KEY_F2")
+        self.assertEqual(store.mouse_profile(KONSOLE)["buttons"], {"back": self.UNDO, "forward": self.REDO})
+        self.assertEqual(config.APP_PRESETS["spreadsheet"][1], {"back": self.UNDO, "forward": self.REDO})
+
+    def test_kept_exported_imported_and_restored_as_any_profile(self):
+        store = self.make_store()
+        store.cfg["mouse"]["profiles"] = [profile(KATE)]
+        store.apply_mouse_preset(KATE, "documents")
+        current = copy.deepcopy(store.cfg)
+        self.assertEqual(config.import_data(config.export_data(store.cfg), current)["mouse"], store.cfg["mouse"])
+        store.remove_mouse_profile(KATE)
+        self.assertEqual(store.cfg["mouse"], config.DEFAULTS["mouse"])  # its function goes with it
+        store.add_mouse_profile(KATE)
+        self.assertEqual(config.preset_changes(store.cfg, KATE, "documents"),
+                         ({"back": self.UNDO, "forward": self.REDO}, "zoom"))  # added again: nothing of before
+        store.apply_mouse_preset(KATE, "documents")
+        store.restore_defaults()
+        self.assertEqual(store.cfg["mouse"], config.DEFAULTS["mouse"])
+
+    def test_the_engine_does_what_the_set_says_in_that_app_only(self):
+        store = self.make_store()
+        store.cfg["mouse"]["profiles"] = [profile(KATE, RING_A)]
+        made = make(self, cfg=copy.deepcopy(store.cfg), real=False)
+        front(made, KATE)
+        made._button_down(PANEL)  # its ring opens and stays open
+        rings = (made._ring_session, made._ring_floor, list(made.listener.rings))
+        store.apply_mouse_preset(KATE, "spreadsheet")
+        set_config(made, store.engine.configs[-1])
+        self.assertEqual((made._ring_session, made._ring_floor, made.listener.rings), rings)  # same ring
+        made.ring_action(PICK_A, made._ring_session)
+        drain(made)
+        made._button_up(PANEL)
+        made._button_down(BACK)
+        made._button_up(BACK)
+        self.assertEqual(made.executor.ran, [PICK_A, self.UNDO])
+        front(made, KONSOLE)
+        made._button_down(BACK)  # all apps: the mouse's own back button, nothing run
+        made._button_up(BACK)
+        self.assertEqual(made.executor.ran, [PICK_A, self.UNDO])
+        self.assertEqual(config.thumbwheel(made.cfg, KATE)["function"], "hscroll")
+
+    def test_the_buttons_page_offers_them_for_the_app_chosen(self):
+        store = self.make_store()
+        store.cfg["buttons"]["back"] = COPY
+        store.cfg["mouse"]["profiles"] = [profile(KATE, forward=PASTE)]
+        page = self.page(store)
+        chooser = page.apps
+        self.assertTrue(chooser.suggest.isHidden())  # all apps: as before
+        store.set_mouse_app(KATE)
+        self.assertTrue(chooser.suggest.isVisible())
+        menu = chooser.suggest.menu()
+        self.assertEqual([action.text() for action in menu.actions()], ["Web browser", "Spreadsheet", "Documents and slides"])
+        asked = []
+
+        def answer(reply, change=lambda: None):
+            def question(_parent, _title, text):
+                asked.append(text)
+                change()
+                return reply
+            return question
+
+        before = copy.deepcopy(store.cfg)
+        with mock.patch.object(pages.QMessageBox, "question", answer(QMessageBox.StandardButton.No)):
+            menu.actions()[1].trigger()
+        self.assertEqual(store.cfg, before)
+        self.assertEqual(asked[-1].split("\n"), [
+            'Apply the suggested settings "Spreadsheet" to kate?', "",
+            "Back button: Undo", "Forward button: stays as set for this app (Paste)", "Thumb wheel: Horizontal scroll", "",
+            "Logi Options+ also pans while the middle button is held here. Gestures are set for all apps only, so the "
+            "middle button stays as it is.", "",
+            'Everything else stays as it is. To undo one of these, choose "As in all apps" for it.'])
+        with mock.patch.object(pages.QMessageBox, "question",
+                               answer(QMessageBox.StandardButton.Yes, lambda: chooser.apps.setCurrentIndex(0))):
+            menu.actions()[1].trigger()  # all apps chosen while it asks: still the app it asked about
+        self.assertIsNone(store.mouse_app)
+        self.assertEqual(store.mouse_profile(KATE)["buttons"], {"back": self.UNDO, "forward": PASTE})
+        self.assertEqual(store.cfg["buttons"]["back"], COPY)
+        self.assertTrue(chooser.suggest.isHidden())
+        store.set_mouse_app(KATE)
+        with mock.patch.object(pages.QMessageBox, "question",
+                               answer(QMessageBox.StandardButton.Yes, lambda: store.remove_mouse_profile(KATE))), \
+                mock.patch.object(pages.QMessageBox, "information") as information:
+            menu.actions()[0].trigger()  # profile removed: no apply or notice
+        information.assert_not_called()
+        self.assertEqual(store.cfg["mouse"], config.DEFAULTS["mouse"])
+        self.assertIn("Middle button: Default", asked[-1].split("\n"))
+        self.assertNotIn("pans", asked[-1])
+
+    def test_names_for_assistive_technology_the_tab_order_and_the_other_pages(self):
+        from mxoptions import i18n
+        self.addCleanup(i18n.setup, "en")
+        for language, text, item in (("en", "Suggested settings", "Web browser"),
+                                     ("uk", "Запропоновані налаштування", "Веббраузер")):
+            with self.subTest(language=language):
+                i18n.setup(language)
+                store = self.make_store()
+                store.cfg["mouse"]["profiles"] = [profile(KATE)]
+                store.mouse_app = KATE
+                chooser = self.page(store).apps
+                self.assertEqual((chooser.suggest.text(), chooser.suggest.menu().actions()[0].text()), (text, item))
+                self.assertIs(chooser.remove_app.nextInFocusChain(), chooser.suggest)
+        store = self.make_store()
+        for page in (ring_page.RingPage(store), pages.PointScrollPage(store)):
+            self.addCleanup(page.deleteLater)
+            self.assertIsNone(page.apps.suggest)  # their settings are not in the sets
+
+    def test_changed_preview_never_applies_unshown_settings(self):
+        message = "Settings changed while this dialog was open. Choose Suggested settings again."
+        for case in ("button_removed", "function_removed", "profile_recreated", "button_customized", "unrelated_setting"):
+            with self.subTest(case=case):
+                store = self.make_store()
+                self.assertTrue(store.add_mouse_profile(KATE))
+                if case == "button_removed":
+                    self.assertTrue(store.set_profile_button(KATE, "forward", PASTE))
+                if case == "function_removed":
+                    self.assertTrue(store.set_profile_thumb(KATE, "volume"))
+                store.set_mouse_app(KATE)
+                chooser = self.page(store).apps
+                during = {}
+
+                def answer(_parent, _title, text):
+                    during["preview"] = text
+                    during["before_change_pushes"] = len(store.engine.configs)
+                    if case == "button_removed":
+                        self.assertTrue(store.set_profile_button(KATE, "forward", None))
+                    elif case == "function_removed":
+                        self.assertTrue(store.set_profile_thumb(KATE, None))
+                    elif case == "profile_recreated":
+                        store.remove_mouse_profile(KATE)
+                        self.assertTrue(store.add_mouse_profile(KATE))
+                    elif case == "button_customized":
+                        self.assertTrue(store.set_profile_button(KATE, "back", macro("KEY_F5", name="kept")))
+                    else:
+                        store.set("haptics", "battery_saving", False)
+                    during["settings"] = copy.deepcopy(store.cfg)
+                    during["pushes"] = len(store.engine.configs)
+                    during["selection"] = store.mouse_app
+                    return QMessageBox.StandardButton.Yes
+
+                with mock.patch.object(pages.QMessageBox, "question", answer), \
+                        mock.patch.object(pages.QMessageBox, "information") as information:
+                    chooser.suggest.menu().actions()[1].trigger()
+                if case == "button_removed":
+                    self.assertIn("Forward button: stays as set for this app (Paste)", during["preview"])
+                elif case == "function_removed":
+                    self.assertIn("Thumb wheel: stays as set for this app", during["preview"])
+                self.assertEqual(store.mouse_app, during["selection"])
+                if case == "unrelated_setting":
+                    self.assertEqual(during["pushes"], during["before_change_pushes"] + 1)
+                    self.assertEqual(len(store.engine.configs), during["pushes"] + 1)
+                    self.assertEqual(store.mouse_profile(KATE)["buttons"], {"back": self.UNDO, "forward": self.REDO})
+                    self.assertEqual(config.app_thumb_function(store.cfg, KATE), "hscroll")
+                    self.assertFalse(store.cfg["haptics"]["battery_saving"])
+                    information.assert_not_called()
+                else:
+                    self.assertEqual(store.cfg, during["settings"])
+                    self.assertEqual(len(store.engine.configs), during["pushes"])
+                    information.assert_called_once_with(chooser, pages.APP_NAME, message)
+                store._save_timer.stop()

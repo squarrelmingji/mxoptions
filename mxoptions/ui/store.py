@@ -194,6 +194,21 @@ class Store(QObject):
         self._push()
         return True
 
+    def apply_mouse_preset(self, app, preset):
+        """Give ``app`` the suggested settings ``preset`` (config.APP_PRESETS), all in one go: exactly what
+        config.preset_changes says, so a button or function of its own stays. False, and nothing changed, for an
+        app without a profile."""
+        profile = self.mouse_profile(app)
+        if profile is None:
+            return False
+        buttons, function = config.preset_changes(self.cfg, app, preset)
+        profile["buttons"].update(buttons)
+        if function is not None:
+            self.cfg["mouse"]["thumbwheel"].append({"app": app, "function": function})
+        if buttons or function is not None:
+            self._push()
+        return True
+
     def set_profile_button(self, app, key, action):
         """What button ``key`` does while ``app`` is in front: an action, config.NATIVE for its own function, or None
         for what it does in every app. False, and nothing changed, for what the settings would not keep."""

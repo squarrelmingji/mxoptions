@@ -710,6 +710,32 @@ def ring_bubbles(cfg, app):
     return profile["ring"] if profile is not None and profile["ring"] is not None else cfg["ring"]["bubbles"]
 
 
+# Suggested settings for one app, given only to an app with a mouse profile that the user picked, never by its
+# name: id -> (label, {button: action}, thumb wheel function). Own Linux and Windows choices after three rows of
+# the predefined app-specific settings of Logi Options+ (browser; Excel; Word and PowerPoint): what Logi Options+
+# does there that a profile cannot (panning while the middle button is held) is left as it is. Keys are key
+# positions, as everywhere.
+APP_PRESETS = {
+    "browser": ("Web browser", {"middle": NATIVE, "back": NATIVE, "forward": NATIVE}, "tabs"),
+    "spreadsheet": ("Spreadsheet", {"back": {"type": "keys", "keys": ["KEY_LEFTCTRL", "KEY_Z"]},
+                                    "forward": {"type": "keys", "keys": ["KEY_LEFTCTRL", "KEY_Y"]}}, "hscroll"),
+    "documents": ("Documents and slides", {"back": {"type": "keys", "keys": ["KEY_LEFTCTRL", "KEY_Z"]},
+                                           "forward": {"type": "keys", "keys": ["KEY_LEFTCTRL", "KEY_Y"]}}, "zoom"),
+}
+
+
+def preset_changes(cfg, app, preset):
+    """What the suggested settings ``preset`` (APP_PRESETS) change for ``app``: ({button: action}, its thumb wheel
+    function or None), each only where the app does as in all apps now; what it has of its own stays. ({}, None)
+    for an app without a mouse profile."""
+    profile = mouse_profile_of(cfg, app)
+    if profile is None:
+        return {}, None
+    _label, buttons, function = APP_PRESETS[preset]
+    return ({key: copy.deepcopy(action) for key, action in buttons.items() if key not in profile["buttons"]},
+            function if app_thumb_function(cfg, app) is None else None)
+
+
 def _sanitize(cfg):
     for key in BUTTONS:
         # The KDE shortcuts the catalogue held before it named things for every desktop become those names here.
