@@ -14,6 +14,7 @@ from unittest import mock
 
 from tests.support import FakeInput
 from mxoptions import actions, vinput
+from mxoptions import clipboard
 from mxoptions import config, device, engine, hidpp
 from tests import support, test_kbsettings, test_keyboard, test_mouse_profiles as profiles
 
@@ -1269,6 +1270,314 @@ class WaitingSetting(Failing):
                     self.assertEqual(put.call_count, 1)
                 self.assertIs(error, emit.raised[0] if input_failed else fault)
                 self.assertEqual((emit.active, rig.input._holds.held()), (set(), set()))
+
+
+V = "KEY_V"
+PRIOR, MACRO, NEW = "prior-SECRET", "macro-text", "user-new-copy"  # synthetic: none may reach a log
+
+
+class Falsy(OSError):
+    """An error that is false: only ``is None`` tells it from no error at all."""
+
+    def __bool__(self):
+        return False
+
+
+class FalsyStop(RuntimeError):
+    def __bool__(self):
+        return False
+
+
+class Pasting(unittest.TestCase):
+    """A text step pastes through the clipboard, then puts back what was there unless something else was copied
+    meanwhile; a paste that fails does the same and raises its own error. Fake clipboard, clock and input only:
+    each real way to the clipboard fails the test when reached."""
+
+    def setUp(self):
+        self.reached = []
+
+        def tripwire(name):
+            def reached(*_args, **_kwargs):
+                self.reached.append(name)
+                raise AssertionError(f"real clipboard reached: {name}")
+            return reached
+        for name in ("_tool", "klipper", "_text_tools", "backend", "read", "write"):
+            patcher = mock.patch.object(clipboard, name, tripwire(name))
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def fakes(self, prior, trips=(), sleeps=None, reads=(), write=True, restore=True):
+        """A fake board holding ``prior`` and a fake clock, as patches, and an input whose tap goes through
+        self.holds over self.emit (a Refusing with ``trips``). ``sleeps``: seconds -> error to raise or hook(board).
+        ``reads``: what the reads after the first return or raise, in turn; then the board. ``write``, ``restore``:
+        result or error of the first set_text and of those after it. Returns (board, events, input, patches)."""
+        board, events, reads, sleeps, count = [prior], [], list(reads), sleeps or {}, {"get": 0, "set": 0}
+
+        def get_text():
+            events.append(("get",))
+            count["get"] += 1
+            if count["get"] > 1 and reads:
+                found = reads.pop(0)
+                if isinstance(found, BaseException):
+                    raise found
+                return found
+            return board[0]
+
+        def set_text(value):
+            events.append(("set", value))
+            count["set"] += 1
+            outcome = write if count["set"] == 1 else restore
+            if isinstance(outcome, BaseException):
+                raise outcome
+            if outcome:
+                board[0] = value
+            return outcome
+
+        def sleep(seconds):
+            events.append(("sleep", seconds))
+            fault = sleeps.get(seconds)
+            if isinstance(fault, BaseException):
+                raise fault
+            if fault is not None:
+                fault(board)
+
+        def tap(names):
+            events.append(("tap",))
+            self.tapped_on.append(threading.current_thread().name)
+            self.holds.tap(names, wait=0)
+        self.emit, self.tapped_on = Refusing(trips), []
+        self.holds = vinput.Holds(self.emit)
+        fake = types.SimpleNamespace(tap=tap, type_ascii=lambda typed: events.append(("typed", typed)))
+        patches = (mock.patch.multiple(clipboard, get_text=get_text, set_text=set_text),
+                   mock.patch.object(actions, "time", types.SimpleNamespace(sleep=sleep)))
+        return board, events, fake, patches
+
+    def paste(self, prior=PRIOR, text=MACRO, has_input=True, **faults):
+        """insert_text of ``text`` over fakes(prior, **faults). Returns (board, events, raised): what it raised is
+        caught, so a failure here fails one test, not the run."""
+        board, events, fake, patches = self.fakes(prior, **faults)
+        raised = None
+        with patches[0], patches[1]:
+            try:
+                actions.insert_text(fake if has_input else None, text)
+            except BaseException as error:  # an interrupt too
+                raised = error
+        self.assertEqual(self.reached, [])
+        return board[0], events, raised
+
+    def no_keys(self):
+        self.assertEqual((self.emit.active, self.holds.held()), (set(), set()))
+
+    def no_content(self, logs):
+        self.assertEqual([found for found in (PRIOR, MACRO, NEW) if found in "\n".join(logs.output)], [])
+
+    def test_a_paste_puts_back_the_text_that_was_there(self):
+        for kind, prior in (("text", PRIOR), ("empty", ""), ("the same", MACRO)):
+            with self.subTest(prior=kind):
+                board, events, raised = self.paste(prior)
+                self.assertIsNone(raised)
+                self.assertEqual(events, [("get",), ("set", MACRO), ("sleep", 0.07), ("tap",), ("sleep", 0.18),
+                                          ("get",), ("set", prior)])
+                self.assertEqual(self.emit.calls, [(CTRL, True), (V, True), (V, False), (CTRL, False)])
+                self.assertEqual(board, prior)
+                self.no_keys()
+
+    def test_a_failing_paste_puts_the_text_back_and_raises_its_own_error(self):
+        tapped = [("get",), ("set", MACRO), ("sleep", 0.07), ("tap",), ("sleep", 0.18), ("get",), ("set", PRIOR)]
+        for kind, trips in (("ctrl down", {(CTRL, True): OSError}), ("v down", {(V, True): OSError}),
+                            ("v up", {(V, False): OSError}), ("v down interrupted", {(V, True): KeyboardInterrupt})):
+            with self.subTest(kind):
+                board, events, raised = self.paste(trips=trips)
+                self.assertIs(raised, self.emit.raised[0])
+                self.assertEqual(events, tapped)  # the wait after the paste comes before what is put back
+                self.assertEqual(board, PRIOR)
+                self.no_keys()
+        with self.subTest("first wait"):
+            stopped = RuntimeError("synthetic wait")
+            board, events, raised = self.paste(sleeps={0.07: stopped})
+            self.assertIs(raised, stopped)
+            self.assertEqual(events, [e for e in tapped if e != ("tap",)])
+            self.assertEqual(board, PRIOR)
+            self.no_keys()
+
+    def test_what_was_copied_meanwhile_is_left_as_it_is(self):
+        def copy_new(board):
+            board[0] = NEW
+        for tap_fails in (False, True):
+            trips = {(V, True): OSError} if tap_fails else {}
+            for kind, faults, left in (("new text", dict(sleeps={0.18: copy_new}), NEW),
+                                       ("empty", dict(reads=[""]), MACRO), ("unreadable", dict(reads=[None]), MACRO)):
+                with self.subTest(kind, tap_fails=tap_fails):
+                    with self.assertLogs("mxoptions.actions", "INFO") as logs:
+                        board, events, raised = self.paste(trips=trips, **faults)
+                    self.assertIs(raised, self.emit.raised[0] if tap_fails else None)
+                    self.assertEqual(events[-2:], [("sleep", 0.18), ("get",)])  # read back, nothing written
+                    self.assertEqual(board, left)
+                    self.assertEqual([r.levelname for r in logs.records], ["INFO"])
+                    self.no_content(logs)
+                    self.no_keys()
+        with self.subTest("the same text copied meanwhile is overwritten (known limit)"):
+            board, events, raised = self.paste(sleeps={0.18: lambda board: board.__setitem__(0, MACRO)})
+            self.assertEqual((board, raised, events[-1]), (PRIOR, None, ("set", PRIOR)))
+        with self.subTest("a copy between reading back and writing is overwritten (known limit)"):
+            board, events, raised = self.paste(sleeps={0.18: copy_new}, reads=[MACRO])  # it lands after the read
+            self.assertEqual((board, raised, events[-1]), (PRIOR, None, ("set", PRIOR)))
+
+    def test_putting_back_failing_is_logged_without_what_was_copied(self):
+        for tap_fails in (False, True):
+            trips = {(V, True): OSError} if tap_fails else {}
+            for kind, faults, told in (
+                    ("refused", dict(restore=False), None),
+                    ("write raises", dict(restore=UnicodeEncodeError("utf-8", PRIOR, 0, 1, "synthetic")),
+                     "UnicodeEncodeError"),
+                    ("read raises", dict(reads=[OSError(PRIOR)]), "OSError")):
+                with self.subTest(kind, tap_fails=tap_fails):
+                    with self.assertLogs("mxoptions.actions", "INFO") as logs:
+                        board, events, raised = self.paste(trips=trips, **faults)
+                    self.assertIs(raised, self.emit.raised[0] if tap_fails else None)
+                    self.assertEqual(board, MACRO)
+                    self.assertEqual([r.levelname for r in logs.records], ["WARNING"])
+                    if told:
+                        self.assertTrue(logs.output[0].endswith(": " + told))
+                    self.no_content(logs)
+                    self.no_keys()
+            for kind in ("read", "write"):
+                with self.subTest(kind + " interrupted", tap_fails=tap_fails):
+                    interrupt = KeyboardInterrupt("synthetic " + kind)
+                    faults = dict(reads=[interrupt]) if kind == "read" else dict(restore=interrupt)
+                    board, events, raised = self.paste(trips=trips, **faults)
+                    self.assertIs(raised, self.emit.raised[0] if tap_fails else interrupt)
+                    self.assertEqual(board, MACRO)
+                    self.no_keys()
+
+    def test_without_a_way_to_the_clipboard_the_text_is_typed_as_before(self):
+        with self.subTest("no snapshot"):
+            board, events, raised = self.paste(None)
+            self.assertEqual((board, events, raised), (None, [("get",), ("typed", MACRO)], None))
+        with self.subTest("write refused"):
+            board, events, raised = self.paste(write=False)
+            self.assertEqual((board, events, raised), (PRIOR, [("get",), ("set", MACRO), ("typed", MACRO)], None))
+        with self.subTest("write raises"):
+            error = UnicodeEncodeError("utf-8", MACRO, 0, 1, "synthetic")
+            board, events, raised = self.paste(write=error)
+            self.assertIs(raised, error)
+            self.assertEqual((board, events), (PRIOR, [("get",), ("set", MACRO)]))
+        for kind, call in (("no text", dict(text="")), ("no input", dict(has_input=False))):
+            with self.subTest(kind):
+                self.assertEqual(self.paste(**call), (PRIOR, [], None))
+        self.assertEqual(self.emit.calls, [])
+
+    def macro(self, *macros, settle=None, **faults):
+        """Play ``macros`` (lists of steps) on a real MacroRunner over fakes(PRIOR, **faults) until a command step
+        "next" runs; ``settle(runner)`` is called in the wait after the paste. Its thread is stopped and joined
+        while the fakes are still in place. Returns (board, commands run, log records)."""
+        ran, done = [], threading.Event()
+
+        def run_command(command):
+            ran.append(command)
+            if command == "next":
+                done.set()
+        if settle:
+            faults["sleeps"] = {0.18: lambda _board: settle(runner)}
+        board, _events, fake, patches = self.fakes(PRIOR, **faults)
+        runner = actions.MacroRunner(fake)
+        with patches[0], patches[1], mock.patch.object(actions, "run_command", run_command), \
+                self.assertLogs("mxoptions.actions", "DEBUG") as logs:
+            try:
+                for steps in macros:
+                    runner.run({"type": "macro", "steps": steps})
+                self.assertTrue(done.wait(2.0))
+            finally:
+                runner.stop()
+                runner._thread.join(2.0)
+            self.assertFalse(runner._thread.is_alive())
+            actions.log.debug("synthetic end")
+        self.assertEqual(self.reached, [])
+        return board[0], ran, logs.records[:-1]
+
+    def test_a_paste_failing_in_a_macro_ends_it_with_the_text_put_back(self):
+        board, ran, records = self.macro([{"do": "text", "text": MACRO}, {"do": "command", "command": "later"}],
+                                         [{"do": "command", "command": "next"}], trips={(V, True): OSError})
+        self.assertEqual(self.tapped_on, ["macro"])
+        self.assertEqual(board, PRIOR)
+        self.assertEqual(ran, ["next"])  # the step after the paste never ran, the next macro did
+        failed = [r for r in records if r.getMessage() == "macro failed"]
+        self.assertEqual(len(failed), 1)
+        self.assertIs(failed[0].exc_info[1], self.emit.raised[0])
+        self.no_keys()
+
+    def test_a_cancel_during_a_paste_lets_it_put_the_text_back(self):
+        def cancel(runner):
+            runner.cancel()
+            runner.run({"type": "macro", "steps": [{"do": "command", "command": "next"}]})
+        board, ran, records = self.macro([{"do": "text", "text": MACRO}, {"do": "command", "command": "later"}],
+                                         settle=cancel)
+        self.assertEqual(self.tapped_on, ["macro"])
+        self.assertEqual(board, PRIOR)
+        self.assertEqual(ran, ["next"])
+        self.assertEqual(records, [])
+        self.no_keys()
+
+    def test_a_settle_failure_still_attempts_restoration_and_preserves_the_first_error(self):
+        written = [("get",), ("set", MACRO), ("get",), ("set", PRIOR)]
+        read = written[:3]
+
+        def check(raised, error, board, events, left=PRIOR, tried=written):
+            self.assertIs(raised, error)
+            self.assertEqual(board, left)
+            self.assertEqual([e for e in events if e[0] in ("get", "set")], tried)
+            reads = [i for i, e in enumerate(events) if e == ("get",)]
+            self.assertIn(("sleep", 0.18), events[:reads[-1]])  # the settle wait before the read back
+            self.no_keys()
+
+        for settle in (RuntimeError("synthetic settle"), KeyboardInterrupt("synthetic settle")):
+            with self.subTest("settle alone", kind=type(settle).__name__):
+                board, events, raised = self.paste(sleeps={0.18: settle})
+                check(raised, settle, board, events)
+        with self.subTest("first wait and settle"):
+            first, settle = RuntimeError("synthetic wait"), RuntimeError("synthetic settle")
+            board, events, raised = self.paste(sleeps={0.07: first, 0.18: settle})
+            check(raised, first, board, events)
+        with self.subTest("tap and settle"):
+            board, events, raised = self.paste(trips={(V, True): OSError}, sleeps={0.18: RuntimeError("synthetic")})
+            check(raised, self.emit.raised[0], board, events)
+        with self.subTest("false tap error alone"):
+            board, events, raised = self.paste(trips={(V, True): Falsy})
+            self.assertFalse(self.emit.raised[0])
+            check(raised, self.emit.raised[0], board, events)
+        with self.subTest("false tap error and settle"):
+            board, events, raised = self.paste(trips={(V, True): Falsy}, sleeps={0.18: RuntimeError("synthetic")})
+            check(raised, self.emit.raised[0], board, events)
+        with self.subTest("false tap error and interrupted read"):
+            board, events, raised = self.paste(trips={(V, True): Falsy}, reads=[KeyboardInterrupt("synthetic")])
+            check(raised, self.emit.raised[0], board, events, left=MACRO, tried=read)
+        with self.subTest("false settle error and interrupted read"):
+            settle = FalsyStop("synthetic settle")
+            self.assertFalse(settle)
+            board, events, raised = self.paste(sleeps={0.18: settle}, reads=[KeyboardInterrupt("synthetic")])
+            check(raised, settle, board, events, left=MACRO, tried=read)
+        for first in ("tap", "settle"):
+            for kind, faults, tried in (("read raises", dict(reads=[OSError(PRIOR)]), read),
+                                        ("write raises", dict(restore=ValueError(PRIOR)), written)):
+                with self.subTest(first + " error, then " + kind):
+                    settle = RuntimeError("synthetic settle")
+                    if first == "tap":
+                        faults["trips"] = {(V, True): OSError}
+                    else:
+                        faults["sleeps"] = {0.18: settle}
+                    with self.assertLogs("mxoptions.actions", "WARNING") as logs:
+                        board, events, raised = self.paste(**faults)
+                    check(raised, self.emit.raised[0] if first == "tap" else settle, board, events, left=MACRO,
+                          tried=tried)
+                    self.no_content(logs)
+        with self.subTest("a copy during a failing settle"):
+            settle = RuntimeError("synthetic settle")
+
+            def copy_then_fail(board):
+                board[0] = NEW
+                raise settle
+            board, events, raised = self.paste(sleeps={0.18: copy_then_fail})
+            check(raised, settle, board, events, left=NEW, tried=read)
 
 
 if __name__ == "__main__":

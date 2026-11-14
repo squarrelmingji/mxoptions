@@ -374,7 +374,7 @@ def run_script(script):
 
 
 def insert_text(vinput, text):
-    """Put ``text`` at the cursor: paste it through the clipboard, restoring what was there."""
+    """Paste text, then attempt guarded restoration even after wait or input failure."""
     if not text or vinput is None:
         return
     from . import clipboard  # it needs Qt, which the rest of this module does without
@@ -383,10 +383,38 @@ def insert_text(vinput, text):
     if previous is None or not clipboard.set_text(text):
         vinput.type_ascii(text)  # no way to the clipboard from here: plain typing, US layout only
         return
-    time.sleep(0.07)
-    vinput.tap(["KEY_LEFTCTRL", "KEY_V"])
-    time.sleep(0.18)
-    clipboard.set_text(previous)
+    failed = None
+    try:
+        time.sleep(0.07)
+        vinput.tap(["KEY_LEFTCTRL", "KEY_V"])
+    except BaseException as error:
+        failed = error
+    try:
+        time.sleep(0.18)
+    except BaseException as error:
+        if failed is None:
+            failed = error
+    try:
+        _put_back(clipboard, previous, text)
+    except BaseException:
+        if failed is None:
+            raise
+    if failed is not None:
+        raise failed
+
+
+def _put_back(clipboard, previous, text):
+    """Restore prior text only when pasted text remains; rich formats are not preserved.
+
+    ponytail: text equality cannot detect identical copies or changes between read and write.
+    """
+    try:
+        if clipboard.get_text() != text:
+            log.info("the clipboard holds something else now, or cannot be read: left as it is")
+        elif not clipboard.set_text(previous):
+            log.warning("could not put back what was on the clipboard")
+    except Exception as error:
+        log.warning("could not put back what was on the clipboard: %s", type(error).__name__)
 
 
 def here(action):
