@@ -46,7 +46,7 @@ class PairSettings(unittest.TestCase):
 
     def test_defaults_hold_no_pair(self):
         cleaned = config.clean(copy.deepcopy(config.DEFAULTS))
-        self.assertEqual(cleaned["mouse"], {"profiles": [], "thumbwheel": [], "thumbwheel_keys": []})
+        self.assertEqual(cleaned["mouse"], {"profiles": [], "thumbwheel": [], "thumbwheel_keys": [], "gestures": []})
         self.assertEqual(cleaned["version"], 6)
 
     def test_a_pair_of_an_app_with_a_profile_is_kept_and_the_rest_left_out(self):

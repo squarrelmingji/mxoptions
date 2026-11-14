@@ -216,19 +216,20 @@ class AppChooser(QWidget):
             return
         name, buttons, function = config.APP_PRESETS[preset]
         setting, thumb = config.preset_changes(self.store.cfg, app, preset)
+        own = config.own_buttons(self.store.cfg, app)
         stays = _("{control}: stays as set for this app ({value})")
         lines = [_("Apply the suggested settings \"{preset}\" to {app}?").format(preset=_(name),
                                                                                app=profile["name"] or app), ""]
         for key, action in buttons.items():
             title = _(BUTTON_TITLES[key])
             lines.append(f"{title}: {actions.describe(action)}" if key in setting else
-                         stays.format(control=title, value=actions.describe(profile["buttons"][key])))
+                         stays.format(control=title, value=actions.describe(own[key])))
         own = config.app_thumb_function(self.store.cfg, app)
         lines.append(f"{_('Thumb wheel')}: {_(THUMB_LABELS[function])}" if thumb is not None else
                      stays.format(control=_("Thumb wheel"), value=_(THUMB_LABELS[own])))
         if "middle" not in buttons:
-            lines += ["", _("Logi Options+ also pans while the middle button is held here. Gestures are set for all "
-                            "apps only, so the middle button stays as it is.")]
+            lines += ["", _("Logi Options+ also pans while the middle button is held here. These settings leave the "
+                            "middle button as it is: to pan, give it Gestures for this app and choose Pan.")]
         lines += ["", _("Everything else stays as it is. To undo one of these, choose \"As in all apps\" for it.")]
         if QMessageBox.question(self, APP_NAME, "\n".join(lines)) == QMessageBox.StandardButton.Yes:
             current = self.store.mouse_profile(app)
@@ -316,8 +317,9 @@ class ButtonsPage(QWidget):
             profile = chosen_profile(self.store)
             if profile is None:
                 self.picker.edit(_(BUTTON_TITLES[key]), self.store.cfg["buttons"][key], hint)
-            else:  # gesture and spotlight settings are for all apps only
-                self.picker.edit(_(BUTTON_TITLES[key]), profile["buttons"].get(key), hint, inherit=True, hide=("gestures", "spotlight"))
+            else:  # spotlight settings are for all apps only
+                self.picker.edit(_(BUTTON_TITLES[key]), config.own_buttons(self.store.cfg, profile["app"]).get(key), hint,
+                                 inherit=True, hide=("spotlight",), inherited=self.store.cfg["buttons"][key])
 
     def _changed(self, action):
         if self._key and self._key not in FIXED_BUTTONS:

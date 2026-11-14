@@ -5,8 +5,8 @@ import copy
 from PySide6.QtCore import QPointF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
-    QAbstractButton, QButtonGroup, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QStackedWidget,
-    QVBoxLayout, QWidget,
+    QAbstractButton, QButtonGroup, QComboBox, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea,
+    QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from .. import actions, config, gestures
@@ -277,6 +277,7 @@ class ActionPicker(QFrame):
         self.setObjectName("picker")
         self.setFixedWidth(int(320 * ui_scale()))
         self._action = None
+        self._inherited = None  # what "As in all apps" does for the control being edited, when it is offered
         self._slot = None  # what of a gesture button is being edited: "tap", a direction or a shape
         outer = QVBoxLayout(self)
         outer.setContentsMargins(18, 20, 12, 14)
@@ -300,7 +301,18 @@ class ActionPicker(QFrame):
         block = QVBoxLayout(self.gesture_block)
         block.setContentsMargins(0, 0, 16, 0)
         block.setSpacing(4)
+        moving = QLabel(_("Holding it and moving"))
+        moving.setObjectName("hint")
+        block.addWidget(moving)
+        self.mode = QComboBox()  # a row of three does not fit this panel in every language
+        for value, label in (("swipes", "Swipes"), ("pan", "Pan"), ("zoom", "Zoom")):
+            self.mode.addItem(_(label), value)
+        self.mode.setAccessibleName(_("Holding it and moving"))
+        moving.setBuddy(self.mode)
+        self.mode.currentIndexChanged.connect(lambda index: self._mode_picked(self.mode.itemData(index)))
+        block.addWidget(self.mode)
         self._gesture_rows = {}
+        self._gesture_buttons = {}
         for direction in actions.DIRECTIONS:
             row = QPushButton()
             row.setObjectName("chip")
@@ -320,6 +332,7 @@ class ActionPicker(QFrame):
             row.clicked.connect(lambda _checked=False, d=direction: self._edit_slot(d))
             block.addWidget(row)
             self._gesture_rows[direction] = value
+            self._gesture_buttons[direction] = row
         shapes = QPushButton()  # one more row: the shapes that can be drawn with the button held
         shapes.setObjectName("chip")
         shapes.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -337,6 +350,7 @@ class ActionPicker(QFrame):
         shapes.setMinimumHeight(38)
         shapes.clicked.connect(lambda: self.stack.setCurrentIndex(3))
         block.addWidget(shapes)
+        self.shapes_button = shapes
         layout.addWidget(self.gesture_block)
 
         self.spotlight_block = QWidget()  # the three Spotlight effects of the button, each to open and set up
@@ -510,12 +524,15 @@ class ActionPicker(QFrame):
         self.fixed_text.setText(text)
         self.stack.setCurrentIndex(2)
 
-    def edit(self, title, action, subtitle="", inherit=False, hide=()):
-        """``inherit``: offer "As in all apps" too, picked as None (``action`` None: it is the one chosen). ``hide``:
-        preset ids not offered this time."""
+    def edit(self, title, action, subtitle="", inherit=False, hide=(), inherited=None):
+        """``inherit``: offer "As in all apps" too, picked as None (``action`` None: it is the one chosen);
+        ``inherited``: what that does, so that Gestures picked then start from those of all apps. ``hide``: preset
+        ids not offered this time."""
+        self._inherited = copy.deepcopy(inherited) if inherit else None
         self.list.inherit_row.setVisible(inherit)
         self.list.set_hidden(hide)
         self._action = copy.deepcopy(action)
+        self._slot = None  # a direction or shape being picked for the control before is not one of this one
         self.title.setText(title)
         self.about.set_text(subtitle)
         self.stack.setCurrentIndex(0)
@@ -535,8 +552,14 @@ class ActionPicker(QFrame):
                 value.setText(state)
                 row.setAccessibleName(f"{_(EFFECT_LABELS[effect])}: {state}")
         if is_gestures:
+            mode = gestures.hold_mode(action)
+            self.mode.blockSignals(True)
+            self.mode.setCurrentIndex(self.mode.findData(mode or "swipes"))
+            self.mode.blockSignals(False)
             for direction, label in self._gesture_rows.items():
                 label.setText(actions.describe(action.get(direction)))
+                self._gesture_buttons[direction].setEnabled(direction == "tap" or not mode)  # pan, zoom: only the tap
+            self.shapes_button.setEnabled(not mode)
             drawn = action.get("shapes") or {}
             self.shapes_value.setText(_("{} with an action").format(len(drawn)) if drawn else _("None yet"))
             if self._shape_icons != theme.REVISION:
@@ -555,10 +578,24 @@ class ActionPicker(QFrame):
         if action.get("type") in ("gestures", "spotlight"):
             if (self._action or {}).get("type") == action["type"]:
                 return
-            action = config.default_gestures() if action["type"] == "gestures" else config.default_spotlight()
+            if action["type"] == "spotlight":
+                action = config.default_spotlight()
+            elif (self._inherited or {}).get("type") == "gestures":  # an app's own, from those of all apps
+                action = config.app_gestures_action(self._inherited)
+            else:
+                action = config.default_gestures()
         self._action = action
         self._refresh()
         self.changed.emit(copy.deepcopy(action))
+
+    def _mode_picked(self, mode):
+        """Swipes, or pan or zoom while the button is held (gestures.HOLD_MODES): the directions stay saved."""
+        if mode in gestures.HOLD_MODES:
+            self._action["mode"] = mode
+        else:
+            self._action.pop("mode", None)
+        self._refresh()
+        self.changed.emit(copy.deepcopy(self._action))
 
     def _edit_effect(self, name):
         """Set up one Spotlight effect of the button."""
@@ -608,6 +645,8 @@ class ActionPicker(QFrame):
         self.stack.setCurrentIndex(1)
 
     def _sub_picked(self, action):
+        if self._slot is None:  # picked late (a dialog's), after another control came to be edited: not for it
+            return
         if self._slot in gestures.SHAPES:
             drawn = self._action.setdefault("shapes", {})
             if action.get("type") == "none":

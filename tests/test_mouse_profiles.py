@@ -194,7 +194,7 @@ class Settings(unittest.TestCase):
                        gesture={"type": "ring"}, smartshift={"type": "none"})
         self.assertEqual(self.clean([kate]), [kate])
         self.assertEqual(self.clean([profile(KONSOLE)]), [profile(KONSOLE)])
-        self.assertEqual(config.clean(copy.deepcopy(config.DEFAULTS))["mouse"], {"profiles": [], "thumbwheel": [], "thumbwheel_keys": []})
+        self.assertEqual(config.clean(copy.deepcopy(config.DEFAULTS))["mouse"], {"profiles": [], "thumbwheel": [], "thumbwheel_keys": [], "gestures": []})
 
     def test_a_profile_that_is_not_one_is_dropped_whole(self):
         good = profile(KATE, back=COPY)
@@ -918,8 +918,8 @@ class StoreAndOthers(unittest.TestCase):
         self.assertFalse(store.add_mouse_profile(KATE))
         self.assertEqual(self.profiles(), [{"app": KATE, "name": KATE, "buttons": {}, "ring": None}])
         before = copy.deepcopy(store.cfg)
-        for key, action in (("back", {"type": "gestures"}), ("back", config.default_gestures()), ("left", COPY),
-                            ("back", {"type": "ring", "x": 1}), ("back", [])):
+        for key, action in (("back", {"type": "gestures"}), ("left", COPY), ("back", {"type": "ring", "x": 1}),
+                            ("back", [])):
             self.assertFalse(store.set_profile_button(KATE, key, action))
         self.assertFalse(store.set_profile_button(KONSOLE, "back", COPY))  # no profile
         self.assertFalse(store.set_profile_ring(KATE, []))
@@ -1055,9 +1055,10 @@ class Pages(unittest.TestCase):
         self.assertEqual((store.mouse_app, self.entries(chooser), chooser.apps.currentIndex()), (KATE, ["All apps", KATE], 1))
         self.assertFalse(page.picker.list.inherit_row.isHidden())
         self.assertTrue(page.picker.list.inherit_row.isChecked())  # nothing of its own yet
-        self.assertTrue(page.picker.list._rows["gestures"].isHidden())
-        page.picker.list.search.setText("gest")
-        self.assertTrue(page.picker.list._rows["gestures"].isHidden())  # not by a search either
+        self.assertFalse(page.picker.list._rows["gestures"].isHidden())  # an app's own gestures may be given here
+        self.assertTrue(page.picker.list._rows["spotlight"].isHidden())
+        page.picker.list.search.setText("spot")
+        self.assertTrue(page.picker.list._rows["spotlight"].isHidden())  # not by a search either
         page.picker.list.search.clear()
         page.picker.list._rows["default"].click()
         self.assertEqual(store.mouse_profile(KATE)["buttons"], {"back": NATIVE})
@@ -1296,7 +1297,7 @@ class ThumbWheelSettings(unittest.TestCase):
         older["mouse"] = {"profiles": [profile(KATE, back=COPY)]}  # written by a version without this list
         older["thumbwheel"]["function"] = "tabs"
         cleaned = config.clean(older)
-        self.assertEqual(cleaned["mouse"], {"profiles": [profile(KATE, back=COPY)], "thumbwheel": [], "thumbwheel_keys": []})
+        self.assertEqual(cleaned["mouse"], {"profiles": [profile(KATE, back=COPY)], "thumbwheel": [], "thumbwheel_keys": [], "gestures": []})
         with_entries = copy.deepcopy(older)
         with_entries["mouse"]["thumbwheel"] = [own(KATE, "zoom")]
         again = config.clean(with_entries)
@@ -1561,7 +1562,7 @@ class ThumbWheelStoreAndOthers(unittest.TestCase):
         store.add_mouse_profile(KATE)
         self.assertEqual(self.entries(), [own(KONSOLE, "zoom")])  # back without the one it had
         store.restore_defaults()
-        self.assertEqual(store.cfg["mouse"], {"profiles": [], "thumbwheel": [], "thumbwheel_keys": []})
+        self.assertEqual(store.cfg["mouse"], {"profiles": [], "thumbwheel": [], "thumbwheel_keys": [], "gestures": []})
 
     def test_other_programs_set_what_may_be_and_are_refused_the_rest(self):
         self.assertTrue(self.api.Set("mouse.profiles", json.dumps([profile(KATE), profile(KONSOLE)])))
@@ -1598,7 +1599,7 @@ class ThumbWheelStoreAndOthers(unittest.TestCase):
         older = json.loads(exported)
         del older["config"]["mouse"]["thumbwheel"]  # exported by a version without it
         self.assertEqual(config.import_data(json.dumps(older).encode(), current)["mouse"],
-                         {"profiles": [profile(KATE)], "thumbwheel": [], "thumbwheel_keys": []})
+                         {"profiles": [profile(KATE)], "thumbwheel": [], "thumbwheel_keys": [], "gestures": []})
 
     def test_the_app_in_front_and_its_function_are_never_logged_published_or_told(self):
         secret = "org.example.secret"
@@ -1697,7 +1698,7 @@ class ThumbWheelPage(unittest.TestCase):
             QTest.mouseClick(scroll.apps.remove_app, Qt.MouseButton.LeftButton)
         self.assertEqual((scroll.apps.apps.currentIndex(), buttons.apps.apps.currentIndex(),
                           rings.apps.apps.currentIndex(), store.mouse_app), (0, 0, 0, None))
-        self.assertEqual((store.cfg["mouse"], self.functions(scroll)), ({"profiles": [], "thumbwheel": [], "thumbwheel_keys": []},
+        self.assertEqual((store.cfg["mouse"], self.functions(scroll)), ({"profiles": [], "thumbwheel": [], "thumbwheel_keys": [], "gestures": []},
                                                                         list(config.THUMB_FUNCTIONS)))
 
     def test_where_the_desktop_does_not_say_the_function_is_for_all_apps(self):
@@ -1995,8 +1996,8 @@ class SuggestedSettings(unittest.TestCase):
         self.assertEqual(asked[-1].split("\n"), [
             'Apply the suggested settings "Spreadsheet" to kate?', "",
             "Back button: Undo", "Forward button: stays as set for this app (Paste)", "Thumb wheel: Horizontal scroll", "",
-            "Logi Options+ also pans while the middle button is held here. Gestures are set for all apps only, so the "
-            "middle button stays as it is.", "",
+            "Logi Options+ also pans while the middle button is held here. These settings leave the middle button as "
+            "it is: to pan, give it Gestures for this app and choose Pan.", "",
             'Everything else stays as it is. To undo one of these, choose "As in all apps" for it.'])
         with mock.patch.object(pages.QMessageBox, "question",
                                answer(QMessageBox.StandardButton.Yes, lambda: chooser.apps.setCurrentIndex(0))):
@@ -2088,7 +2089,7 @@ class SuggestedSettings(unittest.TestCase):
                 store._save_timer.stop()
 
     def test_app_controls_fit_inside_settings_window(self):
-        from PySide6.QtCore import QEvent
+        from PySide6.QtCore import QEvent, QPoint, QRect
         from mxoptions import i18n
         from mxoptions.ui import theme
         from mxoptions.ui.main_window import MainWindow
@@ -2102,6 +2103,7 @@ class SuggestedSettings(unittest.TestCase):
                 i18n.setup(language)
                 store = self.make_store()
                 self.assertTrue(store.add_mouse_profile(KATE))
+                self.assertTrue(store.set_profile_button(KATE, "gesture", config.default_gestures()))
                 with (mock.patch.object(pages.FirmwareQuery, "start"),
                       mock.patch.object(pages.MouseView, "_prerender"),
                       mock.patch.object(threading.Thread, "start") as worker_start):
@@ -2130,6 +2132,17 @@ class SuggestedSettings(unittest.TestCase):
                                     for other in controls[index + 1:]:
                                         self.assertFalse(control.geometry().intersects(other.geometry()))
                                 self.assertIs(chooser.remove_app.nextInFocusChain(), chooser.suggest)
+                                picker = window.buttons_page.picker
+                                for app in (None, KATE):  # the mode of the gesture button, for all apps and its own
+                                    store.set_mouse_app(app)
+                                    window.buttons_page.view.select("gesture")
+                                    for _ in range(8):
+                                        APP.processEvents()
+                                    mode = picker.mode
+                                    self.assertTrue(mode.isVisible(), app)
+                                    self.assertTrue(picker.rect().contains(QRect(mode.mapTo(picker, QPoint()), mode.size())), app)
+                                    self.assertGreaterEqual(mode.width(), mode.sizeHint().width(), app)
+                                    self.assertEqual(window.width(), expected_width)
                     finally:
                         store._save_timer.stop()
                         window.hide()

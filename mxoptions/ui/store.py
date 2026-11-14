@@ -138,7 +138,7 @@ class Store(QObject):
         kept = [profile for profile in profiles if profile["app"] != app]
         if len(kept) != len(profiles):
             self.cfg["mouse"]["profiles"] = kept
-            for name in ("thumbwheel", "thumbwheel_keys"):  # its function and keystrokes go with it
+            for name in ("thumbwheel", "thumbwheel_keys", "gestures"):  # its function, keystrokes, gestures go with it
                 self.cfg["mouse"][name] = [entry for entry in self.cfg["mouse"][name] if entry["app"] != app]
             self._push()
         if self.mouse_app == app:
@@ -210,22 +210,34 @@ class Store(QObject):
         return True
 
     def set_profile_button(self, app, key, action):
-        """What button ``key`` does while ``app`` is in front: an action, config.NATIVE for its own function, or None
-        for what it does in every app. False, and nothing changed, for what the settings would not keep."""
+        """What button ``key`` does while ``app`` is in front: an action (gestures too, kept in "mouse.gestures"),
+        config.NATIVE for its own function, or None for what it does in every app. False, and nothing changed, for
+        what the settings would not keep exactly as given."""
         profile = self.mouse_profile(app)
         if profile is None or key not in config.BUTTONS:
             return False
-        buttons = profile["buttons"]
-        if action is None:
-            if buttons.pop(key, None) is not None:
-                self._push()
-            return True
-        if not config.profile_button_action(action):
+        drawn = isinstance(action, dict) and action.get("type") == "gestures"
+        if action is not None and not (config.app_gestures_action(action) == action if drawn
+                                       else config.profile_button_action(action)):
             log.warning("button %s: action refused", key)
             return False
-        if buttons.get(key) != action:
-            buttons[key] = copy.deepcopy(action)
-            self._push()
+        entries = self.cfg["mouse"]["gestures"]
+        entry = next((entry for entry in entries if entry["app"] == app), None)
+        own = entry["buttons"] if entry is not None else {}
+        if (profile["buttons"].get(key), own.get(key)) == ((None, action) if drawn else (action, None)):
+            return True
+        profile["buttons"].pop(key, None)
+        own.pop(key, None)
+        if entry is not None and not own:
+            entries.remove(entry)
+        if drawn:
+            if entry is None or not own:
+                entry = {"app": app, "buttons": {}}
+                entries.append(entry)
+            entry["buttons"][key] = copy.deepcopy(action)
+        elif action is not None:
+            profile["buttons"][key] = copy.deepcopy(action)
+        self._push()
         return True
 
     def set_profile_ring(self, app, bubbles):

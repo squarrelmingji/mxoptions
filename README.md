@@ -31,8 +31,12 @@ service and a D-Bus API for other programs.
 - **Gestures.** Hold a button and swipe in four directions, or tap. A live compass shows how your
   movement is read. You choose when a swipe fires (on release, at once, or repeating as you keep
   moving), the distances in millimetres, a dead zone for diagonals, and a vibration pattern for each
-  moment of a gesture. The same button also reads sixteen shapes drawn with it held (corners,
-  there and back, circles, shakes), each with an action of its own.
+  moment of a gesture. The same button also reads sixteen shapes drawn with it held (corners, there
+  and back, circles, shakes), each with an action of its own. An app you added can give any button
+  gestures of its own on the Buttons page, Pan and Zoom while held included; how swipes are read,
+  the speed and the vibrations stay the same in every app. While you try gestures on the Gestures
+  page, the app in front before MX Options counts, and the compass shows the gestures for all apps.
+  Rotating is not offered.
 - **Actions Ring.** A menu around the cursor, as bubbles, a pie or tiles. Bubbles run actions, open
   their own ring of bubbles (three levels deep), or are *dials* that you turn with the wheel or the
   thumb wheel without closing the menu: volume, tabs, zoom, undo, tracks and more. The cursor stays
@@ -596,10 +600,11 @@ only files you trust.
   wheel scrolls sideways) and *Documents and slides* (the same buttons, thumb wheel zooms). A set
   only changes what the app does as in all apps; a button or function it has of its own stays, and
   the dialog lists both before you apply. Logi Options+ also makes the middle button pan in the
-  spreadsheet and document apps: gestures are for all apps only here, so that is left out, as are
-  its sets for Photoshop, Premiere Pro, Final Cut Pro, Zoom and Teams and its rings for single apps.
-  Nothing is matched by the app's name. Ctrl+Z and Ctrl+Y are key positions: on a layout where Z
-  and Y trade places (German, for one) they trade places too.
+  spreadsheet and document apps: these sets leave the middle button as it is (an app's middle button
+  can be given Gestures with Pan by hand), and they leave out its sets for Photoshop, Premiere Pro,
+  Final Cut Pro, Zoom and Teams and its rings for single apps. Nothing is matched by the app's name.
+  Ctrl+Z and Ctrl+Y are key positions: on a layout where Z and Y trade places (German, for one) they
+  trade places too.
 - **The haptic panel does not answer while a main button is held.** With the left button down the
   mouse reports nothing for the panel, however hard it is pressed; the gesture button is reported
   all the same. So gestures made while a window is being dragged want the gesture button, not the

@@ -382,7 +382,10 @@ DEFAULTS = {
     # profile; an app not listed uses "thumbwheel"'s function. Direction, speed and steps stay global.
     # "thumbwheel_keys": [{"app", "up", "down"}]: what "keys" sends turning up and turning down in an app with a
     # profile, both its own ([]: nothing); an app not listed sends "thumbwheel"'s "up" and "down".
-    "mouse": {"profiles": [], "thumbwheel": [], "thumbwheel_keys": []},
+    # "gestures": [{"app", "buttons"}]: for an app with a profile, buttons with gestures of their own: key -> a
+    # "gestures" action (app_gestures_action), for buttons its profile does not list. Recognition, speed, direction
+    # and vibration ("gestures") stay global.
+    "mouse": {"profiles": [], "thumbwheel": [], "thumbwheel_keys": [], "gestures": []},
 }
 
 
@@ -606,6 +609,37 @@ def profile_button_action(action):
     return action == NATIVE or keyboard_action(action) or action in MOUSE_ONLY
 
 
+# What the tap, a direction or a shape of an app's own gestures may do besides what a key may (but the ring): the
+# mouse actions done in one go, exactly as offered for the gestures of all apps
+GESTURE_SLOT_MOUSE = ({"type": "wheel_mode"}, {"type": "dpi_cycle"}, {"type": "flow"})
+
+
+def gesture_slot_action(action):
+    """Whether the tap, a direction or a shape of an app's own gestures may do ``action``."""
+    return (keyboard_action(action) and action["type"] != "ring") or action in GESTURE_SLOT_MOUSE
+
+
+def app_gestures_action(action):
+    """The gestures of a button of one app made from ``action``: type "gestures", the tap and each direction what
+    gesture_slot_action allows ({"type": "none"} where not), the shapes that have such an action, "mode" if
+    gestures.hold_mode knows it; nothing else. None if ``action`` is no gestures action at all."""
+    if not (isinstance(action, dict) and action.get("type") == "gestures"):
+        return None
+    clean = {"type": "gestures"}
+    for direction in ("tap", "up", "down", "left", "right"):
+        sub = environment.modernize(action.get(direction))
+        clean[direction] = sub if gesture_slot_action(sub) else {"type": "none"}
+    drawn = action.get("shapes")
+    drawn = {name: environment.modernize(sub) for name, sub in (drawn.items() if isinstance(drawn, dict) else ())
+             if name in gestures.SHAPES}
+    drawn = {name: sub for name, sub in drawn.items() if gesture_slot_action(sub) and sub["type"] != "none"}
+    if drawn:
+        clean["shapes"] = drawn
+    if gestures.hold_mode(action):
+        clean["mode"] = action["mode"]
+    return clean
+
+
 def mouse_profile(profile):
     """The mouse profile made from ``profile`` (see DEFAULTS). Buttons it cannot have are dropped; None if it is
     not one at all."""
@@ -671,6 +705,26 @@ def _mouse_thumbwheel_keys(entries, profiles):
     return kept
 
 
+def _mouse_gestures(entries, profiles):
+    """The buttons of single apps with gestures of their own in ``entries``: {"app", "buttons"} each, only for apps
+    with one of ``profiles``, the first for each app, in their order; of its buttons only those its profile does not
+    list, each as app_gestures_action makes it (left out where that is None), and no entry without one. Other keys of
+    an entry are left out."""
+    kept = []
+    for entry in entries if isinstance(entries, list) else ():
+        if not (isinstance(entry, dict) and isinstance(entry.get("app"), str) and isinstance(entry.get("buttons"), dict)):
+            continue
+        profile = next((profile for profile in profiles if profile["app"] == entry["app"]), None)
+        if profile is None or any(other["app"] == entry["app"] for other in kept):
+            continue
+        buttons = {key: app_gestures_action(entry["buttons"][key]) for key in BUTTONS
+                   if key in entry["buttons"] and key not in profile["buttons"]}
+        buttons = {key: action for key, action in buttons.items() if action is not None}
+        if buttons:
+            kept.append({"app": entry["app"], "buttons": buttons})
+    return kept
+
+
 def app_thumb_keys(cfg, app):
     """The keystrokes ``app`` has of its own for "keys" ("mouse.thumbwheel_keys"): {"up", "down"}, or None: those
     for all apps. None too for an app without a mouse profile."""
@@ -695,13 +749,18 @@ def thumbwheel(cfg, app):
                 **(app_thumb_keys(cfg, app) or {}))
 
 
-def mouse_buttons(cfg, app):
-    """What the buttons do while ``app`` is in front: its profile over "buttons"."""
-    buttons = dict(cfg["buttons"])
+def own_buttons(cfg, app):
+    """What the buttons of ``app`` do of its own: its profile's buttons and its own gestures ({}: no profile)."""
     profile = mouse_profile_of(cfg, app)
-    if profile is not None:
-        buttons.update(profile["buttons"])
-    return buttons
+    if profile is None:
+        return {}
+    drawn = next((entry["buttons"] for entry in cfg["mouse"]["gestures"] if entry["app"] == app), {})
+    return {**drawn, **profile["buttons"]}
+
+
+def mouse_buttons(cfg, app):
+    """What the buttons do while ``app`` is in front: its own over "buttons"."""
+    return {**cfg["buttons"], **own_buttons(cfg, app)}
 
 
 def ring_bubbles(cfg, app):
@@ -712,9 +771,9 @@ def ring_bubbles(cfg, app):
 
 # Suggested settings for one app, given only to an app with a mouse profile that the user picked, never by its
 # name: id -> (label, {button: action}, thumb wheel function). Own Linux and Windows choices after three rows of
-# the predefined app-specific settings of Logi Options+ (browser; Excel; Word and PowerPoint): what Logi Options+
-# does there that a profile cannot (panning while the middle button is held) is left as it is. Keys are key
-# positions, as everywhere.
+# the predefined app-specific settings of Logi Options+ (browser; Excel; Word and PowerPoint): panning while the
+# middle button is held, which Logi Options+ does there, is left out (an app can be given Gestures with Pan by
+# hand: "mouse.gestures"). Keys are key positions, as everywhere.
 APP_PRESETS = {
     "browser": ("Web browser", {"middle": NATIVE, "back": NATIVE, "forward": NATIVE}, "tabs"),
     "spreadsheet": ("Spreadsheet", {"back": {"type": "keys", "keys": ["KEY_LEFTCTRL", "KEY_Z"]},
@@ -732,7 +791,8 @@ def preset_changes(cfg, app, preset):
     if profile is None:
         return {}, None
     _label, buttons, function = APP_PRESETS[preset]
-    return ({key: copy.deepcopy(action) for key, action in buttons.items() if key not in profile["buttons"]},
+    own = own_buttons(cfg, app)
+    return ({key: copy.deepcopy(action) for key, action in buttons.items() if key not in own},
             function if app_thumb_function(cfg, app) is None else None)
 
 
@@ -866,6 +926,7 @@ def _sanitize(cfg):
     cfg["mouse"]["thumbwheel"] = _mouse_thumbwheel(cfg["mouse"].get("thumbwheel"), cfg["mouse"]["profiles"])
     cfg["mouse"]["thumbwheel_keys"] = _mouse_thumbwheel_keys(cfg["mouse"].get("thumbwheel_keys"),
                                                              cfg["mouse"]["profiles"])
+    cfg["mouse"]["gestures"] = _mouse_gestures(cfg["mouse"].get("gestures"), cfg["mouse"]["profiles"])
     return cfg
 
 

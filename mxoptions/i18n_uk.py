@@ -1099,10 +1099,14 @@ STRINGS = {
     "Documents and slides": "Документи й слайди",
     "Apply the suggested settings \"{preset}\" to {app}?": "Застосувати запропоновані налаштування «{preset}» до {app}?",
     "{control}: stays as set for this app ({value})": "{control}: лишається, як задано для цієї програми ({value})",
-    "Logi Options+ also pans while the middle button is held here. Gestures are set for all apps only, so the "
-    "middle button stays as it is.":
-        "Logi Options+ тут ще й прокручує сторінку, поки утримано середню кнопку. Жести задаються лише для всіх "
-        "програм, тож середня кнопка лишається як є.",
+    "Logi Options+ also pans while the middle button is held here. These settings leave the middle button as it "
+    "is: to pan, give it Gestures for this app and choose Pan.":
+        "Logi Options+ тут ще й прокручує сторінку, поки утримано середню кнопку. Ці налаштування лишають середню "
+        "кнопку як є: щоб прокручувати, дайте їй «Жести» для цієї програми й виберіть «Панорама».",
+    "These are the gestures for all apps. Those of {} are set on the Buttons page; how gestures are read and felt "
+    "counts in every app.":
+        "Це жести для всіх програм. Жести {} задаються на сторінці «Кнопки»; як жести розпізнаються й відчуваються, "
+        "однаково в усіх програмах.",
     "Everything else stays as it is. To undo one of these, choose \"As in all apps\" for it.":
         "Усе інше лишається як є. Щоб скасувати щось із цього, виберіть для нього «Як в усіх програмах».",
     "Settings changed while this dialog was open. Choose Suggested settings again.":

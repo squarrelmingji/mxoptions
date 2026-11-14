@@ -246,6 +246,7 @@ class GesturesPage(ScrollPage):
         self.mode.setAccessibleName(_("Holding it and moving"))
         self.mode.selected.connect(self._set_mode)
         self.mode_row = card.add(Row(_("Holding it and moving"), None, self.mode))
+        self.apps_note = card.add_plain(hint_label(""))
         self.move_speed = card.add(SliderRow(_("Speed"), 0.25, 3.0, 0.05, "{:.2f}×", hint=_(
             "How far the page moves, or how quickly it zooms, for the same movement of the hand.")))
         self.move_speed.changed.connect(lambda value: self._set("move_speed", round(value, 2)))
@@ -298,6 +299,7 @@ class GesturesPage(ScrollPage):
         self.finish()
 
         store.changed.connect(self._refresh)
+        store.mouse_app_changed.connect(self._refresh)
         store.state_changed.connect(self._state)
         store.gesture_changed.connect(self._gesture)
         self._refresh()
@@ -346,6 +348,7 @@ class GesturesPage(ScrollPage):
     def _edit_actions(self):
         key = gesture_button(self.store.cfg)
         if key:
+            self.store.set_mouse_app(None)  # this page is for all apps: so is the button it opens
             self.edit_actions.emit(key)
 
     # -- practice mode: only while the page is on screen ---------------------------
@@ -400,6 +403,10 @@ class GesturesPage(ScrollPage):
         for widget in (self.preset_row, self.cue_grid, self.per_direction_row, self.direction_grid):
             widget.setEnabled(settings["haptic"])
 
+        app = self.store.mouse_app
+        self.apps_note.setText(_("These are the gestures for all apps. Those of {} are set on the Buttons page; how "
+                                 "gestures are read and felt counts in every app.").format(app) if app else "")
+        self.apps_note.setVisible(bool(app))
         self.button.set_value(key)
         self.mode.set_value(mode)
         self.mode.setEnabled(key is not None)

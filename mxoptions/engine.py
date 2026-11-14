@@ -496,6 +496,8 @@ class Engine:
         self._app = app
         old = self._effective_buttons()
         changed = self._remap_buttons(old)
+        if self._gesture is not None:  # held on, the same in both apps: what the app before had moved is not used here
+            self._gesture["fraction"] = [0.0, 0.0]
         writes = [key for key in changed if self._reporting(old[key]) != self._reporting(self._buttons[key])]
         sections = ["buttons"] if writes else []
         thumb = config.thumbwheel(self.cfg, app)
