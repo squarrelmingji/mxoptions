@@ -42,6 +42,8 @@ PAN_MM = 8.0  # mm of hand travel that pan or zoom one wheel detent at speed 1 (
 MOVE_MAX = 32767 // vinput.NOTCH
 # ponytail: fixed gap between zoom steps, next report checks it; adapt to queue depth if fast zoom feels steppy
 ZOOM_GAP = 0.05  # s of other engine work at least between two zoom steps of held button (each holds Ctrl ~16 ms)
+THUMB_KEY_GAP = 0.05  # s from the end of one keystroke of the thumb wheel to the next at least (own choice):
+                      # a faster turn skips steps, and none run later
 # SmartShift lets the wheel go when it is spun faster than its threshold and catches it again when it
 # stops, but the mouse only announces a mode change made with the button. So the engine watches the
 # wheel's speed itself to know when that happens.
@@ -74,6 +76,7 @@ THUMB_STEPS = {
     "desktops": (5, environment.wanted("desktop_right"), environment.wanted("desktop_left")),
     "brightness": (1, keys("BRIGHTNESSUP"), keys("BRIGHTNESSDOWN")),
     "zoom": (1, None, None),
+    "keys": (1, None, None),  # thumbwheel "up" / "down": one keystroke per wheel click at speed 1
 }
 
 
@@ -167,7 +170,7 @@ class Engine:
         self._spin = {"events": collections.deque(), "sign": 0, "last": 0.0, "free": False, "since": 0.0}
         self._last_tick = 0.0
         self._wheel_fraction = 0.0
-        self._thumb = {"acc": 0.0, "last": 0.0, "fraction": 0.0}
+        self._thumb = {"acc": 0.0, "last": 0.0, "fraction": 0.0, "keyed": 0.0}  # keyed: end of the last keystroke
         self._monitor = False      # the settings window is open and wants to see button presses
         self._watcher = None       # follows the mouse's ordinary reports (hidpp.MouseReports)
         self._rivals = []          # other mouse software found running, and when to look again
@@ -1493,6 +1496,9 @@ class Engine:
         state["last"] = now
         state["acc"] += clicks * thumb["speed"]
         step, forward, backward = THUMB_STEPS[thumb["function"]]
+        if thumb["function"] == "keys":
+            self._thumb_keys(thumb, step, now)
+            return
         while abs(state["acc"]) >= step:
             positive = state["acc"] > 0
             state["acc"] -= step if positive else -step
@@ -1503,6 +1509,23 @@ class Engine:
             if thumb["ticks"] and now - self._last_tick >= 0.04:  # the wheel itself has no detents: give it some
                 self._last_tick = now
                 self._cue(device.WAVE_TICK)
+
+    def _thumb_keys(self, thumb, step, now):
+        """Custom keystrokes: the one of the direction turned, once per report at most and THUMB_KEY_GAP after the
+        last at least. Whole steps beyond it are dropped, never sent later."""
+        state = self._thumb
+        whole = int(state["acc"] / step)
+        state["acc"] -= whole * step  # before sending: nothing is owed, even when sending fails
+        names = thumb["up"] if whole > 0 else thumb["down"]
+        if not whole or not names or now - state["keyed"] < THUMB_KEY_GAP:
+            return
+        try:
+            self.executor.trigger({"type": "keys", "keys": list(names)})
+        finally:
+            state["keyed"] = time.monotonic()  # from the end: other work gets the gap, even after an error
+        if thumb["ticks"] and now - self._last_tick >= 0.04:
+            self._last_tick = now
+            self._cue(device.WAVE_TICK)
 
     def _zoom(self, direction, steps=1):
         """Ctrl and wheel turned ``steps`` detents in one go (thumb wheel: one). Two pauses, whatever ``steps``."""

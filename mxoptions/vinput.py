@@ -95,14 +95,26 @@ class Holds:
                 self._emit(name, False)
 
     def tap(self, names, wait=0.012):
-        """Press and release at once. A key someone holds already is left as it is: neither down nor up."""
+        """Press and release at once. A key someone holds already is left as it is: neither down nor up.
+        Whatever goes wrong, each key this tap may have put down is sent up once, the others even when one fails.
+        An error of a down or the wait is raised; otherwise the first error of an up, once all were tried."""
         names = [name for name in names if name not in self._held]
-        for name in names:
-            self._emit(name, True)
-        if names and wait:
-            time.sleep(wait)
-        for name in reversed(names):
-            self._emit(name, False)
+        pressed, failed = [], None
+        try:
+            for name in names:
+                pressed.append(name)  # before: a down that failed may have reached the system all the same
+                self._emit(name, True)
+            if pressed and wait:
+                time.sleep(wait)
+        finally:
+            for name in reversed(pressed):
+                try:
+                    self._emit(name, False)
+                except BaseException as err:  # an interrupt too: the keys after it still go up
+                    if failed is None:
+                        failed = err
+        if failed is not None:
+            raise failed
 
     def release_all(self, owner=None):
         """Let go of what ``owner`` holds; with None, of everything (closing down)."""

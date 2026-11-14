@@ -243,7 +243,7 @@ class Store(QObject):
         if _kind(value) != _kind(current) and None not in (value, current):
             return False
         holder[key] = value
-        cfg = config.clean(cfg)
+        asked, cfg = cfg, config.clean(cfg)  # clean() leaves what it is given as it was
         speeds = (self.state.get("caps") or {}).get("dpi")
         if speeds:  # keep pointer speeds within what this mouse can do, as the sliders would
             for name in ("dpi", "alt_dpi", "precision_dpi"):
@@ -258,6 +258,9 @@ class Store(QObject):
             return False
         if parts[0] in ("keyboard", "mouse") and stored != value:  # what a key or a profile cannot have: refused, not dropped
             return False
+        thumb = asked.get("thumbwheel")
+        if isinstance(thumb, dict) and any(d in thumb and thumb[d] != cfg["thumbwheel"][d] for d in ("up", "down")):
+            return False  # a combination the thumb wheel cannot send: refused, not dropped
         if cfg != self.cfg:
             self.replace(cfg)
         return True

@@ -1254,7 +1254,7 @@ class ThumbWheelSettings(unittest.TestCase):
         cfg["thumbwheel"].update(function="tabs", invert=True, speed=1.5, ticks=False)
         cfg["mouse"]["profiles"] = [profile(KATE), profile(KONSOLE)]
         cfg["mouse"]["thumbwheel"] = [own(KATE, "zoom"), own(KWRITE, "volume")]  # KWrite: no profile, never cleaned
-        expected = {"function": "tabs", "invert": True, "speed": 1.5, "ticks": False}
+        expected = {"function": "tabs", "invert": True, "speed": 1.5, "ticks": False, "up": [], "down": []}
         for app in (None, "org.example.unknown", KONSOLE, KWRITE):
             with self.subTest(app=app):
                 self.assertIsNone(config.app_thumb_function(cfg, app))
@@ -1617,7 +1617,7 @@ class ThumbWheelPage(unittest.TestCase):
         page.thumb_invert.setChecked(True)
         page.thumb_speed.changed.emit(1.5)
         page.thumb_ticks.setChecked(False)
-        self.assertEqual(store.cfg["thumbwheel"], {"function": "hscroll", "invert": True, "speed": 1.5, "ticks": False})
+        self.assertEqual(store.cfg["thumbwheel"], {"function": "hscroll", "invert": True, "speed": 1.5, "ticks": False, "up": [], "down": []})
         page.thumb_function.activated.emit(0)
         self.assertEqual((store.cfg["mouse"]["thumbwheel"], store.cfg["thumbwheel"]["function"]), ([], "hscroll"))
         self.assertEqual(page.thumb_function.currentIndex(), 0)

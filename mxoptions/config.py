@@ -55,7 +55,7 @@ BUTTONS = {
 }
 BUTTON_BY_CID = {cid: key for key, cid in BUTTONS.items()}
 
-THUMB_FUNCTIONS = ("hscroll", "zoom", "volume", "tabs", "desktops", "brightness")
+THUMB_FUNCTIONS = ("hscroll", "zoom", "volume", "tabs", "desktops", "brightness", "keys")
 WHEEL_CLICK_MODES = ("off", "haptic", "sound", "both")
 WHEEL_SOUNDS = ("tick", "clack", "relay", "soft", "custom")
 WHEEL_MOMENTS = ("both", "free", "ratchet")
@@ -302,7 +302,8 @@ DEFAULTS = {
         "speed": 1.0,
     },
     "thumbwheel": {"function": "hscroll", "invert": False, "speed": 1.0,
-                   "ticks": True},  # a vibration tick for every step of a stepped function
+                   "ticks": True,  # a vibration tick for every step of a stepped function
+                   "up": [], "down": []},  # "keys": the key combination for turning up, for turning down; [] none
     # What marks the wheel changing between ratchet and free spin, like the clutch of earlier MX Masters
     "wheel_click": {
         "mode": "both",       # off | haptic | sound | both
@@ -741,6 +742,10 @@ def _sanitize(cfg):
     cfg["gestures"]["far_mm"] = max(cfg["gestures"]["far_mm"], cfg["gestures"]["min_mm"] + 2.0)
     if cfg["thumbwheel"].get("function") not in THUMB_FUNCTIONS:
         cfg["thumbwheel"]["function"] = "hscroll"
+    for direction in ("up", "down"):  # keyboard keys only: the shared check also knows mouse buttons
+        value = cfg["thumbwheel"].get(direction)
+        if not (_key_names(value, empty=True) and all(name.startswith("KEY_") for name in value)):
+            cfg["thumbwheel"][direction] = []
     if cfg["wheel"].get("mode") not in ("ratchet", "freespin"):
         cfg["wheel"]["mode"] = "ratchet"
     for section, key in (("wheel", "smartshift"), ("wheel", "natural"), ("wheel", "smooth"), ("thumbwheel", "invert"),

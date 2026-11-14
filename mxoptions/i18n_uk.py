@@ -178,6 +178,17 @@ STRINGS = {
     "Switch tabs": "Перемикання вкладок",
     "Switch desktops": "Перемикання стільниць",
     "Brightness": "Яскравість",
+    "Custom keystrokes": "Власні комбінації клавіш",
+    "Turning up": "Обертання вгору",
+    "Turning down": "Обертання вниз",
+    "Record": "Записати",
+    "Clear": "Очистити",
+    "Record the keystroke for turning up": "Записати комбінацію для обертання вгору",
+    "Record the keystroke for turning down": "Записати комбінацію для обертання вниз",
+    "Clear the keystroke for turning up": "Очистити комбінацію для обертання вгору",
+    "Clear the keystroke for turning down": "Очистити комбінацію для обертання вниз",
+    "At most 20 keystrokes per second. Fast turns may skip steps; skipped steps do not run later.":
+        "Щонайбільше 20 комбінацій за секунду. Швидке обертання може пропускати кроки; пропущені кроки не виконуються пізніше.",
 
     # haptics
     "Vibration feedback from the thumb panel.": "Вібровідгук сенсорної панелі.",
@@ -439,8 +450,9 @@ STRINGS = {
     "Choose a sound": "Виберіть звук",
     "Sounds (*.wav)": "Звуки (*.wav)",
     "Feel the steps": "Відчутні кроки",
-    "This wheel turns smoothly, so each step of volume, tabs, desktops, brightness or zoom gets a tick.":
-        "Це коліщатко крутиться плавно, тому кожен крок гучності, вкладок, стільниць, яскравості чи масштабу дає короткий тик.",
+    "This wheel turns smoothly, so each step of volume, tabs, desktops, brightness, zoom or keystrokes gets a tick.":
+        "Це коліщатко крутиться плавно, тому кожен крок гучності, вкладок, стільниць, яскравості, масштабу чи комбінацій "
+        "клавіш дає короткий тик.",
 
     # firmware
     # shapes drawn with a gesture button
@@ -1034,9 +1046,9 @@ STRINGS = {
     "Use the ring for all apps in {}? Its own ring goes.": "Використовувати в {} кільце для всіх програм? Власне кільце зникне.",
     "Size and style are shared by all apps.": "Розмір і вигляд спільні для всіх програм.",
     "While {} is in front. \"As in all apps\": the function set for all apps. Direction, speed and steps are the "
-    "same in every app.":
+    "same in every app, and so are the keystrokes.":
         "Поки попереду {}. «Як в усіх програмах»: функція, задана для всіх програм. Напрямок, швидкість і кроки "
-        "однакові в усіх програмах.",
+        "однакові в усіх програмах, як і комбінації клавіш.",
     "Holding it and moving": "Утримання й рух",
     "Swipes": "Напрямки",
     "Pan": "Панорама",

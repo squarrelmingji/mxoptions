@@ -17,6 +17,7 @@ from ..i18n import _
 from .action_picker import ActionPicker
 from . import mouse_photo
 from .mouse_view import MouseView
+from .recorder import ShortcutRecorder
 from . import theme
 from . import tray_icon
 from .widgets import (
@@ -48,6 +49,7 @@ THUMB_LABELS = {
     "tabs": "Switch tabs",
     "desktops": "Switch desktops",
     "brightness": "Brightness",
+    "keys": "Custom keystrokes",
 }
 HAPTIC_PRESETS = [(25, "Subtle"), (45, "Low"), (60, "Medium"), (100, "High")]
 CLICK_MODE_LABELS = [("off", "Off"), ("haptic", "Vibration"), ("sound", "Sound"), ("both", "Both")]
@@ -431,12 +433,37 @@ class PointScrollPage(ScrollPage):
         self.apps = card.add(AppChooser(store, _("Settings for")))  # whose function is shown: the rest is for all apps
         self.apps.when_chosen = lambda app: _(
             "While {} is in front. \"As in all apps\": the function set for all apps. Direction, speed and steps are "
-            "the same in every app.").format(app)
+            "the same in every app, and so are the keystrokes.").format(app)
         self.thumb_function = QComboBox()
         for key in config.THUMB_FUNCTIONS:
             self.thumb_function.addItem(_(THUMB_LABELS[key]), key)
         self.thumb_function.activated.connect(self._thumb_chosen)
         card.add(Row(_("Function"), None, self.thumb_function))
+        self.thumb_keys, self.thumb_keys_rows = {}, {}  # "up" / "down": (recorder, Record, Clear), its row
+        for direction, title, hint, record_name, clear_name in (
+                ("up", _("Turning up"),
+                 _("At most 20 keystrokes per second. Fast turns may skip steps; skipped steps do not run later."),
+                 _("Record the keystroke for turning up"), _("Clear the keystroke for turning up")),
+                ("down", _("Turning down"), None,
+                 _("Record the keystroke for turning down"), _("Clear the keystroke for turning down"))):
+            recorder = ShortcutRecorder()
+            record, clear = QPushButton(_("Record")), QPushButton(_("Clear"))
+            box = QWidget()
+            line = QHBoxLayout(box)
+            line.setContentsMargins(0, 0, 0, 0)
+            line.setSpacing(8)
+            line.addWidget(recorder, 1)
+            for button, name in ((record, record_name), (clear, clear_name)):
+                button.setObjectName("tool")
+                button.setCursor(Qt.CursorShape.PointingHandCursor)
+                button.setAccessibleName(name)
+                line.addWidget(button)
+            record.clicked.connect(lambda _checked=False, r=recorder: r.setFocus())
+            recorder.recorded.connect(lambda names, d=direction: self._thumb_keys_recorded(d, names))
+            clear.clicked.connect(lambda _checked=False, d=direction: self._thumb_keys_cleared(d))
+            self.thumb_keys[direction] = (recorder, record, clear)
+            self.thumb_keys_rows[direction] = row = card.add(Row(title, hint, box))
+            row.layout().setStretch(1, 1)
         self.thumb_invert = Switch()
         self.thumb_invert.toggled.connect(lambda on: self.store.set("thumbwheel", "invert", on))
         card.add(Row(_("Reverse direction"), None, self.thumb_invert))
@@ -446,7 +473,8 @@ class PointScrollPage(ScrollPage):
         self.thumb_ticks.toggled.connect(lambda on: self.store.set("thumbwheel", "ticks", on))
         self.thumb_ticks_row = card.add(Row(
             _("Feel the steps"),
-            _("This wheel turns smoothly, so each step of volume, tabs, desktops, brightness or zoom gets a tick."),
+            _("This wheel turns smoothly, so each step of volume, tabs, desktops, brightness, zoom or keystrokes gets "
+              "a tick."),
             self.thumb_ticks,
         ))
         self.thumb_card = card
@@ -470,6 +498,14 @@ class PointScrollPage(ScrollPage):
             self.store.set_profile_thumb(profile["app"], function)
         else:
             self.store.set("thumbwheel", "function", function)
+
+    def _thumb_keys_recorded(self, direction, names):
+        """A keystroke recorded for turning ``direction``: for all apps, also while an app is chosen."""
+        self.store.set("thumbwheel", direction, list(names))
+        self.thumb_keys[direction][1].setFocus()  # back where recording started
+
+    def _thumb_keys_cleared(self, direction):
+        self.store.set("thumbwheel", direction, [])
 
     # -- the mode switch click ----------------------------------------------------
 
@@ -545,6 +581,10 @@ class PointScrollPage(ScrollPage):
             0 if profile is not None and own is None else max(0, self.thumb_function.findData(own or thumb["function"])))
         self.thumb_invert.set_checked_silently(thumb["invert"])
         self.thumb_speed.set_value(thumb["speed"])
+        for direction, (recorder, _record, clear) in self.thumb_keys.items():
+            self.thumb_card.set_row_visible(self.thumb_keys_rows[direction], shown == "keys")
+            recorder.set_keys(thumb[direction])
+            clear.setEnabled(bool(thumb[direction]))
 
     def _state(self, state):
         caps = state.get("caps")

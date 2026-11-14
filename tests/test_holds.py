@@ -60,6 +60,171 @@ class Holds(unittest.TestCase):
         self.assertEqual(self.holds.held(), set())
 
 
+class Refusing:
+    """An emitter that records every event and what the system would have down, and raises once at each event of
+    ``trips`` ((name, down) pairs, or a dict of them to the exception class). ``applied``: whether a refused
+    event took effect all the same (a down that got through before the error)."""
+
+    def __init__(self, trips=(), kind=OSError, applied=True):
+        self.trips = dict(trips) if isinstance(trips, dict) else {trip: kind for trip in trips}
+        self.applied = applied
+        self.calls, self.active, self.raised = [], set(), []
+
+    def __call__(self, name, down):
+        self.calls.append((name, down))
+        kind = self.trips.pop((name, down), None)
+        if kind is None or self.applied:
+            (self.active.add if down else self.active.discard)(name)
+        if kind is not None:
+            self.raised.append(kind(f"synthetic {name} {'down' if down else 'up'}"))
+            raise self.raised[-1]
+
+
+SHIFT, Z = "KEY_LEFTSHIFT", "KEY_Z"
+
+
+class TapFailures(unittest.TestCase):
+    """A tap that fails halfway sends every key it may have put down up again, and says what went wrong."""
+
+    def tap(self, emit, names, error=OSError, wait=0, holds=None):
+        holds = holds or vinput.Holds(emit)
+        try:
+            holds.tap(names, wait=wait)
+        except BaseException as caught:  # an interrupt of the wrong kind fails this test, not the whole run
+            self.assertIsInstance(caught, error)
+            return holds, caught
+        self.fail(f"no {error.__name__}")
+
+    def assert_next_tap_works(self, holds, emit):
+        before = len(emit.calls)
+        holds.tap([CTRL, Z], wait=0)
+        self.assertEqual(emit.calls[before:], [(CTRL, True), (Z, True), (Z, False), (CTRL, False)])
+        self.assertEqual(emit.active, set())
+
+    def test_the_first_down_failing_still_sends_its_up(self):
+        emit = Refusing([(CTRL, True)])
+        holds, error = self.tap(emit, [CTRL, Z])
+        self.assertIs(error, emit.raised[0])
+        self.assertEqual(emit.calls, [(CTRL, True), (CTRL, False)])
+        self.assertEqual((emit.active, holds.held()), (set(), set()))
+        self.assert_next_tap_works(holds, emit)
+
+    def test_a_later_down_failing_sends_every_up(self):
+        emit = Refusing([(Z, True)])
+        holds, error = self.tap(emit, [CTRL, Z])
+        self.assertIs(error, emit.raised[0])
+        self.assertEqual(emit.calls, [(CTRL, True), (Z, True), (Z, False), (CTRL, False)])
+        self.assertEqual(emit.active, set())
+        self.assert_next_tap_works(holds, emit)
+
+    def test_the_wait_failing_sends_every_up(self):
+        for kind in (OSError, KeyboardInterrupt):
+            with self.subTest(kind=kind.__name__):
+                emit, stopped = Refusing(), kind("synthetic wait")
+                with mock.patch.object(vinput.time, "sleep", side_effect=stopped):
+                    holds, error = self.tap(emit, [CTRL, Z], kind, wait=0.012)
+                self.assertIs(error, stopped)
+                self.assertEqual(emit.calls, [(CTRL, True), (Z, True), (Z, False), (CTRL, False)])
+                self.assertEqual(emit.active, set())
+                self.assert_next_tap_works(holds, emit)
+
+    def test_an_up_failing_still_sends_the_others_and_is_raised(self):
+        emit = Refusing([(Z, False)])
+        holds, error = self.tap(emit, [CTRL, Z])
+        self.assertIs(error, emit.raised[0])
+        self.assertEqual(emit.calls, [(CTRL, True), (Z, True), (Z, False), (CTRL, False)])
+        self.assertEqual(emit.active, set())
+        self.assert_next_tap_works(holds, emit)
+
+    def test_any_kind_of_up_error_lets_the_others_go_up_in_reverse(self):
+        emit = Refusing([(SHIFT, False)], ValueError)
+        holds, error = self.tap(emit, [CTRL, SHIFT, Z], ValueError)
+        self.assertIs(error, emit.raised[0])
+        self.assertEqual(emit.calls[3:], [(Z, False), (SHIFT, False), (CTRL, False)])
+        self.assertEqual(emit.active, set())
+
+    def test_the_error_of_a_down_wins_over_one_of_an_up(self):
+        emit = Refusing({(Z, True): OSError, (CTRL, False): ValueError})
+        holds, error = self.tap(emit, [CTRL, Z])
+        self.assertIs(error, emit.raised[0])
+        self.assertEqual(emit.calls, [(CTRL, True), (Z, True), (Z, False), (CTRL, False)])
+        self.assertEqual(len(emit.raised), 2)
+
+    def test_an_interrupt_during_an_up_still_lets_the_others_go_up(self):
+        legs = {"alone": ({(Z, False): KeyboardInterrupt}, KeyboardInterrupt),
+                "after a down error": ({(Z, True): OSError, (Z, False): KeyboardInterrupt}, OSError),
+                "before another up error": ({(Z, False): KeyboardInterrupt, (CTRL, False): OSError}, KeyboardInterrupt),
+                "an ordinary error as control": ({(Z, False): OSError}, OSError)}
+        for leg, (trips, kind) in legs.items():
+            with self.subTest(leg=leg):
+                emit = Refusing(trips)
+                holds, error = self.tap(emit, [CTRL, Z], kind)
+                self.assertIs(error, emit.raised[0])  # the original or the first one, never a later one
+                self.assertEqual(emit.calls, [(CTRL, True), (Z, True), (Z, False), (CTRL, False)])
+                self.assertEqual(emit.active, set())
+                self.assert_next_tap_works(holds, emit)
+
+    def test_a_backend_refusing_every_up_is_asked_once_per_key(self):
+        """It is not retried: keys the system never let go of stay down there, and nobody tracks them."""
+        emit = Refusing([(Z, False), (CTRL, False)], applied=False)
+        holds, error = self.tap(emit, [CTRL, Z])
+        self.assertIs(error, emit.raised[0])
+        self.assertEqual(emit.calls, [(CTRL, True), (Z, True), (Z, False), (CTRL, False)])
+        self.assertEqual(emit.active, {CTRL, Z})
+        self.assertEqual(holds.held(), set())
+        self.assert_next_tap_works(holds, emit)
+
+    def test_keys_held_by_the_mouse_or_the_keyboard_stay_held(self):
+        emit = Refusing()
+        holds = vinput.Holds(emit)
+        holds.press([CTRL], "keyboard")
+        holds.press([SHIFT], "mouse")
+        emit.trips[(Z, True)] = OSError
+        self.tap(emit, [CTRL, SHIFT, Z], holds=holds)
+        self.assertEqual(emit.calls[2:], [(Z, True), (Z, False)])
+        self.assertEqual(holds.held(), {CTRL, SHIFT})
+        holds.release_all("mouse")
+        self.assertEqual(emit.calls[-1], (SHIFT, False))
+        holds.release([CTRL], "keyboard")
+        self.assertEqual(emit.calls[-1], (CTRL, False))
+        self.assertEqual(emit.active, set())
+
+    def test_a_key_named_twice_goes_up_twice_as_on_success(self):
+        emit = Refusing([(Z, True)])
+        self.tap(emit, [CTRL, CTRL, Z])
+        self.assertEqual(emit.calls, [(CTRL, True), (CTRL, True), (Z, True), (Z, False), (CTRL, False), (CTRL, False)])
+
+    def test_a_tap_that_works_sends_and_waits_as_before(self):
+        emit, slept = Refusing(), []
+        holds = vinput.Holds(emit)
+        holds.press([CTRL], "keyboard")
+        with mock.patch.object(vinput.time, "sleep", slept.append):
+            holds.tap([CTRL, C])
+            self.assertEqual(slept, [0.012])
+            for names in ([], [CTRL]):
+                holds.tap(names)
+            holds.tap([Z], wait=0)
+        self.assertEqual(slept, [0.012])
+        self.assertEqual(emit.calls, [(CTRL, True), (C, True), (C, False), (Z, True), (Z, False)])
+        self.assertEqual(holds.held(), {CTRL})
+
+    def test_a_trigger_failing_leaves_what_the_mouse_holds(self):
+        made = FakeInput()
+        emit = made._holds._emit = Refusing()
+        executor = actions.Executor(made, lambda action, phase: None)
+        self.addCleanup(executor.close)
+        executor.press(actions.keys("LEFTSHIFT"))
+        emit.trips[(Z, True)] = OSError
+        with self.assertRaises(OSError) as caught:
+            executor.trigger(actions.keys("LEFTCTRL", "LEFTSHIFT", "Z"))
+        self.assertIs(caught.exception, emit.raised[0])
+        self.assertEqual(emit.calls, [(SHIFT, True), (CTRL, True), (Z, True), (Z, False), (CTRL, False)])
+        self.assertEqual(made._holds.held(), {SHIFT})
+        executor.reset()
+        self.assertEqual(emit.calls[-1], (SHIFT, False))
+        self.assertEqual(emit.active, set())
+
+
 class Executors(unittest.TestCase):
     def setUp(self):
         self.input = FakeInput()
@@ -333,6 +498,55 @@ class Backends(unittest.TestCase):
                 self.assertEqual(len(sent), len(names))  # each of them did go to SendInput
                 made.tap(["KEY_BRIGHTNESSUP"])  # no key for it: the screens are told directly, once
                 fake_windows.brightness.change.assert_called_once_with(10)
+            finally:
+                sys.modules.pop("mxoptions.vinput_windows", None)
+
+    def test_linux_tap_failing_sends_its_ups_and_lets_go_of_the_lock(self):
+        from mxoptions import vinput_uinput
+        made = vinput_uinput.VirtualInput.__new__(vinput_uinput.VirtualInput)
+        emit = Refusing([(Z, True)])
+        made._lock = threading.Lock()
+        made._holds = vinput.Holds(emit)
+        with mock.patch.object(vinput.time, "sleep"):
+            with self.assertRaises(OSError) as caught:
+                made.tap([CTRL, Z])
+            self.assertIs(caught.exception, emit.raised[0])
+            self.assertFalse(made._lock.locked())
+            made.tap([CTRL, Z])
+        self.assertEqual(emit.calls, [(CTRL, True), (Z, True), (Z, False), (CTRL, False)] * 2)
+        self.assertEqual(emit.active, set())
+
+    def test_windows_tap_failing_sends_its_ups_and_lets_go_of_the_lock(self):
+        """Only its logic: SendInput itself is not reached from here."""
+        fake_windows = types.ModuleType("mxoptions.windows")
+        fake_windows.BRIGHTNESS_STEP = 10
+        fake_windows.brightness = mock.Mock()
+        with mock.patch.object(ctypes, "WinDLL", mock.MagicMock(), create=True), \
+                mock.patch.dict(sys.modules, {"mxoptions.windows": fake_windows}), mock.patch.object(vinput.time, "sleep"):
+            sys.modules.pop("mxoptions.vinput_windows", None)
+            backend = importlib.import_module("mxoptions.vinput_windows")
+            try:
+                code = lambda made: ((made.ki.wVk or made.ki.wScan), not made.ki.dwFlags & backend.KEY_UP)  # noqa: E731
+                sent, refused = [], []
+                refuse = {code(backend._key(Z, True).u)}
+
+                def send(*inputs):
+                    sent.extend(code(i.u) for i in inputs)
+                    if sent[-1] in refuse:
+                        refuse.clear()
+                        refused.append(OSError("synthetic: Windows did not take the input"))
+                        raise refused[-1]
+                backend._send = send
+                made = backend.VirtualInput()
+                sent.clear()
+                with self.assertRaises(OSError) as caught:
+                    made.tap([CTRL, Z])
+                self.assertIs(caught.exception, refused[0])
+                self.assertFalse(made._lock.locked())
+                expected = [code(backend._key(name, down).u) for name, down in ((CTRL, True), (Z, True), (Z, False), (CTRL, False))]
+                self.assertEqual(sent, expected)
+                made.tap([CTRL, Z])
+                self.assertEqual(sent, expected * 2)
             finally:
                 sys.modules.pop("mxoptions.vinput_windows", None)
 
