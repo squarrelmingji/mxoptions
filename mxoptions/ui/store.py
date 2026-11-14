@@ -138,7 +138,8 @@ class Store(QObject):
         kept = [profile for profile in profiles if profile["app"] != app]
         if len(kept) != len(profiles):
             self.cfg["mouse"]["profiles"] = kept
-            self.cfg["mouse"]["thumbwheel"] = [entry for entry in self.cfg["mouse"]["thumbwheel"] if entry["app"] != app]
+            for name in ("thumbwheel", "thumbwheel_keys"):  # its function and keystrokes go with it
+                self.cfg["mouse"][name] = [entry for entry in self.cfg["mouse"][name] if entry["app"] != app]
             self._push()
         if self.mouse_app == app:
             self.set_mouse_app(None)
@@ -164,6 +165,32 @@ class Store(QObject):
             entry["function"] = function
         else:
             return True
+        self._push()
+        return True
+
+    def set_profile_thumb_keys(self, app, keys):
+        """What "keys" sends while ``app`` is in front: {"up", "down"}, each a combination config.thumb_combo takes
+        ([]: nothing), or None for the keystrokes of all apps. False, and nothing changed, for an app without a
+        profile or keystrokes the settings would not keep."""
+        if self.mouse_profile(app) is None:
+            return False
+        entries = self.cfg["mouse"]["thumbwheel_keys"]
+        entry = next((entry for entry in entries if entry["app"] == app), None)
+        if keys is None:
+            if entry is not None:
+                entries.remove(entry)
+                self._push()
+            return True
+        if not (isinstance(keys, dict) and set(keys) == {"up", "down"} and all(map(config.thumb_combo, keys.values()))):
+            log.warning("thumb wheel keystrokes refused")
+            return False
+        wanted = {"app": app, "up": list(keys["up"]), "down": list(keys["down"])}
+        if entry == wanted:
+            return True
+        if entry is None:
+            entries.append(wanted)
+        else:
+            entry.update(wanted)
         self._push()
         return True
 

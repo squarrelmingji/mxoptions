@@ -433,7 +433,7 @@ class PointScrollPage(ScrollPage):
         self.apps = card.add(AppChooser(store, _("Settings for")))  # whose function is shown: the rest is for all apps
         self.apps.when_chosen = lambda app: _(
             "While {} is in front. \"As in all apps\": the function set for all apps. Direction, speed and steps are "
-            "the same in every app, and so are the keystrokes.").format(app)
+            "the same in every app; the keystrokes can be its own.").format(app)
         self.thumb_function = QComboBox()
         for key in config.THUMB_FUNCTIONS:
             self.thumb_function.addItem(_(THUMB_LABELS[key]), key)
@@ -464,6 +464,11 @@ class PointScrollPage(ScrollPage):
             self.thumb_keys[direction] = (recorder, record, clear)
             self.thumb_keys_rows[direction] = row = card.add(Row(title, hint, box))
             row.layout().setStretch(1, 1)
+        self.thumb_keys_global = QPushButton(_("Use the keystrokes for all apps"))
+        self.thumb_keys_global.setObjectName("tool")
+        self.thumb_keys_global.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.thumb_keys_global.clicked.connect(self._thumb_keys_use_global)
+        self.thumb_keys_own_row = card.add(Row(_("Keystrokes"), None, self.thumb_keys_global, note=""))
         self.thumb_invert = Switch()
         self.thumb_invert.toggled.connect(lambda on: self.store.set("thumbwheel", "invert", on))
         card.add(Row(_("Reverse direction"), None, self.thumb_invert))
@@ -500,12 +505,28 @@ class PointScrollPage(ScrollPage):
             self.store.set("thumbwheel", "function", function)
 
     def _thumb_keys_recorded(self, direction, names):
-        """A keystroke recorded for turning ``direction``: for all apps, also while an app is chosen."""
-        self.store.set("thumbwheel", direction, list(names))
+        self._thumb_keys_set(direction, list(names))
         self.thumb_keys[direction][1].setFocus()  # back where recording started
 
     def _thumb_keys_cleared(self, direction):
-        self.store.set("thumbwheel", direction, [])
+        self._thumb_keys_set(direction, [])
+
+    def _thumb_keys_set(self, direction, names):
+        """The keystroke for turning ``direction``: the chosen app's own, its other one as it is there now; or the
+        one for all apps."""
+        profile = chosen_profile(self.store)
+        if profile is None:
+            self.store.set("thumbwheel", direction, names)
+            return
+        thumb = config.thumbwheel(self.store.cfg, profile["app"])
+        self.store.set_profile_thumb_keys(profile["app"], dict({"up": thumb["up"], "down": thumb["down"]},
+                                                               **{direction: names}))
+
+    def _thumb_keys_use_global(self):
+        profile = chosen_profile(self.store)
+        if profile is not None:
+            self.store.set_profile_thumb_keys(profile["app"], None)
+        self.thumb_keys["up"][1].setFocus()  # this button is off now: focus stays on the card
 
     # -- the mode switch click ----------------------------------------------------
 
@@ -581,10 +602,20 @@ class PointScrollPage(ScrollPage):
             0 if profile is not None and own is None else max(0, self.thumb_function.findData(own or thumb["function"])))
         self.thumb_invert.set_checked_silently(thumb["invert"])
         self.thumb_speed.set_value(thumb["speed"])
+        app = profile["app"] if profile is not None else None
+        sent = config.thumbwheel(cfg, app)  # the keystrokes where the page looks
         for direction, (recorder, _record, clear) in self.thumb_keys.items():
             self.thumb_card.set_row_visible(self.thumb_keys_rows[direction], shown == "keys")
-            recorder.set_keys(thumb[direction])
-            clear.setEnabled(bool(thumb[direction]))
+            recorder.set_keys(sent[direction])
+            clear.setEnabled(bool(sent[direction]))
+        mine = app is not None and config.app_thumb_keys(cfg, app) is not None
+        self.thumb_card.set_row_visible(self.thumb_keys_own_row, app is not None and shown == "keys")
+        self.thumb_keys_global.setEnabled(mine)
+        if app is not None:
+            name = profile["name"] or app
+            self.thumb_keys_own_row.note.setText(
+                _("{} has keystrokes of its own.").format(name) if mine else
+                _("As in all apps. Recording or clearing one here gives {} keystrokes of its own.").format(name))
 
     def _state(self, state):
         caps = state.get("caps")

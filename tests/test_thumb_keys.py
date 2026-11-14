@@ -450,7 +450,7 @@ class Card(unittest.TestCase):
         self.assertEqual(recorder.text(), "Click to record a shortcut")
         self.assertFalse(clear.isEnabled())
 
-    def test_in_an_app_the_rows_follow_what_it_does_and_write_for_all_apps(self):
+    def test_in_an_app_the_rows_follow_what_it_does_and_write_for_it(self):
         self.store.add_mouse_profile(KATE)
         page = self.page()
         page.apps.apps.setCurrentIndex(1)
@@ -458,7 +458,8 @@ class Card(unittest.TestCase):
         self.pick(page, "keys")
         self.assertEqual((self.store.cfg["mouse"]["thumbwheel"], self.visible(page)), ([own(KATE, "keys")], [True, True]))
         page.thumb_keys["down"][0].recorded.emit(REDO)
-        self.assertEqual(self.store.cfg["thumbwheel"]["down"], REDO)
+        self.assertEqual(self.store.cfg["mouse"]["thumbwheel_keys"], [{"app": KATE, "up": [], "down": REDO}])
+        self.assertEqual(self.store.cfg["thumbwheel"]["down"], [])  # all apps: unchanged
         self.assertEqual((self.store.cfg["mouse"]["thumbwheel"], self.store.cfg["thumbwheel"]["function"]),
                          ([own(KATE, "keys")], "hscroll"))
         self.pick(page, "zoom")
@@ -466,7 +467,7 @@ class Card(unittest.TestCase):
         self.assertEqual(self.visible(page), [False, False])  # its own function, not the one of all apps
         page.thumb_function.activated.emit(0)  # as in all apps: keys
         self.assertEqual((self.store.cfg["mouse"]["thumbwheel"], self.visible(page)), ([], [True, True]))
-        self.assertEqual(page.thumb_keys["down"][0].text(), actions.keys_label(REDO))
+        self.assertEqual(page.thumb_keys["down"][0].text(), actions.keys_label(REDO))  # its own
 
     def test_names_for_assistive_technology_and_the_keyboard(self):
         from mxoptions import i18n

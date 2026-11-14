@@ -380,7 +380,9 @@ DEFAULTS = {
     # "buttons" says. "ring": bubbles of its own, or None for the ring of all apps. Everything else stays global.
     # "thumbwheel": [{"app", "function"}]: a thumb wheel function of its own (THUMB_FUNCTIONS) for an app with a
     # profile; an app not listed uses "thumbwheel"'s function. Direction, speed and steps stay global.
-    "mouse": {"profiles": [], "thumbwheel": []},
+    # "thumbwheel_keys": [{"app", "up", "down"}]: what "keys" sends turning up and turning down in an app with a
+    # profile, both its own ([]: nothing); an app not listed sends "thumbwheel"'s "up" and "down".
+    "mouse": {"profiles": [], "thumbwheel": [], "thumbwheel_keys": []},
 }
 
 
@@ -480,6 +482,12 @@ def _key_names(names, empty=False):
     """A key combination: a list of key and button names the virtual input knows (keys.CODES)."""
     return (isinstance(names, list) and (empty or bool(names)) and len(names) <= MAX_COMBO
             and all(isinstance(name, str) and name in KEY_CODES for name in names))
+
+
+def thumb_combo(names):
+    """Whether ``names`` is a combination the thumb wheel may send: keyboard keys only (_key_names also knows mouse
+    buttons), none at all too."""
+    return _key_names(names, empty=True) and all(name.startswith("KEY_") for name in names)
 
 
 def macro_step(step):
@@ -648,6 +656,30 @@ def _mouse_thumbwheel(entries, profiles):
     return kept
 
 
+def _mouse_thumbwheel_keys(entries, profiles):
+    """The thumb wheel keystrokes of single apps in ``entries``: {"app", "up", "down"} each, only for apps with one
+    of ``profiles``, the first for each app, in their order. A direction that is not a combination the thumb wheel
+    may send is [], as in "thumbwheel"; other keys of an entry are left out."""
+    kept = []
+    for entry in entries if isinstance(entries, list) else ():
+        if not (isinstance(entry, dict) and isinstance(entry.get("app"), str)):
+            continue
+        app = entry["app"]
+        if any(profile["app"] == app for profile in profiles) and all(other["app"] != app for other in kept):
+            kept.append({"app": app, **{direction: entry[direction] if thumb_combo(entry.get(direction)) else []
+                                        for direction in ("up", "down")}})
+    return kept
+
+
+def app_thumb_keys(cfg, app):
+    """The keystrokes ``app`` has of its own for "keys" ("mouse.thumbwheel_keys"): {"up", "down"}, or None: those
+    for all apps. None too for an app without a mouse profile."""
+    if mouse_profile_of(cfg, app) is None:
+        return None
+    return next(({"up": entry["up"], "down": entry["down"]} for entry in cfg["mouse"]["thumbwheel_keys"]
+                 if entry["app"] == app), None)
+
+
 def app_thumb_function(cfg, app):
     """The thumb wheel function ``app`` has of its own ("mouse.thumbwheel"), or None: the one for all apps. None too
     for an app without a mouse profile."""
@@ -657,8 +689,10 @@ def app_thumb_function(cfg, app):
 
 
 def thumbwheel(cfg, app):
-    """The thumb wheel settings while ``app`` is in front: "thumbwheel", with the app's own function if it has one."""
-    return dict(cfg["thumbwheel"], function=app_thumb_function(cfg, app) or cfg["thumbwheel"]["function"])
+    """The thumb wheel settings while ``app`` is in front: "thumbwheel", with the app's own function and keystrokes
+    if it has them."""
+    return dict(cfg["thumbwheel"], function=app_thumb_function(cfg, app) or cfg["thumbwheel"]["function"],
+                **(app_thumb_keys(cfg, app) or {}))
 
 
 def mouse_buttons(cfg, app):
@@ -742,9 +776,8 @@ def _sanitize(cfg):
     cfg["gestures"]["far_mm"] = max(cfg["gestures"]["far_mm"], cfg["gestures"]["min_mm"] + 2.0)
     if cfg["thumbwheel"].get("function") not in THUMB_FUNCTIONS:
         cfg["thumbwheel"]["function"] = "hscroll"
-    for direction in ("up", "down"):  # keyboard keys only: the shared check also knows mouse buttons
-        value = cfg["thumbwheel"].get(direction)
-        if not (_key_names(value, empty=True) and all(name.startswith("KEY_") for name in value)):
+    for direction in ("up", "down"):
+        if not thumb_combo(cfg["thumbwheel"].get(direction)):
             cfg["thumbwheel"][direction] = []
     if cfg["wheel"].get("mode") not in ("ratchet", "freespin"):
         cfg["wheel"]["mode"] = "ratchet"
@@ -805,6 +838,8 @@ def _sanitize(cfg):
     cfg["keyboard"]["fn_notices"] = cfg["keyboard"].get("fn_notices") is True
     cfg["mouse"]["profiles"] = _mouse_profiles(cfg["mouse"].get("profiles"))
     cfg["mouse"]["thumbwheel"] = _mouse_thumbwheel(cfg["mouse"].get("thumbwheel"), cfg["mouse"]["profiles"])
+    cfg["mouse"]["thumbwheel_keys"] = _mouse_thumbwheel_keys(cfg["mouse"].get("thumbwheel_keys"),
+                                                             cfg["mouse"]["profiles"])
     return cfg
 
 

@@ -190,8 +190,9 @@ mode, and drop it when they save the settings.
 | `flow.peers` | The other computers of Flow, two at most, each with `name`, `address`, `edge` (`left`, `right`, `top`, `bottom`: the side it stands on) and `key`, the pairing key: treat that as a password. A single field is addressed like `flow.peers.0.edge`. `paused`, where it is, is `true` while that computer is paused: it stays paired and in its place, but the link to it is down, so from then on neither the mouse nor what was copied nor the keyboard goes to it or comes from it (a switch already under way still finishes), and files on their way to or from it stop; `false`, or no `paused`, and it takes part. `flow.peers.0.paused` can be set once it is there (the Flow page writes it); before that, set the whole `flow.peers`. Versions before it drop it, and the computer takes part again. |
 | `keyboard.keys` | What the keys of the keyboard do: an object from key id to action, the id being the key's control id as `0x` and four lowercase hex digits (`"0x00c7"`). A key that is not listed does what it always does. Keys take every action above except `wheel_mode`, `dpi_cycle`, `dpi_shift`, `flow` and `gestures`; `host` moves the keyboard, not the mouse; `ring` (exactly `{"type": "ring"}`) opens the Actions Ring at the pointer. At most 128. |
 | `keyboard.profiles` | Keys of their own for single apps, at most 32: a list of `{"app", "name", "keys"}`. `app` is the name the app goes by on this desktop, lowercase, 1 to 128 characters (KDE: its window class; sway: its `app_id`, else its X11 class; Hyprland and other X11 desktops: its class; Windows: its program file, like `firefox.exe`), one profile each. `name` is shown in the window, at most 64 characters. `keys` is like `keyboard.keys`, plus `{"type": "default"}`: the key does what it always does in that app, even where `keyboard.keys` changes it. A key a profile does not list does what `keyboard.keys` says. While that app is in front, the first profile for it counts. GNOME on Wayland does not say which app is in front: there only `keyboard.keys` counts. Which app is in front is not offered here. |
-| `mouse.profiles` | Buttons and Actions Ring of their own for single apps, at most 32: a list of `{"app", "name", "buttons", "ring"}`. `app` and `name` as in `keyboard.profiles`, one profile each, its own 32. `buttons` maps `middle`, `back`, `forward`, `gesture`, `smartshift`, `panel` to an action a key may have, or `wheel_mode`, `dpi_cycle`, `dpi_shift`, `flow` (exactly `{"type": ...}`), or `{"type": "default"}`: the button's own function in that app, even where `buttons` changes it. Never `gestures`. A button not listed does what `buttons` says. `ring`: bubbles in the format of `ring.bubbles`, or `null` for the ring of all apps. The thumb wheel's function can differ by app (`mouse.thumbwheel`); its direction, speed and steps, gesture directions, pointer, scroll, SmartShift and haptics stay the same in every app. |
-| `mouse.thumbwheel` | Thumb wheel functions of their own for apps with a mouse profile: a list of `{"app", "function"}`, `function` one of those of `thumbwheel.function`, one entry each. An app not listed uses `thumbwheel.function`. `Set` refuses an entry for an app without a profile, with another function or with other keys; loading settings keeps an entry's app and function only and leaves out the entries it cannot use. Removing a profile removes its entry. An entry is added by setting the whole list. `thumbwheel.invert`, `thumbwheel.speed` and `thumbwheel.ticks` count in every app, and so do `thumbwheel.up` and `thumbwheel.down`: `keys` in an app sends the keystrokes for all apps. |
+| `mouse.profiles` | Buttons and Actions Ring of their own for single apps, at most 32: a list of `{"app", "name", "buttons", "ring"}`. `app` and `name` as in `keyboard.profiles`, one profile each, its own 32. `buttons` maps `middle`, `back`, `forward`, `gesture`, `smartshift`, `panel` to an action a key may have, or `wheel_mode`, `dpi_cycle`, `dpi_shift`, `flow` (exactly `{"type": ...}`), or `{"type": "default"}`: the button's own function in that app, even where `buttons` changes it. Never `gestures`. A button not listed does what `buttons` says. `ring`: bubbles in the format of `ring.bubbles`, or `null` for the ring of all apps. The thumb wheel's function and keystrokes can differ by app (`mouse.thumbwheel`, `mouse.thumbwheel_keys`); its direction, speed and steps, gesture directions, pointer, scroll, SmartShift and haptics stay the same in every app. |
+| `mouse.thumbwheel` | Thumb wheel functions of their own for apps with a mouse profile: a list of `{"app", "function"}`, `function` one of those of `thumbwheel.function`, one entry each. An app not listed uses `thumbwheel.function`. `Set` refuses an entry for an app without a profile, with another function or with other keys; loading settings keeps an entry's app and function only and leaves out the entries it cannot use. Removing a profile removes its entry. An entry is added by setting the whole list. `thumbwheel.invert`, `thumbwheel.speed` and `thumbwheel.ticks` count in every app. `keys` in an app sends its own keystrokes (`mouse.thumbwheel_keys`) if it has them, else `thumbwheel.up` and `thumbwheel.down`. |
+| `mouse.thumbwheel_keys` | What `keys` sends in apps with a mouse profile: a list of `{"app", "up", "down"}`, one entry each; `up` and `down` as `thumbwheel.up` (up to 16 keyboard key names, `[]` sends nothing in that app). An app not listed sends `thumbwheel.up` and `thumbwheel.down`. An entry is kept whatever the app's function and counts while it is `keys`. `Set` refuses an entry for an app without a profile, without both directions, with a combination the thumb wheel cannot send or with other keys; loading settings makes such a direction `[]` and leaves out entries without a profile. Removing a profile removes its entry. |
 | `flow.clipboard`, `flow.files`, `flow.files_max_mb`, `flow.cue_arrived`, `flow.cue_failed` | Flow: whether copied text and pictures go along, whether files do, the most megabytes in one go, and the vibration patterns for files that have arrived and files that could not be brought over. |
 
 `Set` changes only what is there, so a key is given an action, or its action taken away, by setting
@@ -257,13 +258,13 @@ the new app, its button changed, a device gone). Until a closed ring is off the 
 wheel may still turn its dials for a moment. Only changed buttons whose reporting changes are
 written to the mouse.
 
-When the thumb wheel's function changes with the app in front, a step begun before is dropped (half
-a step towards the next tab does not carry over), and so is a part of a sideways scroll; with the
-same function in both apps it goes on. The mouse is told only when the thumb wheel changes between
-scrolling sideways by itself and going to MX Options; a turn made just before that may still come
-in the old way. While the Actions Ring is open, the thumb wheel turns its dials, whatever the app.
-Horizontal scroll is the thumb wheel's own function: in an app it scrolls at the speed and in the
-direction set for all apps.
+When the thumb wheel's function or keystrokes change with the app in front, a step begun before is
+dropped (half a step towards the next tab does not carry over), and so is a part of a sideways
+scroll; with the same function and keystrokes in both apps it goes on. The mouse is told only when
+the thumb wheel changes between scrolling sideways by itself and going to MX Options; a turn made
+just before that may still come in the old way. While the Actions Ring is open, the thumb wheel
+turns its dials, whatever the app. Horizontal scroll is the thumb wheel's own function: in an app it
+scrolls at the speed and in the direction set for all apps.
 
 `OpenRing` shows the ring for all apps, `ShowRing` the caller's bubbles, whatever app is in front;
 neither closes when the app in front changes, and their bubbles run.
@@ -281,6 +282,13 @@ Versions without custom keystrokes on the thumb wheel use Horizontal scroll wher
 keep `thumbwheel.up` and `thumbwheel.down` as they are; the version just before them also leaves out
 an app's `keys` entry of `mouse.thumbwheel`. Before going back, export the settings; importing that
 file in this version brings the keystrokes back.
+
+Versions without keystrokes per app keep `mouse.thumbwheel_keys` as it is and send the keystrokes
+for all apps; they accept any value there from `Set`, and this version makes what it cannot use
+`[]` when it loads. There, removing an app's profile and adding it again before this version runs
+gives the app its earlier keystrokes back. Before going back, export the settings; importing that
+file in this version brings each app's keystrokes back. To undo an app's keystrokes, use "Use the
+keystrokes for all apps" or remove the app.
 
 Macro steps, for a button or a key:
 

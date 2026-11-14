@@ -1046,9 +1046,14 @@ STRINGS = {
     "Use the ring for all apps in {}? Its own ring goes.": "Використовувати в {} кільце для всіх програм? Власне кільце зникне.",
     "Size and style are shared by all apps.": "Розмір і вигляд спільні для всіх програм.",
     "While {} is in front. \"As in all apps\": the function set for all apps. Direction, speed and steps are the "
-    "same in every app, and so are the keystrokes.":
+    "same in every app; the keystrokes can be its own.":
         "Поки попереду {}. «Як в усіх програмах»: функція, задана для всіх програм. Напрямок, швидкість і кроки "
-        "однакові в усіх програмах, як і комбінації клавіш.",
+        "однакові в усіх програмах; комбінації клавіш можуть бути власними.",
+    "Use the keystrokes for all apps": "Використовувати комбінації для всіх програм",
+    "Keystrokes": "Комбінації клавіш",
+    "{} has keystrokes of its own.": "{} має власні комбінації клавіш.",
+    "As in all apps. Recording or clearing one here gives {} keystrokes of its own.":
+        "Як в усіх програмах. Запис чи очищення тут дасть {} власні комбінації клавіш.",
     "Holding it and moving": "Утримання й рух",
     "Swipes": "Напрямки",
     "Pan": "Панорама",

@@ -194,7 +194,7 @@ class Settings(unittest.TestCase):
                        gesture={"type": "ring"}, smartshift={"type": "none"})
         self.assertEqual(self.clean([kate]), [kate])
         self.assertEqual(self.clean([profile(KONSOLE)]), [profile(KONSOLE)])
-        self.assertEqual(config.clean(copy.deepcopy(config.DEFAULTS))["mouse"], {"profiles": [], "thumbwheel": []})
+        self.assertEqual(config.clean(copy.deepcopy(config.DEFAULTS))["mouse"], {"profiles": [], "thumbwheel": [], "thumbwheel_keys": []})
 
     def test_a_profile_that_is_not_one_is_dropped_whole(self):
         good = profile(KATE, back=COPY)
@@ -1236,7 +1236,7 @@ class ThumbWheelSettings(unittest.TestCase):
         older["mouse"] = {"profiles": [profile(KATE, back=COPY)]}  # written by a version without this list
         older["thumbwheel"]["function"] = "tabs"
         cleaned = config.clean(older)
-        self.assertEqual(cleaned["mouse"], {"profiles": [profile(KATE, back=COPY)], "thumbwheel": []})
+        self.assertEqual(cleaned["mouse"], {"profiles": [profile(KATE, back=COPY)], "thumbwheel": [], "thumbwheel_keys": []})
         with_entries = copy.deepcopy(older)
         with_entries["mouse"]["thumbwheel"] = [own(KATE, "zoom")]
         again = config.clean(with_entries)
@@ -1501,7 +1501,7 @@ class ThumbWheelStoreAndOthers(unittest.TestCase):
         store.add_mouse_profile(KATE)
         self.assertEqual(self.entries(), [own(KONSOLE, "zoom")])  # back without the one it had
         store.restore_defaults()
-        self.assertEqual(store.cfg["mouse"], {"profiles": [], "thumbwheel": []})
+        self.assertEqual(store.cfg["mouse"], {"profiles": [], "thumbwheel": [], "thumbwheel_keys": []})
 
     def test_other_programs_set_what_may_be_and_are_refused_the_rest(self):
         self.assertTrue(self.api.Set("mouse.profiles", json.dumps([profile(KATE), profile(KONSOLE)])))
@@ -1538,7 +1538,7 @@ class ThumbWheelStoreAndOthers(unittest.TestCase):
         older = json.loads(exported)
         del older["config"]["mouse"]["thumbwheel"]  # exported by a version without it
         self.assertEqual(config.import_data(json.dumps(older).encode(), current)["mouse"],
-                         {"profiles": [profile(KATE)], "thumbwheel": []})
+                         {"profiles": [profile(KATE)], "thumbwheel": [], "thumbwheel_keys": []})
 
     def test_the_app_in_front_and_its_function_are_never_logged_published_or_told(self):
         secret = "org.example.secret"
@@ -1637,7 +1637,7 @@ class ThumbWheelPage(unittest.TestCase):
             QTest.mouseClick(scroll.apps.remove_app, Qt.MouseButton.LeftButton)
         self.assertEqual((scroll.apps.apps.currentIndex(), buttons.apps.apps.currentIndex(),
                           rings.apps.apps.currentIndex(), store.mouse_app), (0, 0, 0, None))
-        self.assertEqual((store.cfg["mouse"], self.functions(scroll)), ({"profiles": [], "thumbwheel": []},
+        self.assertEqual((store.cfg["mouse"], self.functions(scroll)), ({"profiles": [], "thumbwheel": [], "thumbwheel_keys": []},
                                                                         list(config.THUMB_FUNCTIONS)))
 
     def test_where_the_desktop_does_not_say_the_function_is_for_all_apps(self):
