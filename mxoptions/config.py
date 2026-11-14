@@ -28,6 +28,18 @@ BACKUP_NAME = "config.backup.json"  # in CONFIG_DIR: the settings as they were b
 SETTINGS_FORMAT = "mxoptions-settings"
 SETTINGS_FILE_MAX = 1 << 20  # bytes, exported or imported alike: whatever is exported can be imported again
 SETTINGS_DEPTH_MAX = 32      # lists and dicts inside one another: far more than any setting needs
+# One macro as a file of its own: {"format": MACRO_FORMAT, "version": 1, "macro": the macro}, at most
+# SETTINGS_FILE_MAX bytes too. Exactly what the macro editor shows, nothing more (import_macro).
+MACRO_FORMAT = "mxoptions-macro"
+MACRO_NAME_MAX = 32767  # UTF-16 units: what the name line of the macro editor holds
+_MACRO_FIELDS = frozenset({"type", "name", "repeat", "steps", "stop_on_press"})
+_STEP_FIELDS = {"keys": "keys", "text": "text", "delay": "ms", "click": "button", "command": "command",
+                "action": "action", "haptic": "waveform"}  # each step: "do" and this field, nothing else
+_STEP_ACTION_FIELDS = {"keys": {"type", "keys"}, "button": {"type", "button"}, "shortcut": {"type", "component", "name"},
+                       "desktop": {"type", "do"}, "command": {"type", "command"}, "script": {"type", "name", "script"},
+                       "hook": {"type", "name"}}
+# Bidirectional marks and overrides: a command holding one may run other than it reads
+_HIDING = frozenset("\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069")
 # What stays on this computer, never exported nor imported: the pairing keys of Flow, what this computer goes by
 # there, its Easy-Switch channel. Their values in an exported file.
 LOCAL_FLOW = {"peers": [], "id": "", "channel": -1}
@@ -837,9 +849,10 @@ def to_bytes(cfg):
     return json.dumps(cfg, indent=2).encode("ascii")
 
 
-def _too_big(size):
-    return _("It is {size} KB, more than the {limit} KB a settings file may have.").format(
-        size=-(-size // 1024), limit=SETTINGS_FILE_MAX // 1024)
+def _too_big(size, macro=False):
+    text = (_("It is {size} KB, more than the {limit} KB a macro file may have.") if macro
+            else _("It is {size} KB, more than the {limit} KB a settings file may have."))
+    return text.format(size=-(-size // 1024), limit=SETTINGS_FILE_MAX // 1024)
 
 
 def _depth_ok(value, depth):
@@ -902,20 +915,94 @@ def import_data(raw, current):
     return cfg
 
 
-def read_settings(path):
+def _shell_text(text):
+    """Whether ``text``, run by a shell, reads as it runs: no bidirectional mark, no control character but tab
+    and newline."""
+    return not any(c in _HIDING or (c < " " and c not in "\t\n") or c == "\x7f" for c in text)
+
+
+def _macro_exact(macro):
+    """Whether ``macro`` is one keyboard_action takes, with no field more at any level, and one the macro editor
+    shows as it is: a name that fits its line with no space around it, commands of steps with none either (the
+    editor trims both), shell text that reads as it runs."""
+    if not (isinstance(macro, dict) and macro.get("type") == "macro" and set(macro) <= _MACRO_FIELDS
+            and keyboard_action(macro)):  # first: every "do" and "type" below is then one of the tables
+        return False
+    name = macro.get("name", "")
+    if name != name.strip() or len(name.encode("utf-16-le")) > 2 * MACRO_NAME_MAX:
+        return False
+    for step in macro["steps"]:
+        if set(step) != {"do", _STEP_FIELDS[step["do"]]}:
+            return False
+        if step["do"] == "command" and not (step["command"] == step["command"].strip() and _shell_text(step["command"])):
+            return False
+        if step["do"] == "action":
+            action = step["action"]
+            if not (set(action) <= _STEP_ACTION_FIELDS[action["type"]]
+                    and all(_shell_text(action[field]) for field in ("command", "script") if field in action)):
+                return False
+    return True
+
+
+def import_macro(raw):
+    """The macro in a macro file (its bytes), checked whole before any of it is used. Raises ValueError, with what
+    to tell the user. Duplicate names in the JSON: the last one counts, as json takes it."""
+    if len(raw) > SETTINGS_FILE_MAX:
+        raise ValueError(_too_big(len(raw), macro=True))
+    not_one = _("It is not a macro file of MX Options.")
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except (ValueError, RecursionError):  # not UTF-8, not JSON, or nested past what the parser takes
+        raise ValueError(not_one) from None
+    if not (isinstance(document, dict) and set(document) == {"format", "version", "macro"}
+            and document["format"] == MACRO_FORMAT and type(document["version"]) is int):
+        raise ValueError(not_one)
+    if document["version"] > 1:
+        raise ValueError(_("It was made by a newer version of MX Options."))
+    try:
+        json.dumps(document, ensure_ascii=False).encode("utf-8")
+    except (ValueError, RecursionError):  # a lone surrogate, which is no Unicode: the editor would drop it
+        raise ValueError(not_one) from None
+    if document["version"] != 1 or not _macro_exact(document["macro"]):
+        raise ValueError(not_one)
+    return document["macro"]
+
+
+def export_macro(action):
+    """The macro ``action`` as a file of its own (bytes, UTF-8 JSON), its commands and texts as written. Raises
+    ValueError, with what to tell the user, for a macro import_macro would not take back."""
+    if not (isinstance(action, dict) and action.get("steps")):
+        raise ValueError(_("The macro has no complete step yet."))
+    cannot = _("The macro holds something a macro file cannot.")
+    try:
+        raw = json.dumps({"format": MACRO_FORMAT, "version": 1, "macro": action}, indent=2,
+                         ensure_ascii=False).encode("utf-8")
+    except (ValueError, RecursionError):
+        raise ValueError(cannot) from None
+    if len(raw) > SETTINGS_FILE_MAX:
+        raise ValueError(_too_big(len(raw), macro=True))
+    try:
+        import_macro(raw)  # every file written here can be imported
+    except ValueError:
+        raise ValueError(cannot) from None
+    return raw
+
+
+def read_settings(path, macro=False):
     """The bytes of the file ``path``, refused (ValueError) when larger than SETTINGS_FILE_MAX: never more than
-    that is read. Raises OSError."""
+    that is read. ``macro``: told as a macro file. Raises OSError."""
     # Not blocking: a FIFO opens at once and is then refused as not a file, instead of waiting for a writer.
     fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0))
     with os.fdopen(fd, "rb") as f:
         info = os.fstat(f.fileno())
         if not stat.S_ISREG(info.st_mode):
-            raise ValueError(_("It is not a settings file of MX Options."))
+            raise ValueError(_("It is not a macro file of MX Options.") if macro
+                             else _("It is not a settings file of MX Options."))
         if info.st_size > SETTINGS_FILE_MAX:
-            raise ValueError(_too_big(info.st_size))
+            raise ValueError(_too_big(info.st_size, macro))
         raw = f.read(SETTINGS_FILE_MAX + 1)  # it may have grown since
     if len(raw) > SETTINGS_FILE_MAX:
-        raise ValueError(_too_big(len(raw)))
+        raise ValueError(_too_big(len(raw), macro))
     return raw
 
 

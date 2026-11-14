@@ -1,17 +1,19 @@
 """Dialogs for the two free-form actions: a script and a macro."""
 
 import copy
+import os
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QStandardPaths, Qt, QTimer
 from PySide6.QtGui import QFontDatabase
 from PySide6.QtWidgets import (
-    QComboBox, QDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QVBoxLayout,
-    QWidget,
+    QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPlainTextEdit, QPushButton,
+    QScrollArea, QSpinBox, QVBoxLayout, QWidget,
 )
 
-from .. import actions, config, device
+from .. import APP_NAME, actions, config, device
 from ..i18n import _
 from .recorder import ShortcutRecorder
+from .store import _reason
 from .widgets import Segmented, Switch, hint_label, ui_scale
 
 # Set by the application: callable(action) that runs an action right now.
@@ -67,13 +69,17 @@ class _Dialog(QDialog):
         self.name = QLineEdit()
         self.body.addWidget(self.name)
 
-    def add_buttons(self, test_label):
+    def add_buttons(self, test_label, extra=()):
+        """The bottom row: the test button, then ``extra`` (buttons), then Cancel and Save."""
         row = QHBoxLayout()
         row.setSpacing(8)
         self.test = QPushButton(test_label)
         self.test.setCursor(Qt.CursorShape.PointingHandCursor)
         self.test.setVisible(test_runner is not None)
         row.addWidget(self.test)
+        for button in extra:
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            row.addWidget(button)
         row.addStretch(1)
         cancel = QPushButton(_("Cancel"))
         cancel.clicked.connect(self.reject)
@@ -246,7 +252,6 @@ class MacroDialog(_Dialog):
         super().__init__(_("Macro"), parent)
         action = action or {}
         self.waveforms = _mouse_waveforms(parent)
-        self.name.setText(action.get("name", ""))
         self.name.setPlaceholderText(_("e.g. Sign and send"))
         self.body.addWidget(_field_label(_("Steps")))
 
@@ -284,7 +289,6 @@ class MacroDialog(_Dialog):
         repeat_text.addWidget(hint_label(_("Only applies when the macro is assigned to a mouse button.")))
         repeat.addLayout(repeat_text, 1)
         self.repeat = Switch()
-        self.repeat.set_checked_silently(bool(action.get("repeat")))
         repeat.addWidget(self.repeat)
         self.body.addLayout(repeat)
 
@@ -299,17 +303,77 @@ class MacroDialog(_Dialog):
         again.addLayout(again_text, 1)
         self.again = Switch()
         self.again.setAccessibleName(_("Press again to stop"))
-        self.again.set_checked_silently(action.get("stop_on_press") is True)
         again.addWidget(self.again)
         self.body.addLayout(again)
 
-        self.add_buttons(_("Test in 3 s"))
+        self.imported = hint_label("")  # after an import: where from, and to look before saving
+        self.imported.hide()
+        self.body.addWidget(self.imported)
+        self.export_button = QPushButton(_("Export…"))
+        self.export_button.setAccessibleName(_("Export macro"))
+        self.export_button.clicked.connect(self._export)
+        self.import_button = QPushButton(_("Import…"))
+        self.import_button.setAccessibleName(_("Import macro"))
+        self.import_button.clicked.connect(self._import)
+        self.add_buttons(_("Test in 3 s"), (self.export_button, self.import_button))
         self.test.clicked.connect(self._test)
         self._rows = []
+        self._load(action)
+
+    def _load(self, action):
+        """Show ``action``: its name, switches and steps in place of what the editor had."""
+        self.name.setText(action.get("name", ""))
+        self.repeat.set_checked_silently(bool(action.get("repeat")))
+        self.again.set_checked_silently(action.get("stop_on_press") is True)
+        for row in list(self._rows):
+            self.remove_step(row)
         for step in action.get("steps", []):
             if isinstance(step, dict) and step.get("do") in actions.MACRO_STEPS:
                 self.add_step(step)
         self._sync()
+
+    def _export(self):
+        """Write the macro as it is in the editor, changes not saved yet too, to a file the user picks."""
+        try:
+            raw = config.export_macro(self.action())
+        except ValueError as e:
+            QMessageBox.warning(self, APP_NAME, _("Nothing was exported. {}").format(e))
+            return
+        folder = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
+        path, _filter = QFileDialog.getSaveFileName(  # the dialog asks before it replaces a file
+            self, _("Export macro"), os.path.join(folder, "mxoptions-macro.json"), _("Macro (*.json)"))
+        if not path:
+            return
+        try:
+            config.write_durable(raw, path)
+        except config.NotDurable as e:
+            QMessageBox.warning(self, APP_NAME, _("The macro was written, but the system could not confirm that it is "
+                                                  "safely on the disk ({}).").format(_reason(e)))
+        except OSError as e:
+            QMessageBox.warning(self, APP_NAME, _("The macro could not be written ({}).").format(_reason(e)))
+        else:
+            QMessageBox.information(self, APP_NAME, _("The macro is in {}. Everything it types or runs is in the file "
+                                                      "as written.").format(os.path.basename(path)))
+
+    def _import(self):
+        """Fill the editor from a macro file, checked whole first. Nothing runs and nothing is kept until Save."""
+        path, _filter = QFileDialog.getOpenFileName(self, _("Import macro"), "", _("Macro (*.json)"))
+        if not path:
+            return
+        name = os.path.basename(path)
+        try:
+            macro = config.import_macro(config.read_settings(path, macro=True))
+        except ValueError as e:
+            QMessageBox.warning(self, APP_NAME, _("{name} cannot be imported. {reason}").format(name=name, reason=e))
+            return
+        except OSError as e:
+            QMessageBox.warning(self, APP_NAME, _("{name} could not be read ({reason}).").format(
+                name=name, reason=_reason(e)))
+            return
+        self._load(macro)
+        self.imported.setText(_("Imported from {}. A macro file can run commands: check each step before you "
+                                "save.").format(name))
+        self.imported.show()
 
     def add_step(self, step, focus=False):
         if len(self._rows) >= actions.MAX_MACRO_STEPS:

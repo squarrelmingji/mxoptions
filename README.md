@@ -495,6 +495,12 @@ An import first keeps the settings in use, unsaved changes included, in `config.
 the new ones, and only then uses them; when it cannot do all of that, it uses none. To go back,
 quit the app and copy `config.backup.json` over `config.json`.
 
+The macro editor exports one macro to a file of its own (*Export…*) and imports one (*Import…*). The
+format is this app's own, not a file of Logitech Options+. An import only fills the editor: nothing
+runs, and nothing is kept until *Save*. A file that is not exactly a macro the editor can show is
+refused whole. The file holds the macro's text and commands as written: keep it private, and import
+only files you trust.
+
 ## Known limits
 
 - **Left and right buttons cannot be reassigned.** The mouse does not let software take them over.

@@ -985,6 +985,21 @@ STRINGS = {
     "The settings could not be written ({}).": "Не вдалося записати налаштування ({}).",
     "{name} cannot be imported. {reason}": "{name} не можна імпортувати. {reason}",
     "{name} could not be read ({reason}).": "Не вдалося прочитати {name} ({reason}).",
+    "Export macro": "Експорт макросу",
+    "Import macro": "Імпорт макросу",
+    "Macro (*.json)": "Макрос (*.json)",
+    "The macro is in {}. Everything it types or runs is in the file as written.":
+        "Макрос збережено у {}. Усе, що він вводить чи запускає, записано у файлі як є.",
+    "The macro was written, but the system could not confirm that it is safely on the disk ({}).":
+        "Макрос записано, але система не змогла підтвердити, що він надійно збережений на диску ({}).",
+    "The macro could not be written ({}).": "Не вдалося записати макрос ({}).",
+    "It is not a macro file of MX Options.": "Це не файл макросу MX Options.",
+    "It is {size} KB, more than the {limit} KB a macro file may have.":
+        "Його розмір {size} КБ, більше за {limit} КБ, дозволені для файлу макросу.",
+    "The macro has no complete step yet.": "У макросі ще немає жодного завершеного кроку.",
+    "The macro holds something a macro file cannot.": "Макрос містить те, чого файл макросу містити не може.",
+    "Imported from {}. A macro file can run commands: check each step before you save.":
+        "Імпортовано з {}. Файл макросу може запускати команди: перевірте кожен крок, перш ніж зберегти.",
     "Nothing was imported: the settings in use could not be kept in a backup first ({}).":
         "Нічого не імпортовано: не вдалося спершу зберегти поточні налаштування в резервній копії ({}).",
     "Nothing was imported: the system could not confirm that the new settings are safely on the disk ({reason}), "
