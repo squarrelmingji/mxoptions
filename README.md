@@ -101,6 +101,7 @@ each desktop allows:
 | Ready actions for windows and the desktop | KDE's own shortcuts: all of them | `swaymsg`, `hyprctl`; a launcher, screenshots and a terminal from what is installed (fuzzel, wofi, rofi; grim and slurp) | GNOME's key combinations as it ships them | the usual key combinations (Alt+F4, Ctrl+Alt+arrows, Print, …) |
 | Actions Ring | on a layer above the windows | the same | in a window on the session's X server (XWayland), which takes no focus; a little soft where the display is scaled by a fraction | in a window the window manager leaves alone; as a panel of the ring's size where nothing composites |
 | Flow: the screen edge | a KWin script | a see-through line one pixel wide along the edge | not possible: use the *Move to the other computer (Flow)* action | the pointer's position is asked for |
+| Haptics: a tick on switching screens | the same KWin script | not possible | not possible | the pointer's position is asked for |
 | Flow: what was copied | KGuiAddons, else wl-clipboard | the same | wl-clipboard | Qt itself |
 
 An action a desktop has no way of doing is not offered there, and settings made on KDE keep working:
@@ -175,8 +176,8 @@ standing in for a game: what that sent to the controller's motors through XInput
 mouse. No game itself was tried.
 
 Used by hand on Windows: the buttons, gestures, the wheels, the Actions Ring, and crossing at the screen
-edge to a Linux computer and back. Not tried: the Bolt receiver (written, never plugged in there), and
-game rumble in a game itself.
+edge to a Linux computer and back. Not tried: the Bolt receiver (written, never plugged in there), the
+tick on switching screens, and game rumble in a game itself.
 Not there yet: letting Flow be found by other computers (Windows' firewall asks about that; the
 Windows side calls the other computer itself, which needs no permission).
 

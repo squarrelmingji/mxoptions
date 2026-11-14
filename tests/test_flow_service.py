@@ -1659,5 +1659,152 @@ class HoldCtrl(Services):
         self.assertEqual(len(self.x.engine.asked("flow_arm")), 1)
 
 
+SCREEN_A, SCREEN_B = (0, 0, 1920, 1080), (1920, 0, 1280, 1024)
+SCREENS = (SCREEN_A, SCREEN_B)
+
+
+class Follower(flow_edges.Watcher):
+    """Stands in for a watcher that can follow the screens: remembers what it was asked."""
+
+    name = "synthetic"
+    follows_screens = True
+
+    def __init__(self, parent=None, click=None, scroll=None):
+        super().__init__(parent)
+        self.asked = []
+
+    def watch(self, edges, corner=0.0, fullscreen=False):
+        self.watching = bool(edges)
+
+    def follow(self, on):
+        self.asked.append(on)
+
+
+class SwitchingScreens(Services):
+    """haptics.screens in the service: the one watcher follows the screens while it and haptics are on, Flow on or off."""
+
+    def setUp(self):
+        super().setUp()
+        self.made = []
+
+    def service(self, maker=Follower):
+        def create(parent=None, click=None, scroll=None):
+            self.made.append(maker(parent, click=click, scroll=scroll))
+            return self.made[-1]
+        with mock.patch.object(flow_edges, "create", create):
+            computer = self.computer()
+        self.assertFalse(computer.cfg["enabled"])  # Flow off, nobody paired
+        return computer
+
+    def cues(self, computer):
+        return computer.engine.asked("screen_cue")
+
+    def test_followed_while_it_and_haptics_are_on(self):
+        computer = self.service()
+        watcher, = self.made
+        self.assertTrue(computer.flow.screens_followable())
+        self.assertEqual(watcher.asked, [])  # off at first: nothing to ask
+        store = computer.store
+        store.set("haptics", "screens", True)
+        self.assertEqual(watcher.asked, [True])
+        store.set("haptics", "level", 30)
+        self.assertEqual(watcher.asked, [True])  # nothing changed for it
+        store.set("haptics", "enabled", False)
+        store.set("haptics", "enabled", True)
+        store.set("haptics", "screens", False)
+        self.assertEqual(watcher.asked, [True, False, True, False])
+        self.assertEqual(len(self.made), 1)  # the one watcher Flow has
+
+    def test_a_watcher_that_cannot_follow_is_never_asked(self):
+        class Blind(Follower):
+            follows_screens = False
+        computer = self.service(Blind)
+        computer.store.set("haptics", "screens", True)
+        self.assertEqual(self.made[0].asked, [])
+        self.assertFalse(computer.flow.screens_followable())
+        computer = self.service(lambda *args, **more: None)  # nothing can watch here
+        computer.store.set("haptics", "screens", True)
+        self.assertFalse(computer.flow.screens_followable())
+
+    def test_onto_another_screen_asks_the_engine_for_a_tick(self):
+        computer = self.service()
+        watcher, = self.made
+        computer.store.set("haptics", "screens", True)
+        watcher.screen_seen.emit(SCREEN_A, SCREENS)
+        self.assertEqual(self.cues(computer), [])  # first word: where it is
+        watcher.screen_seen.emit(SCREEN_B, SCREENS)
+        self.assertEqual(self.cues(computer), [()])
+        watcher.changed.emit()  # KWin came up again
+        time.sleep(flow.SCREEN_CUE_GAP)
+        watcher.screen_seen.emit(SCREEN_A, SCREENS)
+        self.assertEqual(self.cues(computer), [()])  # where it was is not known: no tick
+        watcher.screen_seen.emit(SCREEN_B, SCREENS)
+        self.assertEqual(self.cues(computer), [(), ()])
+
+    def test_what_is_said_while_not_following_counts_for_nothing(self):
+        computer = self.service()
+        watcher, = self.made
+        for screen in (SCREEN_A, SCREEN_B, SCREEN_A):
+            watcher.screen_seen.emit(screen, SCREENS)  # said by an old script, or before it stopped
+        self.assertEqual(self.cues(computer), [])
+        computer.store.set("haptics", "screens", True)
+        watcher.screen_seen.emit(SCREEN_B, SCREENS)
+        self.assertEqual(self.cues(computer), [])  # first word after following began: where it is
+        watcher.screen_seen.emit(SCREEN_A, SCREENS)
+        self.assertEqual(self.cues(computer), [()])
+        computer.store.set("haptics", "screens", False)
+        time.sleep(flow.SCREEN_CUE_GAP)
+        watcher.screen_seen.emit(SCREEN_B, SCREENS)
+        self.assertEqual(self.cues(computer), [()])
+
+    def test_the_real_poll_watcher_with_flow_off(self):
+        def poll(parent=None, click=None, scroll=None):
+            made = flow_edges.Poll(parent)
+            made._timer.timeout.disconnect()  # the timer runs, but the system is never asked here
+            return made
+        computer = self.service(poll)
+        watcher, = self.made
+        self.assertFalse(watcher._timer.isActive())
+        computer.store.set("haptics", "screens", True)
+        self.assertTrue(watcher._timer.isActive())
+        self.assertFalse(watcher.watching)
+        for point in [(100, 100)] * 3 + [(2000, 100)] * 3:
+            watcher.look(point, list(SCREENS))
+        self.assertEqual(self.cues(computer), [()])
+        computer.store.set("haptics", "screens", False)
+        self.assertFalse(watcher._timer.isActive())
+        computer.store.set("haptics", "screens", True)
+        computer.flow.close()
+        self.assertFalse(watcher._timer.isActive())
+
+
+class SwitchingScreensOnArrival(Services):
+    """The pointer put on a screen by Flow, as the mouse arrives from the other computer, is no tick."""
+
+    pair, meet, cross = TwoServices.pair, TwoServices.meet, TwoServices.cross
+
+    def computer(self):
+        with mock.patch.object(flow_edges, "create", lambda parent=None, click=None, scroll=None: Follower(parent)):
+            return super().computer()
+
+    def test_the_mouse_arriving_from_the_other_computer(self):
+        self.addCleanup(setattr, flow_service, "ARRIVAL_QUIET", flow_service.ARRIVAL_QUIET)
+        flow_service.ARRIVAL_QUIET = 0.3
+        self.meet()
+        self.laptop.store.set("haptics", "screens", True)
+        watcher = self.laptop.flow._watcher
+        watcher.screen_seen.emit(SCREEN_A, SCREENS)
+        self.cross()
+        self.assertTrue(wait(lambda: self.laptop.engine.asked("expect_mouse")))
+        watcher.screen_seen.emit(SCREEN_B, SCREENS)  # the pointer was put there for the mouse on its way
+        self.desk.mouse(False)
+        self.laptop.mouse(True, 1)
+        watcher.screen_seen.emit(SCREEN_B, SCREENS)
+        self.assertEqual(self.laptop.engine.asked("screen_cue"), [])
+        time.sleep(0.35)
+        watcher.screen_seen.emit(SCREEN_A, SCREENS)  # moved on by hand: from where it was put
+        self.assertEqual(self.laptop.engine.asked("screen_cue"), [()])
+
+
 if __name__ == "__main__":
     unittest.main()

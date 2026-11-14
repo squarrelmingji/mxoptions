@@ -186,6 +186,12 @@ def flow_cue(made):
     drain(made)
 
 
+def screen_cue(made):
+    made.cfg["haptics"]["screens"] = True
+    made.screen_cue()
+    drain(made)
+
+
 def gesture_cue(made):
     made._gesture_cue(next(name for name, waveform in made.cfg["gestures"]["cues"].items() if waveform is not None))
 
@@ -198,6 +204,7 @@ PRODUCERS = {
     "a vibration step of a key macro": key_macro,
     "a cue of Flow": flow_cue,
     "a cue of a gesture": gesture_cue,
+    "the pointer going onto another screen": screen_cue,
     "the pointer speed switched by a button": lambda made: made._device_action({"type": "dpi_cycle"}, "press"),
     "ticks of the thumb wheel": lambda made: made._on_thumbwheel(-600),
     "the wheel letting go": lambda made: made._wheel_changed("freespin", "spun"),
@@ -314,6 +321,60 @@ class BatterySaving(unittest.TestCase):
                 made = saver((5, device.BATTERY_DISCHARGING), saving)
                 produce(made)
                 self.assertEqual(bool(made.mouse.transport.sent), sent, (name, saving))
+
+
+class SwitchingScreens(unittest.TestCase):
+    """haptics.screens: a subtle tick through the engine's one way to the motor, decided when it is played."""
+
+    def made(self, screens=True, enabled=True):
+        made = saver((50, device.BATTERY_DISCHARGING))
+        made.cfg["haptics"].update(screens=screens, enabled=enabled)
+        return made
+
+    def test_a_tick_while_it_is_on(self):
+        for screens, enabled, ticks in ((True, True, 1), (False, True, 0), (True, False, 0), (False, False, 0)):
+            with self.subTest(screens=screens, enabled=enabled):
+                made = self.made(screens, enabled)
+                with mock.patch.object(made.mouse, "play_haptic", wraps=made.mouse.play_haptic) as played:
+                    made.screen_cue()
+                    drain(made)
+                self.assertEqual(played.call_args_list, [mock.call(device.WAVE_SUBTLE, True)] * ticks)
+                self.assertEqual(len(made.mouse.transport.played()), ticks)
+
+    def test_switched_off_before_it_is_played_nothing_plays(self):
+        for key in ("screens", "enabled"):
+            with self.subTest(key=key):
+                made = self.made()
+                made.screen_cue()
+                cfg = copy.deepcopy(made.cfg)
+                cfg["haptics"][key] = False
+                made._apply_config(cfg)
+                drain(made)
+                self.assertEqual(made.mouse.transport.played(), [])
+
+    def test_switching_it_sends_the_mouse_nothing(self):
+        made = self.made(screens=False)
+        wire = made.mouse.transport
+        for screens in (True, False, True):
+            cfg = copy.deepcopy(made.cfg)
+            cfg["haptics"]["screens"] = screens
+            made._apply_config(cfg)
+            self.assertIs(made.cfg["haptics"]["screens"], screens)
+        self.assertEqual(wire.sent, [])
+        cfg = copy.deepcopy(made.cfg)
+        cfg["haptics"]["level"] = 30
+        made._apply_config(cfg)
+        self.assertEqual(wire.sent, [(device.HAPTIC, 2)])
+
+    def test_without_a_mouse_that_can_vibrate_nothing_is_sent(self):
+        for mouse, online, waveforms in ((None, False, None), (motor(), False, None), (motor(), True, [])):
+            made = self.made()
+            made.mouse, made.online = mouse, online
+            if waveforms is not None:
+                mouse.haptic_waveforms = waveforms
+            made.screen_cue()
+            drain(made)  # nothing sent, nothing raised
+            self.assertEqual(mouse.transport.played() if mouse else [], [])
 
 
 class OtherMice(unittest.TestCase):

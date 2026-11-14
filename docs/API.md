@@ -174,6 +174,7 @@ mode, and drop it when they save the settings.
 | `thumbwheel.function` | `hscroll`, `zoom`, `volume`, `tabs`, `desktops`, `brightness`. |
 | `haptics.enabled`, `haptics.level` | Vibration on/off and strength (1–100). |
 | `haptics.battery_saving` | `true` (default): no vibration at 10 % battery or less, charging or not; above 10 % it vibrates again. Never sent to the mouse; ignored by older versions. |
+| `haptics.screens` | `false` (default). `true`: a short vibration when the pointer moves onto another screen of this computer, not when Flow takes it to another computer. Only where the pointer can be followed: KDE Plasma, X11 desktops, Windows. Never sent to the mouse; ignored by older versions. |
 | `rumble.enabled`, `rumble.light`, `rumble.medium`, `rumble.strong`, `rumble.interval`, `rumble.gain` | Rumble from games on the mouse: on/off (a virtual gamepad appears while it is on), the pattern numbers for weak, medium and strong rumble, milliseconds between pulses, sensitivity (0.5–2.0). |
 | `buttons.<button>` | The action of `middle`, `back`, `forward`, `gesture`, `smartshift`, `panel`. |
 | `gestures.trigger`, `gestures.min_mm`, `gestures.far_mm`, `gestures.dead`, `gestures.bias` | How swipes are read. |

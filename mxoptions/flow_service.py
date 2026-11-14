@@ -105,10 +105,14 @@ class FlowService(QObject):
         self._paused = frozenset()  # pairs whose computers are paused
         self._fenced = {}           # pair -> mark: nothing said on its link is taken until the link's "mark" says so
         self._marks = 0             # the last mark asked of the link
+        self._crossings = flow.ScreenCrossings()  # where the pointer is, for the tick on switching screens
+        self._following = False     # the watcher tells which screen the pointer is on
         self._watcher = flow_edges.create(self, click=self._click_through, scroll=self._scroll_through)
         if self._watcher is not None:
             self._watcher.reported.connect(self._edge_report)
             self._watcher.changed.connect(self.changed.emit)
+            self._watcher.screen_seen.connect(self._screen_seen)
+            self._watcher.changed.connect(self._crossings.reset)  # KWin came up again: where the pointer was is not known
         self._from_link.connect(self._on_link)
         self.clipboard = clipboard  # read(), write() and signature() of what is copied
         self.link = flow.Link(self._from_link.emit, staging=flow_files.STAGING)
@@ -118,8 +122,10 @@ class FlowService(QObject):
         if not store.cfg["flow"]["id"]:
             store.set("flow", "id", secrets.token_hex(8))
         store.changed.connect(self._configure)
+        store.changed.connect(self._follow_screens)
         store.state_changed.connect(lambda _state: self._mouse_changed())
         self._configure()
+        self._follow_screens()
 
     # -- the other computers, as the settings keep them -----------------------------------
 
@@ -380,6 +386,29 @@ class FlowService(QObject):
                                 corner=cfg["corner"] / 100.0, fullscreen=cfg["fullscreen"])
             if was != self._watcher.watching:
                 self.changed.emit()
+
+    # -- the tick on switching screens (haptics.screens), with Flow on or off -------------------
+
+    def screens_followable(self):
+        """Whether this desktop lets the screen the pointer is on be followed (Haptics page)."""
+        return bool(self._watcher is not None and self._watcher.follows_screens)
+
+    def _follow_screens(self):
+        """Have the watcher tell which screen the pointer is on while the tick on switching screens is on."""
+        haptics = self.store.cfg["haptics"]
+        wanted = bool(haptics["enabled"] and haptics["screens"]) and self.screens_followable()
+        if wanted != self._following:
+            self._following = wanted
+            self._crossings.reset()
+            self._watcher.follow(wanted)
+
+    def _screen_seen(self, screen, screens):
+        if not self._following:
+            return  # said before following stopped: nothing to go by
+        now = time.monotonic()
+        # Not while the mouse is arriving from another computer: the pointer was put there.
+        if self._crossings.step(screen, screens, now) and now >= self._quiet_until:
+            self.store.engine.screen_cue()
 
     def _click_through(self, button):
         """A click that landed on the watcher's line along the edge, repeated for what is under it."""

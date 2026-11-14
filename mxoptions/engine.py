@@ -77,13 +77,13 @@ THUMB_STEPS = {
 
 
 def _wire(cfg, section, app=None):
-    """What of ``section`` goes to the mouse while ``app`` is in front: battery saving is the program's alone and is
-    never sent; the thumb wheel has the app's own function, if it has one."""
+    """What of ``section`` goes to the mouse while ``app`` is in front: battery saving and the tick on switching
+    screens are the program's alone and are never sent; the thumb wheel has the app's own function, if it has one."""
     if section == "thumbwheel":
         return config.thumbwheel(cfg, app)
     part = cfg.get(section)
     if section == "haptics" and isinstance(part, dict):
-        part = {key: value for key, value in part.items() if key != "battery_saving"}
+        part = {key: value for key, value in part.items() if key not in ("battery_saving", "screens")}
     return part
 
 
@@ -204,6 +204,10 @@ class Engine:
     def feedback(self, waveform):
         """Haptic cue that respects the "feedback" setting."""
         self._queue.put(("haptic", waveform, True))
+
+    def screen_cue(self):
+        """Pointer went onto another screen (flow_service): a tick, while haptics.screens is on."""
+        self._queue.put(("screen",))
 
     def set_front(self, app):
         """Another app is in front: its name (config.app_id), or None when that cannot be told (front.py)."""
@@ -344,6 +348,10 @@ class Engine:
         elif kind == "haptic":
             if not item[2] or self._feedback_enabled():
                 self._play(item[1])
+        elif kind == "screen":
+            haptics = self.cfg["haptics"]
+            if haptics["enabled"] and haptics["screens"]:  # as now, not as when it was asked
+                self._play(device.WAVE_SUBTLE)
         elif kind == "trigger":
             self.executor.trigger(item[1])
         elif kind == "ring_action":  # only a pick from a ring whose bubbles still count runs

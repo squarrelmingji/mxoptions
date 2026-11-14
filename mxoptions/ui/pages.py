@@ -599,6 +599,14 @@ class HapticsPage(ScrollPage):
         self.feedback_row = card.add(Row(
             _("Feedback for actions"), _("A tick for gestures, the Actions Ring and mode changes."), self.feedback,
         ))
+        self.screens = Switch()
+        self.screens.setAccessibleName(_("Switching screens"))
+        self.screens.toggled.connect(lambda on: self.store.set("haptics", "screens", on))
+        self.screens_row = card.add(Row(
+            _("Switching screens"),
+            _("A short tick when the pointer moves onto another screen of this computer. Moving to another computer with "
+              "Flow does not count."),
+            self.screens, note=_("This desktop does not tell programs which screen the pointer is on.")))
         self.feedback_card = card
         self.body.addWidget(card)
 
@@ -697,7 +705,13 @@ class HapticsPage(ScrollPage):
         self.presets.set_value(haptics["level"])
         self.level.set_value(haptics["level"])
         self.feedback.set_checked_silently(haptics["feedback"])
-        for widget in (self.saving_row, self.presets_row, self.level, self.feedback_row, self.pattern_card):
+        self.screens.set_checked_silently(haptics["screens"])
+        service = self.store.flow  # None: the page on its own, as for the documentation
+        followable = service is None or service.screens_followable()
+        self.screens.setEnabled(followable)
+        self.screens_row.note.setVisible(not followable)
+        self.screens.setAccessibleDescription("" if followable else self.screens_row.note.text())
+        for widget in (self.saving_row, self.presets_row, self.level, self.feedback_row, self.screens_row, self.pattern_card):
             widget.setEnabled(haptics["enabled"])
         if self._force_range and haptics.get("force"):
             low, high = self._force_range

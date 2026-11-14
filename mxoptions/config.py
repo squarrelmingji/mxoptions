@@ -273,7 +273,8 @@ DEFAULTS = {
         "pitch": 1.0,         # tone of the synthesised sounds, 0.6 (lower) .. 1.8 (higher)
         "length": 1.0,        # how long they ring, 0.5 .. 2.5
     },
-    "haptics": {"enabled": True, "level": 60, "force": None, "feedback": True, "battery_saving": True},
+    "haptics": {"enabled": True, "level": 60, "force": None, "feedback": True, "battery_saving": True,
+                "screens": False},
     # Rumble from games, played on the mouse (see rumble.py)
     "rumble": {
         "enabled": False,     # adds a virtual gamepad that games can vibrate
@@ -739,6 +740,7 @@ def _sanitize(cfg):
     _clamp(cfg, "haptics", "level", 1, 100)
     if type(cfg["haptics"].get("battery_saving")) is not bool:
         cfg["haptics"]["battery_saving"] = DEFAULTS["haptics"]["battery_saving"]
+    cfg["haptics"]["screens"] = cfg["haptics"].get("screens") is True
     rumble = cfg["rumble"]
     rumble["enabled"] = bool(rumble.get("enabled"))
     for key in ("light", "medium", "strong"):

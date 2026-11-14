@@ -197,6 +197,13 @@ STRINGS = {
     "Fine tune": "Точне налаштування",
     "Feedback for actions": "Відгук на дії",
     "A tick for gestures, the Actions Ring and mode changes.": "Короткий імпульс для жестів, кільця дій і зміни режимів.",
+    "Switching screens": "Перемикання екранів",
+    "A short tick when the pointer moves onto another screen of this computer. Moving to another computer with Flow does "
+    "not count.":
+        "Короткий імпульс, коли вказівник переходить на інший екран цього комп'ютера. Перехід на інший комп'ютер через Flow "
+        "не враховується.",
+    "This desktop does not tell programs which screen the pointer is on.":
+        "Цей робочий стіл не повідомляє програмам, на якому екрані вказівник.",
     "Press force": "Сила натиску",
     "How hard you have to press the thumb panel.": "Наскільки сильно треба тиснути на панель.",
     "Light": "Легко",

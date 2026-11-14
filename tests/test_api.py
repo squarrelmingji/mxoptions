@@ -387,5 +387,77 @@ class BatterySaving(unittest.TestCase):
                 self.assertFalse([text for text in texts + names if "Battery saving" in text or "save the battery" in text])
 
 
+class SwitchingScreens(unittest.TestCase):
+    """haptics.screens through Set() and on the Haptics page: last row of Feedback, honest where it cannot be."""
+
+    HINT = ("A short tick when the pointer moves onto another screen of this computer. Moving to another computer with "
+            "Flow does not count.")
+    NOTE = "This desktop does not tell programs which screen the pointer is on."
+
+    setUp, mouse, page = BatterySaving.setUp, BatterySaving.mouse, BatterySaving.page
+
+    def test_other_programs_switch_it_with_a_true_or_false_only(self):
+        self.assertEqual(json.loads(self.api.Get("haptics.screens")), False)
+        for value in ("1", "0", '"true"', "[]"):
+            with self.subTest(value=value):
+                self.assertFalse(self.api.Set("haptics.screens", value))
+                self.assertIs(self.store.cfg["haptics"]["screens"], False)
+        self.assertTrue(self.api.Set("haptics.screens", "true"))
+        self.assertIs(self.store.cfg["haptics"]["screens"], True)
+        self.store.restore_defaults()
+        self.assertIs(self.store.cfg["haptics"]["screens"], False)
+
+    def test_the_switch_on_the_haptics_page(self):
+        self.mouse()
+        page = self.page()
+        rows = page.feedback_card._rows
+        self.assertIs(rows[-1], page.screens_row)
+        self.assertIs(rows[-2], page.feedback_row)
+        self.assertIs(page.screens_row.control, page.screens)
+        self.assertEqual((page.screens_row.title.text(), page.screens.accessibleName()), ("Switching screens",) * 2)
+        self.assertEqual(page.screens_row.info.text(), self.HINT)
+        self.assertEqual(page.screens_row.note.text(), self.NOTE)
+        self.assertTrue(page.screens_row.note.isHidden())  # the page on its own: as where it can be
+        self.assertTrue(page.screens.isEnabled())
+        self.assertFalse(page.screens.isChecked())
+        page.screens.click()
+        self.assertIs(self.store.cfg["haptics"]["screens"], True)
+        self.store.set("haptics", "screens", False)
+        self.assertFalse(page.screens.isChecked())
+        self.store.set("haptics", "enabled", False)
+        self.assertFalse(page.screens_row.isEnabled())
+        self.store.set("haptics", "enabled", True)
+        self.assertTrue(page.screens_row.isEnabled())
+        self.mouse(waveforms=())
+        self.assertTrue(page.feedback_card.isHidden())  # no motor: no word of it
+
+    def test_where_the_desktop_cannot_tell(self):
+        class Flow:
+            followable = False
+
+            def screens_followable(self):
+                return self.followable
+        self.store.flow = service = Flow()
+        self.mouse()
+        page = self.page()
+        self.assertFalse(page.screens.isEnabled())
+        self.assertFalse(page.screens_row.note.isHidden())
+        self.assertEqual(page.screens.accessibleDescription(), self.NOTE)
+        service.followable = True
+        self.store.set("haptics", "level", 40)  # any change draws the page again
+        self.assertTrue(page.screens.isEnabled())
+        self.assertTrue(page.screens_row.note.isHidden())
+        self.assertEqual(page.screens.accessibleDescription(), "")
+
+    def test_in_ukrainian(self):
+        from mxoptions import i18n
+        self.addCleanup(i18n.setup, "en")
+        i18n.setup("uk")
+        self.mouse()
+        page = self.page()
+        self.assertEqual((page.screens_row.title.text(), page.screens.accessibleName()), ("Перемикання екранів",) * 2)
+        self.assertEqual(page.screens_row.note.text(), "Цей робочий стіл не повідомляє програмам, на якому екрані вказівник.")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -15,6 +15,7 @@ import hashlib
 import hmac
 import json
 import logging
+import math
 import secrets
 import socket
 import ssl
@@ -48,6 +49,8 @@ PROGRESS_INTERVAL = 0.5           # s between two reports of how far a file tran
 BLOB_TIMEOUT = 60.0               # s such a piece may take to arrive
 HERE_INTERVAL = 4.0               # s between two "here I am" calls while the other computer is being looked for
 OFFER_INTERVAL = 1.5              # s between two announcements of a pairing code on show
+SCREEN_CUE_GAP = 0.3              # s: least time between two ticks for pointer going onto another screen (knob, not measured)
+MAX_SCREENS = 16                  # most screens one watcher report may list
 BEACON_AGE = 120                  # s a "here I am" may be old (clocks differ; replaying one gains nothing)
 _APP = "mxoptions-flow"
 # Both ends prove they hold the pairing key during the TLS handshake, with fresh keys for every
@@ -219,6 +222,65 @@ def bounds(screens):
     left = min(s[0] for s in screens)
     top = min(s[1] for s in screens)
     return left, top, max(s[0] + s[2] for s in screens) - left, max(s[1] + s[3] for s in screens) - top
+
+
+def screen_at(pos, screens):
+    """First of ``screens`` (x, y, width, height) that holds point ``pos``, as tuple; None between them or off all."""
+    return next((tuple(screen) for screen in screens if _holds(screen, pos)), None)
+
+
+def _rect(value):
+    """``value`` as (x, y, width, height) if list of four finite numbers with width and height above 0, else None."""
+    if not isinstance(value, list) or len(value) != 4 or any(type(item) not in (int, float) for item in value):
+        return None
+    try:
+        if not all(math.isfinite(item) for item in value):
+            return None
+    except OverflowError:  # integer too big for float: JSON allows any number of digits
+        return None
+    return tuple(value) if value[2] > 0 and value[3] > 0 else None
+
+
+def screen_report(data):
+    """(screen, screens) of watcher report {"on": [x, y, w, h] or None, "screens": [[x, y, w, h], ...]}: screen tuple
+    or None, screens tuple of tuples. None for anything else, as when another program made it up."""
+    listed = data.get("screens") if isinstance(data, dict) else None
+    if not isinstance(listed, list) or not 0 < len(listed) <= MAX_SCREENS:
+        return None
+    screens = tuple(_rect(item) for item in listed)
+    if None in screens:
+        return None
+    if data.get("on") is None:
+        return None, screens
+    screen = _rect(data["on"])
+    return (screen, screens) if screen in screens else None
+
+
+class ScreenCrossings:
+    """Whether pointer went onto another screen, from what watcher says: screen it is on (None: on none) and all
+    screens. First word, and first after screens changed, only say where it is."""
+
+    def __init__(self):
+        self.screen = self.screens = None
+        self.ticked = float("-inf")
+
+    def reset(self):
+        self.screen = self.screens = None
+
+    def step(self, screen, screens, now):
+        """True when pointer has gone onto another screen and tick is due (SCREEN_CUE_GAP since last one)."""
+        if screen is None:
+            return False
+        if self.screen is None or screens != self.screens:
+            self.screen, self.screens = screen, screens
+            return False
+        if screen == self.screen:
+            return False
+        self.screen = screen
+        if now - self.ticked < SCREEN_CUE_GAP:
+            return False
+        self.ticked = now
+        return True
 
 
 def entry_point(edge, fraction, screens, inset=ENTRY_INSET):
