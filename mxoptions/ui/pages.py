@@ -51,6 +51,17 @@ THUMB_LABELS = {
     "brightness": "Brightness",
     "keys": "Custom keystrokes",
 }
+PANNED = ("spreadsheet", "documents")  # suggested sets after Logi Options+ rows that pan while the middle button is held
+PRESET_NOTES = {  # what a suggested set without a row of Logi Options+ behind it is, and where it works
+    "zoom": "Own choice from Zoom's default shortcuts, not a set of Logi Options+: back sends Alt+A (mute or unmute "
+            "your audio), forward Alt+V (start or stop your video), once per press. They work while Zoom is in front "
+            "and its shortcuts are unchanged. Keys are key positions: on a layout where A or V sit elsewhere (French, "
+            "for one), other shortcuts are sent.",
+    "teams": "Own choice from the default shortcuts of the Teams desktop app for Windows, not a set of Logi Options+: "
+             "back sends Ctrl+Shift+M (mute or unmute), forward Ctrl+Shift+O (video on or off), once per press. They "
+             "work while Teams is in front and its shortcuts are unchanged. Microsoft lists them for the US layout; "
+             "keys are key positions.",
+}
 HAPTIC_PRESETS = [(25, "Subtle"), (45, "Low"), (60, "Medium"), (100, "High")]
 CLICK_MODE_LABELS = [("off", "Off"), ("haptic", "Vibration"), ("sound", "Sound"), ("both", "Both")]
 CLICK_SOUND_LABELS = [("tick", "Tick"), ("clack", "Clack"), ("relay", "Relay"), ("soft", "Soft click"),
@@ -124,8 +135,8 @@ class AppChooser(QWidget):
             self.suggest = QPushButton(_("Suggested settings"), self)  # parent first: Tab after Remove; Qt adds the arrow
             self.suggest.setCursor(Qt.CursorShape.PointingHandCursor)
             menu = QMenu(self.suggest)
-            for preset, (name, _buttons, _function) in config.APP_PRESETS.items():
-                menu.addAction(_(name), lambda p=preset: self._suggest(p))
+            for preset in config.offered_presets():
+                menu.addAction(_(config.APP_PRESETS[preset][0]), lambda p=preset: self._suggest(p))
             self.suggest.setMenu(menu)
             below = QHBoxLayout()
             below.setSpacing(8)
@@ -224,12 +235,15 @@ class AppChooser(QWidget):
             title = _(BUTTON_TITLES[key])
             lines.append(f"{title}: {actions.describe(action)}" if key in setting else
                          stays.format(control=title, value=actions.describe(own[key])))
-        own = config.app_thumb_function(self.store.cfg, app)
-        lines.append(f"{_('Thumb wheel')}: {_(THUMB_LABELS[function])}" if thumb is not None else
-                     stays.format(control=_("Thumb wheel"), value=_(THUMB_LABELS[own])))
-        if "middle" not in buttons:
+        if function is not None:  # a set without one leaves the thumb wheel as it is: nothing to say
+            own = config.app_thumb_function(self.store.cfg, app)
+            lines.append(f"{_('Thumb wheel')}: {_(THUMB_LABELS[function])}" if thumb is not None else
+                         stays.format(control=_("Thumb wheel"), value=_(THUMB_LABELS[own])))
+        if preset in PANNED:
             lines += ["", _("Logi Options+ also pans while the middle button is held here. These settings leave the "
                             "middle button as it is: to pan, give it Gestures for this app and choose Pan.")]
+        if preset in PRESET_NOTES:
+            lines += ["", _(PRESET_NOTES[preset])]
         lines += ["", _("Everything else stays as it is. To undo one of these, choose \"As in all apps\" for it.")]
         if QMessageBox.question(self, APP_NAME, "\n".join(lines)) == QMessageBox.StandardButton.Yes:
             current = self.store.mouse_profile(app)

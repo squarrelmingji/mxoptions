@@ -605,6 +605,17 @@ only files you trust.
   Final Cut Pro, Zoom and Teams and its rings for single apps. Nothing is matched by the app's name.
   Ctrl+Z and Ctrl+Y are key positions: on a layout where Z and Y trade places (German, for one) they
   trade places too.
+  Two more sets are own choices, not after Logi Options+ (what its Zoom and Teams sets hold is not
+  published): *Zoom meetings* (Linux and Windows: back Alt+A, mute or unmute, forward Alt+V, video
+  on or off, Zoom's default shortcuts in a meeting) and, on Windows only, *Microsoft Teams meetings*
+  (Ctrl+Shift+M and Ctrl+Shift+O of the Teams desktop app; Teams has no desktop app for Linux, and
+  its web app has no video shortcut). They touch the back and forward buttons only. Each press sends the
+  shortcut once, however long the button is held, and only while that app is in front. Like any
+  macro, it waits for a macro still playing; at most four wait and a press past that is dropped, and
+  changing what the button does or the mouse going away drops one still waiting. A shortcut changed
+  in the app no longer matches. Keys are key positions: on French AZERTY Alt+A lands where Q is, and
+  Microsoft lists its shortcuts for the US layout. These are the apps' own mute, not the system's
+  *Mute microphone* (`mic_mute`), which stays a separate action. Not tried with the apps yet.
 - **The haptic panel does not answer while a main button is held.** With the left button down the
   mouse reports nothing for the panel, however hard it is pressed; the gesture button is reported
   all the same. So gestures made while a window is being dragged want the gesture button, not the

@@ -1097,6 +1097,24 @@ STRINGS = {
     "Web browser": "Веббраузер",
     "Spreadsheet": "Електронна таблиця",
     "Documents and slides": "Документи й слайди",
+    "Zoom meetings": "Зустрічі в Zoom",
+    "Microsoft Teams meetings": "Зустрічі в Microsoft Teams",
+    "Own choice from Zoom's default shortcuts, not a set of Logi Options+: back sends Alt+A (mute or unmute your "
+    "audio), forward Alt+V (start or stop your video), once per press. They work while Zoom is in front and its "
+    "shortcuts are unchanged. Keys are key positions: on a layout where A or V sit elsewhere (French, for one), other "
+    "shortcuts are sent.":
+        "Власний вибір зі стандартних скорочень Zoom, а не набір Logi Options+: «Назад» надсилає Alt+A (вимкнути чи "
+        "ввімкнути звук), «Вперед» — Alt+V (увімкнути чи вимкнути відео), раз на натискання. Вони діють, поки Zoom "
+        "на передньому плані і його скорочення не змінено. Клавіші — це положення клавіш: на розкладці, де A чи V "
+        "стоять деінде (французькій, наприклад), надсилаються інші скорочення.",
+    "Own choice from the default shortcuts of the Teams desktop app for Windows, not a set of Logi Options+: back "
+    "sends Ctrl+Shift+M (mute or unmute), forward Ctrl+Shift+O (video on or off), once per press. They work while "
+    "Teams is in front and its shortcuts are unchanged. Microsoft lists them for the US layout; keys are key "
+    "positions.":
+        "Власний вибір зі стандартних скорочень програми Teams для Windows, а не набір Logi Options+: «Назад» "
+        "надсилає Ctrl+Shift+M (вимкнути чи ввімкнути мікрофон), «Вперед» — Ctrl+Shift+O (увімкнути чи вимкнути "
+        "відео), раз на натискання. Вони діють, поки Teams на передньому плані і його скорочення не змінено. "
+        "Microsoft наводить їх для розкладки США; клавіші — це положення клавіш.",
     "Apply the suggested settings \"{preset}\" to {app}?": "Застосувати запропоновані налаштування «{preset}» до {app}?",
     "{control}: stays as set for this app ({value})": "{control}: лишається, як задано для цієї програми ({value})",
     "Logi Options+ also pans while the middle button is held here. These settings leave the middle button as it "

@@ -14,7 +14,7 @@ import unicodedata
 
 from . import device, environment, flow, gestures, paths
 from .i18n import _
-from .actions import DEFAULT, MACRO_STEPS, MAX_DELAY_MS, MAX_MACRO_STEPS, PRESET_BY_ID, SCROLLS, STEP_ACTIONS, dial_available
+from .actions import DEFAULT, MACRO_STEPS, MAX_DELAY_MS, MAX_MACRO_STEPS, PRESET_BY_ID, SCROLLS, STEP_ACTIONS, dial_available, keys_label
 from .keys import CODES as KEY_CODES
 from .vinput import MOUSE_BUTTONS
 
@@ -769,18 +769,37 @@ def ring_bubbles(cfg, app):
     return profile["ring"] if profile is not None and profile["ring"] is not None else cfg["ring"]["bubbles"]
 
 
+def _once(*names):
+    """A macro tapping the key combination ``names`` once per press, however long its button is held: held, the
+    keys could repeat in the app and toggle again."""
+    keys = list(names)
+    return {"type": "macro", "name": keys_label(keys), "repeat": False, "steps": [{"do": "keys", "keys": keys}]}
+
+
 # Suggested settings for one app, given only to an app with a mouse profile that the user picked, never by its
-# name: id -> (label, {button: action}, thumb wheel function). Own Linux and Windows choices after three rows of
-# the predefined app-specific settings of Logi Options+ (browser; Excel; Word and PowerPoint): panning while the
-# middle button is held, which Logi Options+ does there, is left out (an app can be given Gestures with Pan by
-# hand: "mouse.gestures"). Keys are key positions, as everywhere.
+# name: id -> (label, {button: action}, thumb wheel function or None: the thumb wheel stays). The first three are
+# own Linux and Windows choices after three rows of the predefined app-specific settings of Logi Options+
+# (browser; Excel; Word and PowerPoint): panning while the middle button is held, which Logi Options+ does there,
+# is left out (an app can be given Gestures with Pan by hand: "mouse.gestures"). The meeting sets are own choices
+# from the default shortcuts Zoom and Microsoft list for their apps, not after Logi Options+. Keys are key
+# positions, as everywhere.
 APP_PRESETS = {
     "browser": ("Web browser", {"middle": NATIVE, "back": NATIVE, "forward": NATIVE}, "tabs"),
     "spreadsheet": ("Spreadsheet", {"back": {"type": "keys", "keys": ["KEY_LEFTCTRL", "KEY_Z"]},
                                     "forward": {"type": "keys", "keys": ["KEY_LEFTCTRL", "KEY_Y"]}}, "hscroll"),
     "documents": ("Documents and slides", {"back": {"type": "keys", "keys": ["KEY_LEFTCTRL", "KEY_Z"]},
                                            "forward": {"type": "keys", "keys": ["KEY_LEFTCTRL", "KEY_Y"]}}, "zoom"),
+    "zoom": ("Zoom meetings", {"back": _once("KEY_LEFTALT", "KEY_A"), "forward": _once("KEY_LEFTALT", "KEY_V")}, None),
+    "teams": ("Microsoft Teams meetings", {"back": _once("KEY_LEFTCTRL", "KEY_LEFTSHIFT", "KEY_M"),
+                                           "forward": _once("KEY_LEFTCTRL", "KEY_LEFTSHIFT", "KEY_O")}, None),
 }
+PRESET_SYSTEMS = {"teams": "win32"}  # no Teams desktop app on Linux, and its web app has no video shortcut
+
+
+def offered_presets(platform=None):
+    """The ids of APP_PRESETS offered on ``platform`` (sys.platform if None), in their order."""
+    platform = platform or sys.platform
+    return [preset for preset in APP_PRESETS if PRESET_SYSTEMS.get(preset, platform) == platform]
 
 
 def preset_changes(cfg, app, preset):

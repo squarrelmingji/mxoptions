@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import queue
+import sys
 import threading
 import time
 import unittest
@@ -21,7 +22,7 @@ from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 import tests.support as support  # noqa: E402
-from mxoptions import APP_ID, actions, api, config, engine, hidpp  # noqa: E402
+from mxoptions import APP_ID, actions, api, config, engine, hidpp, vinput  # noqa: E402
 from mxoptions.ui import pages, ring, ring_page  # noqa: E402
 from mxoptions.ui.store import Store  # noqa: E402
 
@@ -2106,13 +2107,15 @@ class SuggestedSettings(unittest.TestCase):
             "browser": ("Web browser", {"middle": NATIVE, "back": NATIVE, "forward": NATIVE}, "tabs"),
             "spreadsheet": ("Spreadsheet", {"back": self.UNDO, "forward": self.REDO}, "hscroll"),
             "documents": ("Documents and slides", {"back": self.UNDO, "forward": self.REDO}, "zoom"),
+            "zoom": ("Zoom meetings", {"back": ONCE_ALT_A, "forward": ONCE_ALT_V}, None),
+            "teams": ("Microsoft Teams meetings", {"back": ONCE_MUTE, "forward": ONCE_VIDEO}, None),
         })
         for preset, (label, buttons, function) in config.APP_PRESETS.items():
             with self.subTest(preset=preset):
                 self.assertIn(label, i18n_uk.STRINGS)
                 self.assertLessEqual(set(buttons), {"middle", "back", "forward"})  # gesture, wheel mode, panel: never
                 self.assertTrue(all(map(config.profile_button_action, buttons.values())))
-                self.assertIn(function, config.THUMB_FUNCTIONS)
+                self.assertIn(function, (*config.THUMB_FUNCTIONS, None))  # None: the thumb wheel stays
                 self.assertNotEqual(function, "keys")
         self.assertIs(actions.find_preset(self.UNDO), actions.PRESET_BY_ID["undo"])  # shown as the catalogue's Undo
 
@@ -2203,7 +2206,10 @@ class SuggestedSettings(unittest.TestCase):
         store.set_mouse_app(KATE)
         self.assertTrue(chooser.suggest.isVisible())
         menu = chooser.suggest.menu()
-        self.assertEqual([action.text() for action in menu.actions()], ["Web browser", "Spreadsheet", "Documents and slides"])
+        offered = ["Web browser", "Spreadsheet", "Documents and slides", "Zoom meetings"]
+        if sys.platform == "win32":
+            offered.append("Microsoft Teams meetings")
+        self.assertEqual([action.text() for action in menu.actions()], offered)
         asked = []
 
         def answer(reply, change=lambda: None):
@@ -2377,3 +2383,418 @@ class SuggestedSettings(unittest.TestCase):
             APP.setStyle(old_style)
             APP.setStyleSheet(old_sheet)
             APP.setPalette(old_palette)
+
+
+def once(*names, name):
+    """A literal one-step macro of a meeting set: the combination tapped once per press."""
+    return {"type": "macro", "name": name, "repeat": False, "steps": [{"do": "keys", "keys": list(names)}]}
+
+
+ONCE_ALT_A = once("KEY_LEFTALT", "KEY_A", name="Alt + A")
+ONCE_ALT_V = once("KEY_LEFTALT", "KEY_V", name="Alt + V")
+ONCE_MUTE = once("KEY_LEFTCTRL", "KEY_LEFTSHIFT", "KEY_M", name="Ctrl + Shift + M")
+ONCE_VIDEO = once("KEY_LEFTCTRL", "KEY_LEFTSHIFT", "KEY_O", name="Ctrl + Shift + O")
+TAP_A = [("KEY_LEFTALT", True), ("KEY_A", True), ("KEY_A", False), ("KEY_LEFTALT", False)]
+TAP_V = [("KEY_LEFTALT", True), ("KEY_V", True), ("KEY_V", False), ("KEY_LEFTALT", False)]
+CTRL = actions.keys("LEFTCTRL")
+ZOOM_NOTE = ("Own choice from Zoom's default shortcuts, not a set of Logi Options+: back sends Alt+A (mute or unmute "
+             "your audio), forward Alt+V (start or stop your video), once per press. They work while Zoom is in front "
+             "and its shortcuts are unchanged. Keys are key positions: on a layout where A or V sit elsewhere (French, "
+             "for one), other shortcuts are sent.")
+TEAMS_NOTE = ("Own choice from the default shortcuts of the Teams desktop app for Windows, not a set of Logi Options+: "
+              "back sends Ctrl+Shift+M (mute or unmute), forward Ctrl+Shift+O (video on or off), once per press. They "
+              "work while Teams is in front and its shortcuts are unchanged. Microsoft lists them for the US layout; "
+              "keys are key positions.")
+PAN = ("Logi Options+ also pans while the middle button is held here. These settings leave the middle button as it "
+       "is: to pan, give it Gestures for this app and choose Pan.")
+REST = 'Everything else stays as it is. To undo one of these, choose "As in all apps" for it.'
+
+
+class Keys(support.FakeInput):
+    """What reaches the system, seen as it happens (seen). The first down of BLOCK, an earlier macro's, waits until
+    ``go`` is set; FENCE (settle) and BLOCK are never written down, so neither shows in what a test compares.
+    ``refuse``: the one (name, down) the system turns away, once."""
+
+    BLOCK, FENCE = "KEY_F13", "KEY_F24"
+
+    def __init__(self, refuse=None):
+        super().__init__()
+        self.refuse, self.changed = refuse, threading.Condition()
+        self.blocked, self.go, self.fenced = threading.Event(), threading.Event(), threading.Event()
+        self._holds = vinput.Holds(self._emit)
+
+    def _emit(self, name, down):
+        if name == self.FENCE:
+            if not down:
+                self.fenced.set()
+            return
+        if (name, down) == self.refuse:
+            self.refuse = None
+            raise OSError("refused")
+        if name == self.BLOCK:
+            if down and not self.go.is_set():
+                self.blocked.set()
+                self.go.wait(5)
+            return
+        with self.changed:
+            self.sent.append((name, down))
+            self.changed.notify_all()
+
+
+def seen(test, keys, count):
+    """Wait until ``count`` key events reached the system."""
+    with keys.changed:
+        test.assertTrue(keys.changed.wait_for(lambda: len(keys.sent) >= count, 5), keys.sent)
+
+
+def settle(test, made):
+    """Every macro queued before has played or been dropped: a fence queued behind them played. A macro that
+    repeats while its button is held never lets it play."""
+    keys = made.vinput
+    test.assertLess(made.executor.macros._queue.qsize(), 4)  # read only: the fence is not turned away
+    keys.fenced.clear()
+    made.executor.trigger(macro(Keys.FENCE))
+    test.assertTrue(keys.fenced.wait(5), "the fence never played: a macro still plays")
+
+
+class MeetingSuggestions(unittest.TestCase):
+    """The meeting sets (config.APP_PRESETS "zoom", "teams"): what they hold and where they are offered, what giving
+    them changes, the preview, and what the real Executor sends through vinput.Holds for presses, held buttons, app
+    switches, a reset and a key the system refuses. Waits are events only; no app, call or input device is used."""
+
+    make_store, page = SuggestedSettings.make_store, SuggestedSettings.page
+
+    def setUp(self):
+        from PySide6.QtCore import QEvent
+        before = {thread for thread in threading.enumerate() if thread.name == "macro"}
+
+        def gone():  # last: after every executor was stopped and every page deleted
+            APP.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            left = {thread for thread in threading.enumerate() if thread.name == "macro" and thread.is_alive()}
+            self.assertEqual(left - before, set(), "a macro thread of this test was left running")
+        self.addCleanup(gone)
+
+    def test_each_meeting_set_sends_documented_defaults_once_per_press(self):
+        from mxoptions import i18n_uk
+        from mxoptions.ui import pages as ui
+        self.assertEqual(config.APP_PRESETS["zoom"], ("Zoom meetings", {"back": ONCE_ALT_A, "forward": ONCE_ALT_V}, None))
+        self.assertEqual(config.APP_PRESETS["teams"],
+                         ("Microsoft Teams meetings", {"back": ONCE_MUTE, "forward": ONCE_VIDEO}, None))
+        for preset in ("zoom", "teams"):
+            label, buttons, _function = config.APP_PRESETS[preset]
+            with self.subTest(preset=preset):
+                for action in buttons.values():
+                    self.assertTrue(config.profile_button_action(action))
+                    self.assertIs(action["repeat"], False)
+                    self.assertEqual([step["do"] for step in action["steps"]], ["keys"])
+                self.assertIn(label, i18n_uk.STRINGS)
+                self.assertIn(ui.PRESET_NOTES[preset], i18n_uk.STRINGS)
+        self.assertEqual(ui.PRESET_NOTES, {"zoom": ZOOM_NOTE, "teams": TEAMS_NOTE})
+        self.assertNotIn("KEY_MICMUTE", json.dumps(config.APP_PRESETS))  # the app's mute, not the system's
+        cfg = copy.deepcopy(config.DEFAULTS)
+        cfg["mouse"]["profiles"] = [profile(KATE, back=ONCE_ALT_A, forward=ONCE_ALT_V)]
+        self.assertEqual(config.clean(copy.deepcopy(cfg)), cfg)  # loaded as they are: no new format
+
+    def test_teams_is_offered_on_windows_only(self):
+        self.assertEqual(config.offered_presets("linux"), ["browser", "spreadsheet", "documents", "zoom"])
+        self.assertEqual(config.offered_presets("win32"), ["browser", "spreadsheet", "documents", "zoom", "teams"])
+        self.assertEqual(config.offered_presets(), config.offered_presets(sys.platform))
+        store = self.make_store()
+        store.cfg["mouse"]["profiles"] = [profile(KATE)]
+        store.set_mouse_app(KATE)
+        menu = self.page(store).apps.suggest.menu()
+        self.assertEqual([action.text() for action in menu.actions()],
+                         [config.APP_PRESETS[preset][0] for preset in config.offered_presets(sys.platform)])
+        if sys.platform != "win32":
+            self.assertNotIn("Microsoft Teams meetings", [action.text() for action in menu.actions()])
+
+    def test_a_buttons_only_set_changes_two_buttons_and_nothing_else(self):
+        mine = macro("KEY_F5", name="mine")
+        for app, gained in ((KATE, {"back": ONCE_ALT_A, "forward": ONCE_ALT_V}),
+                            (KONSOLE, {"back": ONCE_ALT_A, "forward": ONCE_ALT_V}), (KWRITE, {"forward": ONCE_ALT_V})):
+            with self.subTest(app=app):
+                store = self.make_store()
+                store.cfg["buttons"]["back"] = COPY
+                store.cfg["thumbwheel"].update(function="volume", speed=2.0, up=["KEY_F2"])
+                store.cfg["wheel"]["speed"] = 3.0
+                store.cfg["mouse"]["profiles"] = [profile(KATE, RING_A), profile(KONSOLE), profile(KWRITE, back=mine)]
+                self.assertTrue(store.set_profile_thumb(KATE, "volume"))
+                self.assertTrue(store.set_profile_thumb_keys(KATE, {"up": ["KEY_F1"], "down": []}))
+                self.assertTrue(store.set_profile_button(KATE, "middle", config.default_gestures()))
+                before, pushes = copy.deepcopy(store.cfg), len(store.engine.configs)
+                self.assertTrue(store.apply_mouse_preset(app, "zoom"))
+                expected = copy.deepcopy(before)
+                expected["mouse"]["profiles"][[KATE, KONSOLE, KWRITE].index(app)]["buttons"].update(gained)
+                self.assertEqual(store.cfg, expected)
+                self.assertEqual(json.dumps(store.cfg, sort_keys=True), json.dumps(expected, sort_keys=True))
+                self.assertEqual(store.engine.configs[pushes:], [expected])  # in one go
+        store = self.make_store()
+        store.cfg["mouse"]["profiles"] = [profile(KATE), profile(KONSOLE)]
+        for app in (KATE, KONSOLE):
+            store.apply_mouse_preset(app, "zoom")
+        store.mouse_profile(KATE)["buttons"]["back"]["steps"][0]["keys"].append("KEY_F1")
+        self.assertEqual(store.mouse_profile(KONSOLE)["buttons"]["back"], ONCE_ALT_A)  # copies of their own
+        self.assertEqual(config.APP_PRESETS["zoom"][1]["back"], ONCE_ALT_A)
+
+    def ask(self, store, preset, reply=QMessageBox.StandardButton.No, change=lambda: None, every=False):
+        """The preview of ``preset`` from the Buttons page menu, answered with ``reply`` after ``change``; ``every``:
+        the menu as on a system that offers every set. Returns its lines and the notice mock."""
+        from mxoptions import i18n
+        offered = (lambda platform=None: list(config.APP_PRESETS)) if every else config.offered_presets
+        with mock.patch.object(config, "offered_presets", offered):
+            chooser = self.page(store).apps
+        asked = []
+
+        def question(_parent, _title, text):
+            asked.append(text)
+            change()
+            return reply
+        with mock.patch.object(pages.QMessageBox, "question", question), \
+                mock.patch.object(pages.QMessageBox, "information") as information:
+            label = i18n._(config.APP_PRESETS[preset][0])
+            next(action for action in chooser.suggest.menu().actions() if action.text() == label).trigger()
+        self.assertEqual(len(asked), 1)
+        return asked[0].split("\n"), information, chooser
+
+    def test_the_preview_names_only_what_the_set_does(self):
+        from mxoptions import i18n
+        self.addCleanup(i18n.setup, "en")
+        zoom = ['Apply the suggested settings "Zoom meetings" to kate?', "", "Back button: Alt + A",
+                "Forward button: Alt + V", "", ZOOM_NOTE, "", REST]
+        teams = ['Apply the suggested settings "Microsoft Teams meetings" to kate?', "", "Back button: Ctrl + Shift + M",
+                 "Forward button: Ctrl + Shift + O", "", TEAMS_NOTE, "", REST]
+        uk_rest = "Усе інше лишається як є. Щоб скасувати щось із цього, виберіть для нього «Як в усіх програмах»."
+        uk = {"zoom": ["Застосувати запропоновані налаштування «Зустрічі в Zoom» до kate?", "",
+                       "Кнопка «Назад»: Alt + A", "Кнопка «Вперед»: Alt + V", "",
+                       "Власний вибір зі стандартних скорочень Zoom, а не набір Logi Options+: «Назад» надсилає Alt+A "
+                       "(вимкнути чи ввімкнути звук), «Вперед» — Alt+V (увімкнути чи вимкнути відео), раз на "
+                       "натискання. Вони діють, поки Zoom на передньому плані і його скорочення не змінено. Клавіші — "
+                       "це положення клавіш: на розкладці, де A чи V стоять деінде (французькій, наприклад), "
+                       "надсилаються інші скорочення.", "", uk_rest],
+              "teams": ["Застосувати запропоновані налаштування «Зустрічі в Microsoft Teams» до kate?", "",
+                        "Кнопка «Назад»: Ctrl + Shift + M", "Кнопка «Вперед»: Ctrl + Shift + O", "",
+                        "Власний вибір зі стандартних скорочень програми Teams для Windows, а не набір Logi Options+: "
+                        "«Назад» надсилає Ctrl+Shift+M (вимкнути чи ввімкнути мікрофон), «Вперед» — Ctrl+Shift+O "
+                        "(увімкнути чи вимкнути відео), раз на натискання. Вони діють, поки Teams на передньому плані "
+                        "і його скорочення не змінено. Microsoft наводить їх для розкладки США; клавіші — це положення "
+                        "клавіш.", "", uk_rest]}
+        unchanged = {  # the sets of before, as before: their thumb wheel line, Pan where they pan
+            "browser": ['Apply the suggested settings "Web browser" to kate?', "", "Middle button: Default",
+                        "Back button: Default", "Forward button: Default", "Thumb wheel: Switch tabs", "", REST],
+            "spreadsheet": ['Apply the suggested settings "Spreadsheet" to kate?', "", "Back button: Undo",
+                            "Forward button: Ctrl + Y", "Thumb wheel: Horizontal scroll", "", PAN, "", REST],
+            "documents": ['Apply the suggested settings "Documents and slides" to kate?', "", "Back button: Undo",
+                          "Forward button: Ctrl + Y", "Thumb wheel: Zoom", "", PAN, "", REST]}
+        cases = [("inherits", "zoom", zoom), ("inherits", "teams", teams), ("own_thumb", "zoom", zoom),
+                 ("own_thumb", "teams", teams), ("own_back", "zoom", [*zoom[:2], "Back button: stays as set for this "
+                                                                      "app (mine)", *zoom[3:]])]
+        cases += [("inherits", preset, lines) for preset, lines in unchanged.items()]
+        for language in ("en", "uk"):
+            i18n.setup(language)
+            for case, preset, lines in cases if language == "en" else [("inherits", p, l) for p, l in uk.items()]:
+                with self.subTest(language=language, case=case, preset=preset):
+                    store = self.make_store()
+                    store.cfg["mouse"]["profiles"] = [profile(KATE, back=macro("KEY_F5", name="mine"))
+                                                      if case == "own_back" else profile(KATE)]
+                    if case == "own_thumb":
+                        self.assertTrue(store.set_profile_thumb(KATE, "volume"))
+                    store.set_mouse_app(KATE)
+                    before, pushes = copy.deepcopy(store.cfg), len(store.engine.configs)
+                    shown, information, _chooser = self.ask(store, preset, every=True)
+                    self.assertEqual(shown, lines)
+                    self.assertEqual((store.cfg, len(store.engine.configs)), (before, pushes))  # No: nothing
+                    information.assert_not_called()
+
+    def test_a_changed_preview_never_applies_unshown_settings_for_a_meeting_set(self):
+        message = "Settings changed while this dialog was open. Choose Suggested settings again."
+        zoom = {"back": ONCE_ALT_A, "forward": ONCE_ALT_V}
+        for case in ("button_removed", "button_customized", "profile_recreated", "thumb_changed", "unrelated_setting",
+                     "chooser_switched", "profile_removed"):
+            with self.subTest(case=case):
+                store = self.make_store()
+                store.cfg["buttons"]["back"] = COPY
+                self.assertTrue(store.add_mouse_profile(KATE))
+                if case == "button_removed":
+                    self.assertTrue(store.set_profile_button(KATE, "forward", PASTE))
+                store.set_mouse_app(KATE)
+                self.assertIs(store.cfg["haptics"]["battery_saving"], True)  # the default: the change below is one
+                during = {}
+
+                def change():
+                    during["before"] = len(store.engine.configs)
+                    if case == "button_removed":
+                        self.assertTrue(store.set_profile_button(KATE, "forward", None))
+                    elif case == "button_customized":
+                        self.assertTrue(store.set_profile_button(KATE, "back", macro("KEY_F5", name="kept")))
+                    elif case == "profile_recreated":
+                        store.remove_mouse_profile(KATE)
+                        self.assertTrue(store.add_mouse_profile(KATE))
+                    elif case == "thumb_changed":
+                        self.assertTrue(store.set_profile_thumb(KATE, "volume"))
+                    elif case == "unrelated_setting":
+                        store.set("haptics", "battery_saving", False)
+                    elif case == "chooser_switched":
+                        chooser.apps.setCurrentIndex(0)
+                    else:
+                        store.remove_mouse_profile(KATE)
+                    during["settings"] = copy.deepcopy(store.cfg)
+                    during["pushes"] = len(store.engine.configs)
+
+                chooser = self.page(store).apps
+                asked = []
+
+                def question(_parent, _title, text):
+                    asked.append(text)
+                    change()
+                    return QMessageBox.StandardButton.Yes
+                with mock.patch.object(pages.QMessageBox, "question", question), \
+                        mock.patch.object(pages.QMessageBox, "information") as information:
+                    next(a for a in chooser.suggest.menu().actions() if a.text() == "Zoom meetings").trigger()
+                self.assertEqual(len(asked), 1)
+                if case in ("button_removed", "button_customized", "profile_recreated"):
+                    self.assertEqual(store.cfg, during["settings"])
+                    self.assertEqual(len(store.engine.configs), during["pushes"])
+                    information.assert_called_once_with(chooser, pages.APP_NAME, message)
+                elif case == "profile_removed":
+                    self.assertEqual(store.cfg, during["settings"])
+                    self.assertEqual(len(store.engine.configs), during["pushes"])
+                    information.assert_not_called()
+                else:
+                    if case == "unrelated_setting":  # a real change, told to the engine, kept
+                        self.assertEqual(during["pushes"], during["before"] + 1)
+                        self.assertIs(store.engine.configs[-2]["haptics"]["battery_saving"], False)
+                        self.assertIs(store.cfg["haptics"]["battery_saving"], False)
+                    if case == "thumb_changed":
+                        self.assertEqual(config.app_thumb_function(store.cfg, KATE), "volume")
+                    if case == "chooser_switched":
+                        self.assertIsNone(store.mouse_app)
+                    expected = copy.deepcopy(during["settings"])
+                    expected["mouse"]["profiles"][0]["buttons"].update(zoom)
+                    self.assertEqual(store.cfg, expected)  # the set, and nothing else, on top of the change
+                    self.assertEqual(store.engine.configs[during["pushes"]:], [expected])  # exactly one push more
+                    self.assertEqual(store.cfg["buttons"]["back"], COPY)
+                    information.assert_not_called()
+                store._save_timer.stop()
+
+    def engine(self, refuse=None):
+        """A real Executor behind an engine on the test's thread, typing into Keys: KATE and KONSOLE got the Zoom set
+        through the Store (equal copies), KWRITE has no profile; the middle button runs an earlier macro (BLOCK)."""
+        store = self.make_store()
+        store.cfg["buttons"]["middle"] = macro(Keys.BLOCK)
+        store.cfg["mouse"]["profiles"] = [profile(KATE), profile(KONSOLE)]
+        for app in (KATE, KONSOLE):
+            self.assertTrue(store.apply_mouse_preset(app, "zoom"))
+        keys = Keys(refuse)
+        made = make(self, cfg=copy.deepcopy(store.cfg), real=False)
+        made.vinput = keys
+        made.executor = actions.Executor(keys, made._device_action)
+        self.addCleanup(stop, self, made.executor)
+        self.addCleanup(keys.go.set)  # first: a macro waiting on Keys goes on, so its thread can end
+        return made, keys
+
+    def keyboard(self, made):
+        board = actions.Executor(made.vinput, lambda *_args: None, owner="keyboard")
+        self.addCleanup(stop, self, board)
+        return board
+
+    def test_one_press_taps_once_however_long_held_and_its_release_adds_nothing(self):
+        made, keys = self.engine()
+        front(made, KATE)
+        made._button_down(BACK)
+        settle(self, made)  # the button still down
+        self.assertEqual(keys.sent, TAP_A)
+        self.assertEqual(held(made), set())
+        made._button_up(BACK)
+        settle(self, made)
+        self.assertEqual(keys.sent, TAP_A)
+        made._button_down(BACK)
+        made._button_down(FORWARD)
+        made._button_up(FORWARD)
+        made._button_up(BACK)
+        settle(self, made)
+        self.assertEqual(keys.sent, TAP_A + TAP_A + TAP_V)  # two buttons: two whole taps, in order
+        self.assertEqual(held(made), set())
+
+    def test_a_modifier_the_keyboard_holds_joins_the_shortcut_and_stays_held(self):
+        for modifier, sent in (("LEFTCTRL", [("KEY_LEFTCTRL", True)] + TAP_A),
+                               ("LEFTALT", [("KEY_LEFTALT", True), ("KEY_A", True), ("KEY_A", False)])):
+            with self.subTest(modifier=modifier):
+                made, keys = self.engine()
+                board = self.keyboard(made)
+                front(made, KATE)
+                board.press(actions.keys(modifier))
+                made._button_down(BACK)
+                made._button_up(BACK)
+                settle(self, made)
+                self.assertEqual(keys.sent, sent)
+                self.assertEqual(held(made), {"KEY_" + modifier})
+                board.release(actions.keys(modifier))
+                self.assertEqual((keys.sent[-1], held(made)), (("KEY_" + modifier, False), set()))
+
+    def test_a_finished_tap_stays_one_whatever_happens_while_its_button_is_held(self):
+        for case, again in (("equal_copy", TAP_A), ("other_mapping", []), ("reset", TAP_A)):
+            with self.subTest(case=case):
+                made, keys = self.engine()
+                board = self.keyboard(made)
+                board.press(CTRL)
+                front(made, KATE)
+                made._button_down(BACK)
+                seen(self, keys, 5)  # Ctrl, then the whole tap: finished before what follows
+                if case == "equal_copy":
+                    front(made, KONSOLE)
+                elif case == "other_mapping":
+                    front(made, KWRITE)  # all apps: the mouse's own back button
+                else:
+                    made._reset_input_state()
+                made._button_up(BACK)
+                settle(self, made)
+                self.assertEqual(keys.sent, [("KEY_LEFTCTRL", True)] + TAP_A)
+                self.assertEqual(held(made), {"KEY_LEFTCTRL"})  # the keyboard's, in every case
+                made._button_down(BACK)
+                made._button_up(BACK)
+                settle(self, made)
+                self.assertEqual(keys.sent[5:], again)
+
+    def test_a_queued_tap_plays_unless_its_mapping_changes_or_the_mouse_resets(self):
+        for case, plays in (("same_app", True), ("equal_copy", True), ("other_mapping", False), ("reset", False)):
+            with self.subTest(case=case):
+                made, keys = self.engine()
+                board = self.keyboard(made)
+                board.press(CTRL)
+                front(made, KATE)
+                made._button_down(MIDDLE)
+                made._button_up(MIDDLE)
+                self.assertTrue(keys.blocked.wait(5))  # the earlier macro plays and waits
+                made._button_down(BACK)
+                self.assertEqual(made.executor.macros._queue.qsize(), 1)  # read only: the tap waits behind it
+                if case == "equal_copy":
+                    front(made, KONSOLE)
+                elif case == "other_mapping":
+                    front(made, KWRITE)
+                elif case == "reset":
+                    made._reset_input_state()
+                made._button_up(BACK)
+                keys.go.set()
+                settle(self, made)
+                self.assertEqual(keys.sent, [("KEY_LEFTCTRL", True)] + (TAP_A if plays else []))
+                self.assertEqual(held(made), {"KEY_LEFTCTRL"})
+
+    def test_a_refused_key_leaves_nothing_down_and_the_next_press_taps_in_full(self):
+        made, keys = self.engine(refuse=("KEY_A", True))
+        board = self.keyboard(made)
+        board.press(CTRL)
+        front(made, KATE)
+        with self.assertLogs("mxoptions.actions", "ERROR") as logs:
+            made._button_down(BACK)
+            made._button_up(BACK)
+            settle(self, made)
+        self.assertIn("macro failed", logs.output[0])
+        self.assertEqual(keys.sent, [("KEY_LEFTCTRL", True), ("KEY_LEFTALT", True), ("KEY_A", False),
+                                     ("KEY_LEFTALT", False)])
+        self.assertEqual(held(made), {"KEY_LEFTCTRL"})
+        made._button_down(BACK)
+        made._button_up(BACK)
+        settle(self, made)
+        self.assertEqual(keys.sent[4:], TAP_A)
+        board.release(CTRL)
+        self.assertEqual((keys.sent[-1], held(made)), (("KEY_LEFTCTRL", False), set()))
