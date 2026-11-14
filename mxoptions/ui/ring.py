@@ -33,6 +33,7 @@ CENTER = 0.125          # centre bubble radius
 FOLDER_DWELL = 330      # ms pointing at a folder (button held) before it opens
 IDLE_TIMEOUT = 20000    # an untouched ring closes by itself
 WHEEL_STEP = 120        # wheel units per dial step
+DIAL_STEPS_MAX = 8      # dial steps from one turn at most (own choice); more are dropped
 # How the overlay gets above the windows (see RingOverlay)
 LAYER, X11, XWAYLAND, WINDOW = "layer", "x11", "xwayland", "window"
 # ms the pointer has to turn up in the new window before the ring opens mid-screen
@@ -1130,9 +1131,10 @@ class RingOverlay(QObject):
         self._idle_timer.start()
         self._wheel += delta
         _label, _icon, up, down, _click = actions.SCROLLS[self._level()[index]["scroll"]]
-        while abs(self._wheel) >= WHEEL_STEP:
-            forward = self._wheel > 0
-            self._wheel -= WHEEL_STEP if forward else -WHEEL_STEP
+        whole = int(self._wheel / WHEEL_STEP)
+        self._wheel -= whole * WHEEL_STEP  # before sending: nothing owed, steps beyond DIAL_STEPS_MAX dropped
+        forward = whole > 0
+        for _ in range(min(abs(whole), DIAL_STEPS_MAX)):
             self._angle = (self._angle + (30.0 if forward else -30.0)) % 360.0
             self._ring.set_spin(index, self._angle)
             self.cue.emit(device.WAVE_TICK)

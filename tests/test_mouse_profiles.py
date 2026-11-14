@@ -777,6 +777,66 @@ class Overlay(unittest.TestCase):
         overlay.turn(1)
         self.assertEqual(self.picks, [(actions.SCROLLS[name][2], 6)])
 
+    def dial(self):
+        """Ring 6 of one dial, placed, the dial under the pointer. Returns the cues it plays, its step up and down
+        as picked, and a function turning the wheel over the dial."""
+        overlay = self.overlay
+        name = next(iter(actions.SCROLLS))
+        overlay.handle("down", 6, [{"label": "", "icon": "", "color": "", "scroll": name}])
+        overlay._placed, overlay._selected = True, 0
+        cues = []
+        overlay.cue.connect(cues.append)
+        centre = ring.layout(overlay._style, overlay._ring_rect(), 1)[0][0].center
+        _label, _icon, up, down, _click = actions.SCROLLS[name]
+        return cues, (up, 6), (down, 6), lambda delta: overlay.wheelAt(centre.x(), centre.y(), delta)
+
+    def test_one_huge_dial_turn_steps_a_bounded_number_and_owes_nothing(self):
+        overlay = self.overlay
+        cues, up, down, wheel = self.dial()
+        most = ring.DIAL_STEPS_MAX
+        for clicks, step, click in ((32767 * 20 / 120, up, 1), (-32768 * 20 / 120, down, -1)):  # int16 thumb reports
+            with self.subTest(clicks=clicks):
+                self.picks.clear()
+                cues.clear()
+                overlay.turn(clicks)
+                self.assertEqual((len(self.picks), len(cues)), (most, most))
+                self.assertEqual(self.picks, [step] * most)
+                self.assertLess(abs(overlay._wheel), ring.WHEEL_STEP)  # the rest dropped, not owed
+                overlay.turn(click)  # the next ordinary click is one step
+                self.assertEqual((self.picks, len(cues)), ([step] * (most + 1), most + 1))
+        with self.subTest(wheel=-32768):
+            self.picks.clear()
+            cues.clear()
+            wheel(-32768)
+            self.assertEqual((len(self.picks), len(cues)), (most, most))
+            self.assertEqual(self.picks, [down] * most)
+            self.assertLess(abs(overlay._wheel), ring.WHEEL_STEP)
+
+    def test_ordinary_dial_turns_send_what_they_always_did(self):
+        overlay = self.overlay
+        cues, up, down, wheel = self.dial()
+
+        def turn(clicks):
+            return lambda: overlay.turn(clicks)
+
+        def over(delta):
+            return lambda: wheel(delta)
+
+        # what is done, the steps it sends, the dial's angle and the wheel travel left after it
+        done = [("turn 1", turn(1), [up], 30.0, 0.0), ("turn -1", turn(-1), [down], 0.0, 0.0),
+                ("turn 2", turn(2), [up, up], 60.0, 0.0)]
+        done += [(f"sixth {n}", turn(1 / 6), [], 60.0, 20.0 * n) for n in range(1, 6)]
+        done += [("sixth 6", turn(1 / 6), [up], 90.0, 0.0), ("wheel 120", over(120), [up], 120.0, 0.0)]
+        done += [(f"wheel 15 #{n}", over(15), [], 120.0, 15.0 * n) for n in range(1, 8)]
+        done += [("wheel 15 #8", over(15), [up], 150.0, 0.0)]
+        done += [(f"wheel 15 again #{n}", over(15), [], 150.0, 15.0 * n) for n in range(1, 8)]
+        sent = []
+        for name, call, steps, angle, left in done:
+            call()
+            sent += steps
+            self.assertEqual((self.picks, overlay._angle, overlay._wheel), (sent, angle, left), name)
+        self.assertEqual((overlay._wheel, len(cues)), (105.0, len(sent)))
+
     def test_a_numbered_cancel_closes_engine_rings_only(self):
         overlay = self.overlay
         self.assertTrue(overlay.open(RING_B))  # another program's
