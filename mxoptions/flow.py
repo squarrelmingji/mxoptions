@@ -410,6 +410,7 @@ class Link:
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._run, name="flow", daemon=True)
         self._server = None
+        self._listener = None       # the task opening the port, until it listens there or cannot
         self._dialers = {}          # pair -> the task that keeps calling that computer
         self._conns = {}            # pair -> the connection in use
         self._admit = {}            # pair -> token: the same while that computer stays linked here, new when it comes back
@@ -531,6 +532,9 @@ class Link:
         for dialer in self._dialers.values():
             dialer.cancel()
         self._dialers = {}
+        if self._listener is not None:  # it holds no socket yet: see _listen
+            self._listener.cancel()
+            self._listener = None
         if self._server is not None:
             self._server.close()
             self._server = None
@@ -552,7 +556,7 @@ class Link:
         if settings is None:
             return
         port, entries = settings
-        self._loop.create_task(self._listen(port))
+        self._listener = self._loop.create_task(self._listen(port))
         for pair, key, address in entries:
             self._dialers[pair] = self._loop.create_task(self._dial(pair, key, port, address))
 
@@ -575,21 +579,24 @@ class Link:
                 log.debug("flow: could not send: %s", e)
 
     async def _listen(self, port):
-        settings = self._settings
         try:
+            # Not serving yet, start_server binds and returns with no wait in between: until the socket is
+            # self._server's, this task has none, and _teardown may cancel it. (Serving at once, it would
+            # wait after binding, and a cancelled start_server keeps the socket it bound, listening.)
             server = await asyncio.start_server(
                 lambda reader, writer: self._session(reader, writer, dialed=False), host=None, port=port,
-                ssl=_context(self._keys, server=True), ssl_handshake_timeout=HANDSHAKE, limit=MAX_LINE)
+                ssl=_context(self._keys, server=True), ssl_handshake_timeout=HANDSHAKE, limit=MAX_LINE,
+                start_serving=False)
+            self._listener, self._server = None, server  # ours from here on: _teardown closes it
+            await server.start_serving()
         except (OSError, ssl.SSLError) as e:
+            self._listener = None
             log.warning("flow: cannot listen on port %d: %s", port, e)
             self._emit("problem", str(e))
             return
-        if settings is not self._settings:  # reconfigured while the port was being opened
-            server.close()
-            return
-        self._server = server
-        self._emit("problem", "")
-        log.info("flow: listening on port %d", port)
+        if self._server is server:  # not closed by new settings while serving began
+            self._emit("problem", "")
+            log.info("flow: listening on port %d", port)
 
     async def _dial(self, pair, key, port, address):
         given = split_address(address, port) if address else None

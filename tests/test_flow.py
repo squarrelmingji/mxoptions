@@ -2,6 +2,7 @@
 two computers (here: two links on this one), and the engine's part in handing the mouse over."""
 
 import asyncio
+import gc
 import json
 import os
 import queue
@@ -12,6 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
+import warnings
 
 from tests.support import make_engine
 from mxoptions import engine as engine_module, flow, flow_files, hidpp
@@ -811,6 +813,181 @@ class TakenOut(TwoComputers):
         self.keep()
         on_link(self.desk.link, lambda: held.let_go(asyncio.TimeoutError()))
         self.assertIs(self.desk.expect("quiet"), True)
+
+
+def port_free(port):
+    """Nothing here or elsewhere holds ``port``: it can be bound and listened on, as the link does it."""
+    for family, address in ((socket.AF_INET, "0.0.0.0"), (socket.AF_INET6, "::")):
+        probe = socket.socket(family)
+        try:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if family == socket.AF_INET6:
+                probe.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)
+            probe.bind((address, port))
+            probe.listen()
+        except OSError:
+            return False
+        finally:
+            probe.close()
+    return True
+
+
+@unittest.skipUnless(flow.supported(), "this Python has no pre-shared keys for TLS")
+class OpeningThePort(TwoComputers):
+    """The desk's settings change while it is still opening its port, as a pause and a resume at once do. The
+    opening is held at a wait start_server really has: looking up the address (before any socket), or the one
+    after the bind (start_server's own when it serves at once, start_serving's otherwise). Only the laptop and the
+    tower call, so that only the desk's listening gets them in; nothing here closes a socket of the desk's."""
+
+    def setUp(self):
+        super().setUp()
+        self.addCleanup(setattr, flow, "broadcast_addresses", flow.broadcast_addresses)
+        flow.broadcast_addresses = lambda: []  # no "here I am": the desk never calls them itself
+        self.held, self._go = threading.Event(), asyncio.Event()
+        self.addCleanup(self.let_go)
+
+    def hold_after_binding(self):
+        """Hold the desk's first wait after binding its port, until let_go()."""
+        sleep, thread, armed = asyncio.tasks.sleep, self.desk.link._thread, [True]
+
+        async def held(result):
+            self.held.set()
+            await self._go.wait()
+            return await sleep(0, result)
+
+        def gated(delay, result=None):
+            caller = sys._getframe(1).f_code
+            if (armed[0] and delay == 0 and threading.current_thread() is thread
+                    and caller.co_filename == asyncio.base_events.__file__
+                    and caller.co_name in ("create_server", "start_serving")):
+                armed[0] = False
+                return held(result)
+            return sleep(delay, result)
+        self.addCleanup(setattr, asyncio.tasks, "sleep", sleep)
+        asyncio.tasks.sleep = gated
+
+    def hold_looking_up(self):
+        """Hold the desk's first look-up of the address to listen on, until let_go(): no socket is open yet."""
+        loop, armed = self.desk.link._loop, [True]
+        getaddrinfo = loop.getaddrinfo
+
+        async def gated(host, port, **options):
+            if armed[0] and host is None:
+                armed[0] = False
+                self.held.set()
+                await self._go.wait()
+            return await getaddrinfo(host, port, **options)
+        loop.getaddrinfo = gated
+
+    def let_go(self):
+        try:
+            self.desk.link._loop.call_soon_threadsafe(self._go.set)
+        except RuntimeError:  # stopped: nothing waits any more
+            pass
+
+    def peers(self, *keys):
+        return [{"key": key, "address": ""} for key in keys]
+
+    def pause_and_resume(self, *kept):
+        """Switch the desk on, and while its port opens take the laptop out and have it back, as Pause and Resume do."""
+        self.desk.link.configure(self.peers(KEY, *kept), self.desk.port)
+        self.assertTrue(self.held.wait(5))
+        self.desk.link.configure(self.peers(*kept) or None, self.desk.port)
+        self.desk.link.configure(self.peers(KEY, *kept), self.desk.port, mark=1)
+        self.assertEqual(self.desk.expect("mark"), 1)
+
+    def problems(self, for_=0.6):
+        found, deadline = [], time.monotonic() + for_
+        while time.monotonic() < deadline:
+            try:
+                kind, payload = self.desk.heard.get(timeout=0.05)
+            except queue.Empty:
+                continue
+            if kind == "problem":
+                found.append(payload)
+        return found
+
+    def listening(self):
+        """The desk's own listening, and any task of it still opening a port."""
+        def look():
+            link = self.desk.link
+            opening = [task for task in asyncio.all_tasks(link._loop)
+                       if task.get_coro().__qualname__ == "Link._listen" and not task.done()]
+            return link._server, opening
+        return on_link(self.desk.link, look)
+
+    def assert_listening_for(self, *ends):
+        """The desk listens on its port alone, says it can, lets each of ``ends`` in, and frees the port when it stops."""
+        self.assertEqual(self.desk.expect("problem"), "")
+        self.let_go()
+        self.assertEqual(self.problems(), [])  # the older opening says nothing, not even later
+        server, opening = self.listening()
+        self.assertIsNotNone(server)
+        self.assertEqual({sock.getsockname()[1] for sock in server.sockets}, {self.desk.port})
+        self.assertEqual(opening, [])
+        for end, key in ends:
+            end.link.configure(key, end.port, f"127.0.0.1:{self.desk.port}")
+            self.assertEqual(end.expect("up")["name"], "desk")
+        self.desk.link.configure(self.peers(*(key for _end, key in ends)), self.desk.port)  # the same again
+        self.assertTrue(self.desk.quiet("problem", 0.3))
+        self.assertIs(self.listening()[0], server)
+        self.assert_stops_and_frees_its_port()
+
+    def assert_stops_and_frees_its_port(self):
+        """Stopped, the desk has closed every socket it opened itself: none is left for the collector to find."""
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ResourceWarning)
+            self.desk.link.stop()
+            gc.collect()
+        self.assertFalse(self.desk.link._thread.is_alive())
+        self.assertEqual([str(w.message) for w in caught if issubclass(w.category, ResourceWarning)], [])
+        self.assertTrue(port_free(self.desk.port))
+
+    def test_resumed_while_its_port_was_bound_and_not_yet_its_own(self):
+        self.hold_after_binding()
+        self.pause_and_resume()
+        self.assert_listening_for((self.laptop, KEY))
+
+    def test_resumed_while_its_port_was_looked_up_and_the_old_opening_stays_silent(self):
+        self.hold_looking_up()
+        self.pause_and_resume()
+        self.assert_listening_for((self.laptop, KEY))
+
+    def test_the_computer_kept_through_the_pause_and_the_one_resumed_both_get_in(self):
+        tower = End("tower", os.path.join(self.folder, "at-tower"))
+        self.addCleanup(tower.link.stop)
+        self.hold_after_binding()
+        self.pause_and_resume(OTHER_KEY)
+        self.assert_listening_for((self.laptop, KEY), (tower, OTHER_KEY))
+
+    def test_a_port_taken_meanwhile_stays_the_problem(self):
+        self.hold_after_binding()
+        self.desk.link.configure(KEY, self.desk.port, "")
+        self.assertTrue(self.held.wait(5))
+        self.desk.link.configure(None)
+        on_link(self.desk.link, lambda: None)  # taken out: the desk no longer holds its port
+        taken = socket.socket()
+        self.addCleanup(taken.close)
+        taken.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        taken.bind(("0.0.0.0", self.desk.port))
+        taken.listen()
+        with self.assertLogs("mxoptions.flow", "WARNING"):
+            self.desk.link.configure(KEY, self.desk.port, "")
+            self.assertTrue(self.desk.expect("problem"))
+        self.let_go()
+        self.assertEqual(self.problems(), [])  # the opening overtaken does not say it listens
+        self.assertIsNone(self.listening()[0])
+
+    def test_stopped_while_its_port_opens(self):
+        for hold in ("hold_after_binding", "hold_looking_up"):
+            with self.subTest(hold=hold):
+                self.desk = End("desk", os.path.join(self.folder, f"at-desk-{hold}"))
+                self.addCleanup(self.desk.link.stop)
+                self.held, self._go = threading.Event(), asyncio.Event()
+                getattr(self, hold)()
+                self.desk.link.configure(KEY, self.desk.port, "")
+                self.assertTrue(self.held.wait(5))
+                self.assert_stops_and_frees_its_port()
 
 
 class Collecting(unittest.TestCase):
