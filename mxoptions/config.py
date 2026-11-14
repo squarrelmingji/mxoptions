@@ -934,6 +934,8 @@ def _macro_exact(macro):
     for step in macro["steps"]:
         if set(step) != {"do", _STEP_FIELDS[step["do"]]}:
             return False
+        if step["do"] == "click" and step["button"] not in ("BTN_LEFT", "BTN_RIGHT", "BTN_MIDDLE"):
+            return False
         if step["do"] == "command" and not (step["command"] == step["command"].strip() and _shell_text(step["command"])):
             return False
         if step["do"] == "action":

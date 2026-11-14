@@ -18,7 +18,6 @@ from PySide6.QtWidgets import QApplication, QDialog, QPushButton, QWidget  # noq
 from mxoptions import actions, config, device, i18n  # noqa: E402
 from mxoptions.ui import editors  # noqa: E402
 from mxoptions.ui.action_picker import ActionList  # noqa: E402
-from mxoptions.vinput import MOUSE_BUTTONS  # noqa: E402
 from tests.test_settings_file import Folder, fault  # noqa: E402
 
 APP = QApplication.instance() or QApplication([])
@@ -52,7 +51,7 @@ OWN_STEPS = [
     {"do": "keys", "keys": ["KEY_LEFTCTRL", "KEY_C"]}, {"do": "keys", "keys": []},
     {"do": "text", "text": "Привіт 🙂\n\ttab \u202e"}, {"do": "text", "text": " "},
     {"do": "delay", "ms": 0}, {"do": "delay", "ms": actions.MAX_DELAY_MS},
-    *({"do": "click", "button": button} for button in MOUSE_BUTTONS),
+    *({"do": "click", "button": button} for button in ("BTN_LEFT", "BTN_RIGHT", "BTN_MIDDLE")),
     {"do": "command", "command": NEVER + " --flag 'a b'\tc\nd"}, {"do": "command", "command": ""},
     {"do": "action", "action": {"type": "shortcut", "component": "kwin", "name": "Synthetic"}},
     {"do": "action", "action": {"type": "command", "command": " " + NEVER + " \\ \n"}},  # as written: never trimmed
@@ -580,6 +579,33 @@ class Dialog(Folder):
                 self.assertEqual(self.read(path), raw)
         self.importing(made, self.file(document(macro(name="next"))))  # a valid file after them still goes in
         self.assertEqual(made.action(), macro(name="next"))
+
+    def test_imported_clicks_show_the_target_or_leave_the_editor_unchanged(self):
+        made = self.dialog(macro(name="kept"))
+        for button in ("BTN_LEFT", "BTN_RIGHT", "BTN_MIDDLE"):
+            with self.subTest(button=button):
+                value = macro(steps=[{"do": "click", "button": button}])
+                self.assertEqual(self.importing(made, self.file(document(value))), [])
+                self.assertEqual(made.action(), value)
+                choices = made._rows[0].editor._buttons
+                self.assertEqual([key for key, choice in choices.items() if choice.isChecked()], [button])
+        before = self.state(made)
+        for button in ("BTN_SIDE", "BTN_EXTRA"):
+            with self.subTest(button=button):
+                value = macro(steps=[{"do": "text", "text": "must not replace rows"},
+                                     {"do": "click", "button": button}])
+                self.assertTrue(config.keyboard_action(value))
+                path = self.file(document(value))
+                raw = self.read(path)
+                self.assertEqual(self.importing(made, path),
+                                 [("warning", "in.json cannot be imported. It is not a macro file of MX Options.")])
+                self.assertEqual(self.state(made), before)
+                self.assertEqual(self.read(path), raw)
+                with self.assertRaisesRegex(ValueError, "The macro holds something a macro file cannot."):
+                    config.export_macro(value)
+        value = macro(steps=[{"do": "click", "button": "BTN_LEFT"}])
+        self.assertEqual(self.importing(made, self.file(document(value))), [])
+        self.assertEqual(made.action(), value)
 
 
 if __name__ == "__main__":
