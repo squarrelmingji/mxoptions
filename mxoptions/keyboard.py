@@ -1084,26 +1084,47 @@ class KeyboardSide:
 
     def _on_keys(self, pressed):
         keys = self._effective()
+        failed = None  # the first error of this report: raised once every key of it was handled
         for cid in sorted(pressed - self._pressed):
+            self._pressed = self._pressed | {cid}  # done once, even when it fails: never done again by a later report
             action = keys.get(config.key_id(cid)) if cid in self._active else None
             log.info("key %s down", config.key_id(cid))
             if action and config.keyboard_action(action) and action.get("type") != "none":
                 self._held[cid] = action
-                if action.get("type") == "ring":
-                    self.engine._ring_event(("keyboard", cid), "down")
-                    continue
-                self.executor.press(action)
+                try:
+                    if action.get("type") == "ring":
+                        self.engine._ring_event(("keyboard", cid), "down")
+                    else:
+                        self.executor.press(action)
+                except BaseException as err:
+                    if action.get("type") in ("keys", "button"):  # their press that failed holds nothing: the up must not let go
+                        self._held.pop(cid, None)
+                    if not isinstance(err, Exception):
+                        raise  # an interrupt: nothing more of the report is done
+                    if failed is None:
+                        failed = err
         for cid in sorted(self._pressed - pressed):
+            self._pressed = self._pressed - {cid}
             action = self._held.pop(cid, None)
             if action:
                 log.info("key %s up", config.key_id(cid))
-                if action.get("type") == "ring":
-                    self.engine._ring_event(("keyboard", cid), "up")
-                else:
-                    self.executor.release(action)
+                try:
+                    if action.get("type") == "ring":
+                        self.engine._ring_event(("keyboard", cid), "up")
+                    else:
+                        self.executor.release(action)
+                except Exception as err:
+                    if failed is None:
+                        failed = err
         self._pressed = pressed
         if self._pending and not (pressed or self._held) and self._task is None:
-            self._next_task()  # a change of a setting waited for the key to be let go
+            try:
+                self._next_task()  # a change of a setting waited for the key to be let go
+            except Exception as err:
+                if failed is None:
+                    failed = err
+        if failed is not None:
+            raise failed
 
     # -- the keys ------------------------------------------------------------
 

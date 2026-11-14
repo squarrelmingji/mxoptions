@@ -1128,18 +1128,33 @@ class Engine:
             self._configure()  # power-cycled: volatile settings are gone
 
     def _on_buttons(self, pressed):
+        failed = None  # the first error of this report: raised once every button of it was handled and told
+
+        def attempt(step, *args):
+            nonlocal failed
+            try:
+                step(*args)
+            except HidppClosed:
+                raise  # the mouse went away: nothing more of its report is done; its going lets go of what it holds
+            except Exception as err:
+                if failed is None:
+                    failed = err
         for cid in pressed - self._pressed:
             self._log_button(cid, "down")
-            self._button_down(cid)
-            if cid in config.BUTTON_BY_CID:
-                self._emit("button", (config.BUTTON_BY_CID[cid], True))
+            self._pressed = self._pressed | {cid}  # done once, even when it fails: never done again by a later report
+            attempt(self._button_down, cid)
+            if cid in config.BUTTON_BY_CID:  # told even when its action failed: each down has its up
+                attempt(self._emit, "button", (config.BUTTON_BY_CID[cid], True))
         for cid in self._pressed - pressed:
             self._log_button(cid, "up")
-            self._button_up(cid)
+            self._pressed = self._pressed - {cid}
+            attempt(self._button_up, cid)
             if cid in config.BUTTON_BY_CID:
-                self._emit("button", (config.BUTTON_BY_CID[cid], False))
+                attempt(self._emit, "button", (config.BUTTON_BY_CID[cid], False))
         self._pressed = pressed
-        self._publish_pressed()
+        attempt(self._publish_pressed)
+        if failed is not None:
+            raise failed
 
     def _log_button(self, cid, what):
         """One line per press of a button the app handles, with the main buttons held at that moment
@@ -1174,7 +1189,12 @@ class Engine:
             self._effect_down(cid, key, action)
         elif kind not in ("default", "none"):
             self._held_actions[cid] = action
-            self.executor.press(action)
+            try:
+                self.executor.press(action)
+            except BaseException:
+                if kind in ("keys", "button"):  # their press that failed holds nothing (vinput.Holds.press): the up must not let go
+                    self._held_actions.pop(cid, None)
+                raise
 
     def _button_up(self, cid):
         if self._gesture and self._gesture["cid"] == cid:

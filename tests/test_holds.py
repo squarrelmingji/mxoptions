@@ -4,6 +4,7 @@ and inside both backends with what they send to the system recorded instead of s
 import copy
 import ctypes
 import importlib
+import struct
 import sys
 import threading
 import time
@@ -13,6 +14,8 @@ from unittest import mock
 
 from tests.support import FakeInput
 from mxoptions import actions, vinput
+from mxoptions import config, device, engine, hidpp
+from tests import support, test_kbsettings, test_keyboard, test_mouse_profiles as profiles
 
 CTRL, C = "KEY_LEFTCTRL", "KEY_C"
 
@@ -549,6 +552,702 @@ class Backends(unittest.TestCase):
                 self.assertEqual(sent, expected * 2)
             finally:
                 sys.modules.pop("mxoptions.vinput_windows", None)
+
+
+V, X = "KEY_V", "KEY_X"
+
+
+class Failing(unittest.TestCase):
+    def fails(self, fn, *args, error=OSError):
+        try:
+            fn(*args)
+        except BaseException as caught:  # an interrupt of the wrong kind fails this test, not the whole run
+            self.assertIsInstance(caught, error)
+            return caught
+        self.fail(f"no {error.__name__}")
+
+    def assert_healthy(self, holds, emit, owner="mouse"):
+        before = len(emit.calls)
+        holds.press([CTRL, Z], owner)
+        holds.tap([C], wait=0)
+        holds.release([CTRL, Z], owner)
+        self.assertEqual(emit.calls[before:], [(CTRL, True), (Z, True), (C, True), (C, False), (Z, False), (CTRL, False)])
+        self.assertEqual((emit.active, holds.held()), (set(), set()))
+
+
+class PressFailures(Failing):
+    """A press that fails holds nothing: what it may have put down goes up again, and its error is raised."""
+
+    def test_the_first_down_failing_sends_its_up_and_holds_nothing(self):
+        emit = Refusing([(CTRL, True)])
+        holds = vinput.Holds(emit)
+        self.assertIs(self.fails(holds.press, [CTRL, Z], "mouse"), emit.raised[0])
+        self.assertEqual(emit.calls, [(CTRL, True), (CTRL, False)])
+        self.assertEqual((emit.active, holds.held()), (set(), set()))
+        self.assert_healthy(holds, emit)
+
+    def test_a_later_down_failing_lets_every_key_go_up_in_reverse(self):
+        emit = Refusing([(Z, True)])
+        holds = vinput.Holds(emit)
+        self.assertIs(self.fails(holds.press, [CTRL, Z, X], "mouse"), emit.raised[0])
+        self.assertEqual(emit.calls, [(CTRL, True), (Z, True), (Z, False), (CTRL, False)])  # X never went down
+        self.assertEqual((emit.active, holds.held()), (set(), set()))
+        self.assert_healthy(holds, emit)
+
+    def test_what_another_owner_holds_stays_held(self):
+        emit = Refusing()
+        holds = vinput.Holds(emit)
+        holds.press([CTRL], "keyboard")
+        emit.trips[(Z, True)] = OSError
+        self.fails(holds.press, [CTRL, Z], "mouse")
+        self.assertEqual(emit.calls, [(CTRL, True), (Z, True), (Z, False)])
+        holds.release_all("mouse")
+        self.assertEqual((emit.active, holds.held()), ({CTRL}, {CTRL}))
+        holds.release([CTRL], "keyboard")
+        self.assertEqual(emit.calls[-1], (CTRL, False))
+
+    def test_what_the_same_owner_holds_already_keeps_its_count(self):
+        emit = Refusing()
+        holds = vinput.Holds(emit)
+        holds.press([CTRL, X], "mouse")  # another button of the same owner
+        emit.trips[(Z, True)] = OSError
+        self.fails(holds.press, [CTRL, Z, X], "mouse")
+        self.assertEqual(emit.calls[2:], [(Z, True), (Z, False)])
+        self.assertEqual(emit.active, {CTRL, X})
+        holds.release([CTRL, X], "mouse")
+        self.assertEqual(emit.calls[-2:], [(X, False), (CTRL, False)])
+        self.assertEqual((emit.active, holds.held()), (set(), set()))
+
+    def test_a_key_named_twice_goes_up_once(self):
+        emit = Refusing([(Z, True)])
+        holds = vinput.Holds(emit)
+        self.fails(holds.press, [CTRL, CTRL, Z], "mouse")
+        self.assertEqual(emit.calls, [(CTRL, True), (Z, True), (Z, False), (CTRL, False)])
+        self.assertEqual(holds.held(), set())
+
+    def test_an_interrupt_lets_the_keys_go_up_and_the_press_s_error_wins(self):
+        for trips, error in (({(Z, True): KeyboardInterrupt}, KeyboardInterrupt),
+                             ({(Z, True): OSError, (Z, False): KeyboardInterrupt}, OSError),
+                             ({(Z, True): OSError, (CTRL, False): ValueError}, OSError)):
+            with self.subTest(trips=trips):
+                emit = Refusing(trips)
+                holds = vinput.Holds(emit)
+                self.assertIs(self.fails(holds.press, [CTRL, Z], "mouse", error=error), emit.raised[0])
+                self.assertEqual(emit.calls, [(CTRL, True), (Z, True), (Z, False), (CTRL, False)])
+                self.assertEqual(holds.held(), set())
+                self.assert_healthy(holds, emit)
+
+    def test_a_backend_refusing_everything_is_asked_once_and_nothing_is_tracked(self):
+        """Not retried: a key the system never let go of stays down there; nobody tracks it."""
+        emit = Refusing([(CTRL, True), (CTRL, False)], applied=False)
+        holds = vinput.Holds(emit)
+        self.fails(holds.press, [CTRL, Z], "mouse")
+        self.assertEqual(emit.calls, [(CTRL, True), (CTRL, False)])
+        self.assertEqual(holds.held(), set())
+
+    def test_presses_that_work_send_as_before(self):
+        emit = Refusing()
+        holds = vinput.Holds(emit)
+        holds.press([CTRL, C], "mouse")
+        holds.press([CTRL], "keyboard")
+        holds.press([CTRL, C], "mouse")
+        holds.release([CTRL, C], "mouse")
+        holds.release([CTRL, C], "mouse")
+        self.assertEqual(emit.calls, [(CTRL, True), (C, True), (C, False)])
+        self.assertEqual(holds.held(), {CTRL})
+
+
+class ReleaseFailures(Failing):
+    """Every key a release lets go of is sent up once, the others even when one fails; the first error is raised."""
+
+    def test_an_up_failing_still_sends_the_others_and_holds_nothing(self):
+        for kind in (OSError, ValueError, KeyboardInterrupt):
+            with self.subTest(kind=kind.__name__):
+                emit = Refusing()
+                holds = vinput.Holds(emit)
+                holds.press([CTRL, SHIFT, Z], "mouse")
+                emit.trips.update({(SHIFT, False): kind, (CTRL, False): OSError})
+                self.assertIs(self.fails(holds.release, [CTRL, SHIFT, Z], "mouse", error=kind), emit.raised[0])
+                self.assertEqual(emit.calls[3:], [(Z, False), (SHIFT, False), (CTRL, False)])
+                self.assertEqual(holds.held(), set())
+                self.assert_healthy(holds, emit)
+
+    def test_a_backend_refusing_every_up_is_asked_once_per_key(self):
+        emit = Refusing()
+        holds = vinput.Holds(emit)
+        holds.press([CTRL, Z], "mouse")
+        emit.applied = False
+        emit.trips.update({(Z, False): OSError, (CTRL, False): OSError})
+        self.fails(holds.release, [CTRL, Z], "mouse")
+        holds.release([CTRL, Z], "mouse")
+        holds.release_all()
+        self.assertEqual(emit.calls[2:], [(Z, False), (CTRL, False)])
+        self.assertEqual((emit.active, holds.held()), ({CTRL, Z}, set()))
+
+    def test_letting_go_of_everything_tries_every_key(self):
+        emit = Refusing()
+        holds = vinput.Holds(emit)
+        holds.press([CTRL], "keyboard")
+        holds.press([SHIFT, Z], "mouse")
+        emit.trips.update({(Z, False): ValueError, (SHIFT, False): OSError})
+        self.assertIs(self.fails(holds.release_all, error=ValueError), emit.raised[0])
+        self.assertEqual(emit.calls[3:], [(Z, False), (SHIFT, False), (CTRL, False)])
+        self.assertEqual(holds.held(), set())
+
+    def test_letting_go_of_one_owner_keeps_the_other_s_keys(self):
+        emit = Refusing()
+        holds = vinput.Holds(emit)
+        holds.press([CTRL], "keyboard")
+        holds.press([SHIFT, Z], "mouse")
+        emit.trips[(Z, False)] = OSError  # refused while closing down: let be, as before
+        holds.release_all("mouse")
+        self.assertEqual(emit.calls[3:], [(Z, False), (SHIFT, False)])
+        self.assertEqual((emit.active, holds.held()), ({CTRL}, {CTRL}))
+
+
+BACK, FORWARD = config.BUTTONS["back"], config.BUTTONS["forward"]
+
+
+class MouseButtonFailures(Failing):
+    """A mouse button whose keys could not be pressed leaves nothing down, nor anything another button holds.
+    Reports go the whole way: synthetic port, transport, engine, real Executor, FakeInput."""
+
+    def rig(self, device_action=None, hook=None, **buttons):
+        mouse = support.FakeDevice("Synthetic mouse", kind=device.KIND_MOUSE,
+                                   controls=[(BACK, BACK, 0x30), (FORWARD, FORWARD, 0x30)])
+        rig = test_keyboard.Rig(self, {2: mouse})
+        rig.engine.cfg["buttons"].update(buttons)
+        rig.start()
+        rig.engine.executor = actions.Executor(rig.input, device_action or rig.engine._device_action, hook)
+        self.addCleanup(rig.engine.executor.close)
+        emit = rig.input._holds._emit = Refusing()
+        report = lambda *cids: rig.note(2, mouse, device.REPROG_CONTROLS_V4,  # noqa: E731
+                                        struct.pack("!HHHH", *(list(cids) + [0] * 4)[:4]))
+        return report, rig, emit
+
+    def test_a_press_failing_leaves_nothing_down_once_the_button_is_up(self):
+        buttons, rig, emit = self.rig(back=actions.keys("LEFTCTRL", "Z"))
+        emit.trips[(Z, True)] = OSError
+        self.assertIs(self.fails(buttons, BACK), emit.raised[0])
+        buttons()
+        self.assertEqual(emit.calls, [(CTRL, True), (Z, True), (Z, False), (CTRL, False)])
+        buttons(BACK)
+        buttons()
+        self.assertEqual(emit.calls[4:], [(CTRL, True), (Z, True), (Z, False), (CTRL, False)])
+        self.assertEqual((emit.active, rig.input._holds.held()), (set(), set()))
+
+    def test_one_button_failing_in_a_report_lets_the_other_go_up_with_its_button(self):
+        worked = False
+        for failing in (BACK, FORWARD):
+            with self.subTest(failing=config.BUTTON_BY_CID[failing]):
+                buttons, rig, emit = self.rig(back=actions.keys("LEFTSHIFT", "C"), forward=actions.keys("LEFTCTRL", "Z"))
+                emit.trips[(C if failing == BACK else Z, True)] = OSError
+                self.fails(buttons, BACK, FORWARD)
+                worked = worked or emit.calls[0] == ((CTRL, True) if failing == BACK else (SHIFT, True))
+                buttons()
+                self.assertEqual((emit.active, rig.input._holds.held()), (set(), set()))
+        self.assertTrue(worked)  # the other button's press did go first at least once
+
+    def test_another_button_of_the_mouse_keeps_its_keys(self):
+        buttons, rig, emit = self.rig(back=actions.keys("LEFTCTRL", "C"), forward=actions.keys("LEFTCTRL", "V"))
+        buttons(BACK)
+        emit.trips[(V, True)] = OSError
+        self.fails(buttons, BACK, FORWARD)
+        buttons(BACK)
+        self.assertEqual(emit.active, {CTRL, C})
+        buttons()
+        self.assertEqual(emit.calls, [(CTRL, True), (C, True), (V, True), (V, False), (C, False), (CTRL, False)])
+        self.assertEqual(rig.input._holds.held(), set())
+
+    def test_a_failed_button_is_not_pressed_again_by_a_later_report(self):
+        buttons, rig, emit = self.rig(back=actions.keys("LEFTSHIFT"), forward=actions.keys("LEFTCTRL", "Z"))
+        buttons(BACK)
+        emit.trips[(Z, True)] = OSError
+        self.fails(buttons, BACK, FORWARD)
+        buttons(FORWARD)
+        buttons()
+        self.assertEqual(emit.calls, [(SHIFT, True), (CTRL, True), (Z, True), (Z, False), (CTRL, False), (SHIFT, False)])
+
+    def test_after_its_up_failed_the_button_works_again(self):
+        buttons, rig, emit = self.rig(back=actions.keys("LEFTCTRL", "Z"))
+        buttons(BACK)
+        emit.trips[(Z, False)] = OSError
+        self.assertIs(self.fails(buttons), emit.raised[0])
+        buttons(BACK)
+        buttons()
+        self.assertEqual(emit.calls, [(CTRL, True), (Z, True), (Z, False), (CTRL, False)] * 2)
+        self.assertEqual((emit.active, rig.input._holds.held()), (set(), set()))
+
+
+class TemporaryZoom(Failing):
+    """The legacy thumb wheel zoom: Ctrl held for one wheel step, whatever fails, never longer."""
+
+    def zoom(self, fail):
+        made = profiles.thumb_engine(self, thumbwheel={"function": "zoom"})
+        emit = made.vinput._holds._emit = Refusing()
+        fail(made, emit)
+        with support.Clock() as clock, mock.patch.object(engine.time, "sleep") as slept:
+            self.fails(profiles.turn, made, clock, profiles.STEP_UP, 4)
+            failed = list(emit.calls), slept.call_count
+            made.vinput.scroll = made.vinput.scrolled.append
+            profiles.turn(made, clock, profiles.STEP_UP)
+        return made, emit, failed, slept.call_count
+
+    def test_ctrl_going_down_failing_goes_up_again(self):
+        made, emit, (calls, sleeps), _total = self.zoom(lambda made, emit: emit.trips.__setitem__((CTRL, True), OSError))
+        self.assertEqual((calls, sleeps), ([(CTRL, True), (CTRL, False)], 0))
+        self.assertEqual(emit.calls[2:], [(CTRL, True), (CTRL, False)])  # the next step works
+        self.assertEqual((emit.active, made.vinput._holds.held()), (set(), set()))
+
+    def test_the_scroll_failing_lets_ctrl_go_up(self):
+        made, emit, (calls, sleeps), _total = self.zoom(
+            lambda made, emit: setattr(made.vinput, "scroll", mock.Mock(side_effect=OSError("synthetic scroll"))))
+        self.assertEqual((calls, sleeps), ([(CTRL, True), (CTRL, False)], 1))
+        self.assertEqual((emit.active, made.vinput._holds.held()), (set(), set()))
+
+    def test_ctrl_held_by_the_keyboard_or_a_button_stays_held(self):
+        for owner in ("keyboard", "mouse"):
+            with self.subTest(owner=owner):
+                def fail(made, emit, owner=owner):
+                    made.vinput.press([CTRL], owner)
+                    made.vinput.scroll = mock.Mock(side_effect=OSError("synthetic scroll"))
+                made, emit, (calls, _sleeps), _total = self.zoom(fail)
+                self.assertEqual(calls, [(CTRL, True)])
+                self.assertEqual((emit.active, made.vinput._holds.held()), ({CTRL}, {CTRL}))
+                made.vinput.release([CTRL], owner)
+                self.assertEqual(emit.calls[-1], (CTRL, False))
+
+
+class BackendPresses(Failing):
+    """Both backends with the system left out: a press failing there lets its keys go up and the lock go."""
+
+    def test_linux_press_failing_lets_its_keys_go_up_and_the_lock_go(self):
+        from mxoptions import vinput_uinput
+        made = vinput_uinput.VirtualInput.__new__(vinput_uinput.VirtualInput)
+        emit = Refusing([(Z, True)])
+        made._lock = threading.Lock()
+        made._holds = vinput.Holds(emit)
+        self.assertIs(self.fails(made.press, [CTRL, Z]), emit.raised[0])
+        self.assertFalse(made._lock.locked())
+        made.press([CTRL, Z])
+        made.release([CTRL, Z])
+        self.assertEqual(emit.calls, [(CTRL, True), (Z, True), (Z, False), (CTRL, False)] * 2)
+        self.assertEqual((emit.active, made._holds.held()), (set(), set()))
+
+    def test_windows_press_failing_lets_its_keys_go_up_and_the_lock_go(self):
+        """Only its logic: SendInput itself is not reached from here."""
+        fake_windows = types.ModuleType("mxoptions.windows")
+        fake_windows.BRIGHTNESS_STEP = 10
+        fake_windows.brightness = mock.Mock()
+        with mock.patch.object(ctypes, "WinDLL", mock.MagicMock(), create=True), \
+                mock.patch.dict(sys.modules, {"mxoptions.windows": fake_windows}):
+            sys.modules.pop("mxoptions.vinput_windows", None)
+            backend = importlib.import_module("mxoptions.vinput_windows")
+            try:
+                code = lambda made: ((made.ki.wVk or made.ki.wScan), not made.ki.dwFlags & backend.KEY_UP)  # noqa: E731
+                sent, refused = [], []
+                refuse = {code(backend._key(Z, True).u)}
+
+                def send(*inputs):
+                    sent.extend(code(i.u) for i in inputs)
+                    if sent[-1] in refuse:
+                        refuse.clear()
+                        refused.append(OSError("synthetic: Windows did not take the input"))
+                        raise refused[-1]
+                backend._send = send
+                made = backend.VirtualInput()
+                sent.clear()
+                self.assertIs(self.fails(made.press, [CTRL, Z]), refused[0])
+                self.assertFalse(made._lock.locked())
+                expected = [code(backend._key(name, down).u) for name, down in ((CTRL, True), (Z, True), (Z, False), (CTRL, False))]
+                self.assertEqual(sent, expected)
+                made.press([CTRL, Z])
+                made.release([CTRL, Z])
+                self.assertEqual(sent, expected * 2)
+            finally:
+                sys.modules.pop("mxoptions.vinput_windows", None)
+
+
+ONE, TWO = 0x0053, 0x0f01
+
+
+class KeyboardKeyFailures(Failing):
+    """A key of the keyboard whose keys could not be pressed leaves nothing down, nor what another key holds."""
+
+    def rig(self, keys, hook=None):
+        kb, mouse = test_keyboard.keyboard_device(), test_keyboard.mouse_device()
+        rig = test_keyboard.Rig(self, {1: kb, 2: mouse}, keys=keys)
+        rig.start()
+        if hook is not None:
+            rig.kb.executor = actions.Executor(rig.input, rig.kb.device_action, hook, owner="keyboard")
+            self.addCleanup(rig.kb.executor.close)
+        rig.engine.executor = actions.Executor(rig.input, rig.engine._device_action)
+        self.addCleanup(rig.engine.executor.close)
+        emit = rig.input._holds._emit = Refusing()
+        return rig, kb, emit
+
+    def test_another_key_keeps_its_ctrl(self):
+        rig, kb, emit = self.rig({"0x0053": actions.keys("LEFTCTRL"), "0x0f01": actions.keys("LEFTCTRL", "Z")})
+        rig.keys_down(1, kb, ONE)
+        emit.trips[(Z, True)] = OSError
+        self.fails(rig.keys_down, 1, kb, ONE, TWO)
+        rig.keys_down(1, kb, ONE)
+        self.assertEqual(emit.active, {CTRL})
+        rig.keys_down(1, kb)
+        self.assertEqual(emit.calls, [(CTRL, True), (Z, True), (Z, False), (CTRL, False)])
+        self.assertEqual(rig.input._holds.held(), set())
+
+    def test_after_its_up_failed_the_key_works_again(self):
+        rig, kb, emit = self.rig({"0x0053": actions.keys("LEFTCTRL", "Z")})
+        rig.keys_down(1, kb, ONE)
+        emit.trips[(Z, False)] = OSError
+        self.assertIs(self.fails(rig.keys_down, 1, kb), emit.raised[0])
+        rig.keys_down(1, kb, ONE)
+        rig.keys_down(1, kb)
+        self.assertEqual(emit.calls, [(CTRL, True), (Z, True), (Z, False), (CTRL, False)] * 2)
+        self.assertEqual(rig.input._holds.held(), set())
+
+    def test_one_key_failing_in_a_report_lets_the_other_go_up_with_its_key(self):
+        rig, kb, emit = self.rig({"0x0053": actions.keys("LEFTSHIFT"), "0x0f01": actions.keys("LEFTCTRL", "Z")})
+        emit.trips[(Z, True)] = OSError
+        self.fails(rig.keys_down, 1, kb, ONE, TWO)  # keys in their order: ONE first
+        rig.keys_down(1, kb)
+        self.assertEqual(emit.calls, [(SHIFT, True), (CTRL, True), (Z, True), (Z, False), (CTRL, False), (SHIFT, False)])
+        self.assertEqual(rig.input._holds.held(), set())
+
+
+
+class Calls:
+    """A hook or device action that records each (kind, phase) and raises once at each of ``trips``."""
+
+    def __init__(self, *trips, kind=RuntimeError):
+        self.trips, self.kind, self.seen = set(trips), kind, []
+
+    def __call__(self, action_or_name, phase):
+        what = action_or_name.get("type") if isinstance(action_or_name, dict) else action_or_name
+        self.seen.append((what, phase))
+        if (what, phase) in self.trips:
+            self.trips.discard((what, phase))
+            raise self.kind(f"synthetic {what} {phase}")
+
+
+class MouseReports(Failing):
+    """Every button of one report is handled even when one of them fails: what was let go of goes up before the
+    report's first error is raised, with no report, tick or reset after it. An interrupt or the mouse going away
+    ends the report at once."""
+
+    rig = MouseButtonFailures.rig
+
+    def test_every_button_up_at_once_sends_every_up_even_when_some_fail(self):
+        first_failed = False
+        for failing in ((CTRL,), (SHIFT,), (CTRL, SHIFT)):
+            with self.subTest(failing=failing):
+                buttons, rig, emit = self.rig(back=actions.keys("LEFTCTRL"), forward=actions.keys("LEFTSHIFT"))
+                buttons(BACK, FORWARD)
+                emit.trips.update({(name, False): OSError for name in failing})
+                self.assertIs(self.fails(buttons), emit.raised[0])
+                self.assertEqual(len(emit.raised), len(failing))
+                self.assertEqual(sorted(emit.calls[2:]), [(CTRL, False), (SHIFT, False)])
+                first_failed = first_failed or (len(failing) == 1 and emit.calls[2][0] == failing[0])
+                self.assertEqual((emit.active, rig.input._holds.held()), (set(), set()))
+                buttons(BACK)
+                buttons()
+                self.assertEqual(emit.calls[4:], [(CTRL, True), (CTRL, False)])
+        self.assertTrue(first_failed)  # at least once the up that failed came first, and the other still went
+
+    def test_a_press_failing_still_lets_another_button_go_up_in_the_same_report(self):
+        buttons, rig, emit = self.rig(back=actions.keys("LEFTSHIFT"), forward=actions.keys("LEFTCTRL", "Z"))
+        buttons(BACK)
+        emit.trips[(Z, True)] = OSError
+        self.assertIs(self.fails(buttons, FORWARD), emit.raised[0])  # back up, forward down
+        self.assertEqual(emit.calls[1:], [(CTRL, True), (Z, True), (Z, False), (CTRL, False), (SHIFT, False)])
+        self.assertEqual((emit.active, rig.input._holds.held()), (set(), set()))
+        buttons()
+        buttons(FORWARD)
+        buttons()
+        self.assertEqual(emit.calls[6:], [(CTRL, True), (Z, True), (Z, False), (CTRL, False)])
+
+    def test_several_failures_raise_the_first_and_leave_what_the_keyboard_holds(self):
+        buttons, rig, emit = self.rig(back=actions.keys("LEFTSHIFT"), forward=actions.keys("LEFTCTRL", "Z"))
+        rig.input.press([CTRL], "keyboard")
+        buttons(BACK)
+        emit.trips.update({(Z, True): OSError, (SHIFT, False): ValueError})
+        self.assertIs(self.fails(buttons, FORWARD), emit.raised[0])  # the press's: presses go first
+        self.assertEqual(len(emit.raised), 2)
+        self.assertEqual(emit.calls[2:], [(Z, True), (Z, False), (SHIFT, False)])  # the keyboard's Ctrl: no event
+        self.assertEqual((emit.active, rig.input._holds.held()), ({CTRL}, {CTRL}))
+        buttons()
+        buttons(BACK)
+        buttons()
+        self.assertEqual(emit.calls[5:], [(SHIFT, True), (SHIFT, False)])
+        rig.input.release([CTRL], "keyboard")
+        self.assertEqual((emit.calls[-1], emit.active, rig.input._holds.held()), ((CTRL, False), set(), set()))
+
+    def test_an_interrupt_ends_the_report_and_the_next_report_takes_up_the_rest(self):
+        buttons, rig, emit = self.rig(back=actions.keys("LEFTSHIFT"), forward=actions.keys("LEFTCTRL"))
+        emit.trips.update({(SHIFT, True): KeyboardInterrupt, (CTRL, True): KeyboardInterrupt})
+        self.fails(buttons, BACK, FORWARD, error=KeyboardInterrupt)
+        self.assertEqual(len(emit.raised), 1)  # no other button began after it
+        emit.trips.clear()  # the other button's trip was never reached
+        failed = emit.calls[0][0]
+        other = CTRL if failed == SHIFT else SHIFT
+        self.assertEqual(emit.calls, [(failed, True), (failed, False)])
+        buttons(BACK, FORWARD)  # the one not reached is pressed now; the one that failed is not again
+        self.assertEqual(emit.calls[2:], [(other, True)])
+        buttons()
+        self.assertEqual(emit.calls[3:], [(other, False)])
+        self.assertEqual((emit.active, rig.input._holds.held()), (set(), set()))
+
+    def test_after_an_interrupted_up_the_button_works_again(self):
+        buttons, rig, emit = self.rig(back=actions.keys("LEFTCTRL"))
+        buttons(BACK)
+        emit.trips[(CTRL, False)] = KeyboardInterrupt
+        self.fails(buttons, error=KeyboardInterrupt)
+        buttons(BACK)
+        buttons()
+        self.assertEqual(emit.calls, [(CTRL, True), (CTRL, False)] * 2)
+        self.assertEqual((emit.active, rig.input._holds.held()), (set(), set()))
+
+    def test_the_mouse_going_away_ends_the_report_and_its_going_lets_go(self):
+        def gone(action, phase):
+            rig.port.wake()  # the node reads nothing more: the mouse went away
+            raise hidpp.HidppClosed("synthetic: the mouse went away")
+        buttons, rig, emit = self.rig(device_action=gone, back=actions.keys("LEFTSHIFT"), forward={"type": "dpi_cycle"})
+        buttons(BACK)
+        self.fails(buttons, FORWARD, error=hidpp.HidppClosed)
+        self.assertEqual(emit.calls, [(SHIFT, True)])  # nothing more of that report is done
+        rig.settle()  # the engine's thread handles the going
+        self.assertEqual(emit.calls, [(SHIFT, True), (SHIFT, False)])
+        self.assertEqual((emit.active, rig.input._holds.held()), (set(), set()))
+
+
+class OtherPressFailures(Failing):
+    """A failed press of something other than keys or a mouse button (hook, device action, macro) is not known to
+    hold nothing: its button's or key's up still lets go of it, as before."""
+
+    def test_a_mouse_button_s_up_still_lets_go_of_a_failed_hook_or_device_action(self):
+        for action in ({"type": "hook", "name": "synthetic"}, {"type": "dpi_shift"}):
+            with self.subTest(kind=action["type"]):
+                calls = Calls(("synthetic", "press"), ("dpi_shift", "press"))
+                buttons, rig, emit = self.rig(device_action=calls, hook=calls, back=action)
+                self.fails(buttons, BACK, error=RuntimeError)
+                buttons()
+                self.assertEqual(calls.seen[-2:], [(action.get("name", action["type"]), "press"),
+                                                   (action.get("name", action["type"]), "release")])
+
+    rig = MouseButtonFailures.rig
+
+    def test_a_mouse_button_s_up_still_ends_a_macro_whose_start_failed(self):
+        macro = {"type": "macro", "steps": [{"do": "keys", "keys": ["KEY_A"]}], "repeat": True}
+        buttons, rig, emit = self.rig(back=macro)
+        with mock.patch.object(rig.engine.executor.macros, "run", side_effect=RuntimeError("synthetic: no thread")) as run:
+            self.fails(buttons, BACK, error=RuntimeError)
+        held = run.call_args.args[1]
+        self.assertTrue(held.is_set())
+        buttons()
+        self.assertFalse(held.is_set())  # a repeating macro started all the same would stop with the button
+
+    def test_a_key_s_up_still_lets_go_of_a_failed_hook(self):
+        calls = Calls(("synthetic", "press"))
+        rig, kb, emit = KeyboardKeyFailures.rig(self, {"0x0053": {"type": "hook", "name": "synthetic"}}, hook=calls)
+        self.fails(rig.keys_down, 1, kb, ONE, error=RuntimeError)
+        rig.keys_down(1, kb)
+        self.assertEqual(calls.seen, [("synthetic", "press"), ("synthetic", "release")])
+
+
+class KeyboardReports(Failing):
+    """Every key of one report is handled even when one of them fails, as with the mouse; an interrupt ends the
+    report at once. The mouse going away (from the ring or a hook) is not the keyboard's: its keys carry on."""
+
+    rig = KeyboardKeyFailures.rig
+
+    def test_every_key_up_at_once_sends_every_up_even_when_some_fail(self):
+        for failing in ((CTRL,), (SHIFT,), (CTRL, SHIFT)):
+            with self.subTest(failing=failing):
+                rig, kb, emit = self.rig({"0x0053": actions.keys("LEFTCTRL"), "0x0f01": actions.keys("LEFTSHIFT")})
+                rig.keys_down(1, kb, ONE, TWO)
+                emit.trips.update({(name, False): OSError for name in failing})
+                self.assertIs(self.fails(rig.keys_down, 1, kb), emit.raised[0])
+                self.assertEqual(len(emit.raised), len(failing))
+                self.assertEqual(emit.calls[2:], [(CTRL, False), (SHIFT, False)])  # keys in their order: ONE first
+                self.assertEqual((emit.active, rig.input._holds.held()), (set(), set()))
+                rig.keys_down(1, kb, ONE)
+                rig.keys_down(1, kb)
+                self.assertEqual(emit.calls[4:], [(CTRL, True), (CTRL, False)])
+
+    def test_a_press_failing_still_lets_another_key_go_up_in_the_same_report(self):
+        rig, kb, emit = self.rig({"0x0053": actions.keys("LEFTSHIFT"), "0x0f01": actions.keys("LEFTCTRL", "Z")})
+        rig.keys_down(1, kb, ONE)
+        emit.trips[(Z, True)] = OSError
+        self.assertIs(self.fails(rig.keys_down, 1, kb, TWO), emit.raised[0])
+        self.assertEqual(emit.calls[1:], [(CTRL, True), (Z, True), (Z, False), (CTRL, False), (SHIFT, False)])
+        self.assertEqual((emit.active, rig.input._holds.held()), (set(), set()))
+        rig.keys_down(1, kb)
+        rig.keys_down(1, kb, TWO)
+        rig.keys_down(1, kb)
+        self.assertEqual(emit.calls[6:], [(CTRL, True), (Z, True), (Z, False), (CTRL, False)])
+
+    def test_several_failures_raise_the_first_and_leave_what_the_mouse_holds(self):
+        rig, kb, emit = self.rig({"0x0053": actions.keys("LEFTSHIFT"), "0x0f01": actions.keys("LEFTCTRL", "Z")})
+        rig.input.press([CTRL], "mouse")
+        rig.keys_down(1, kb, ONE)
+        emit.trips.update({(Z, True): OSError, (SHIFT, False): ValueError})
+        self.assertIs(self.fails(rig.keys_down, 1, kb, TWO), emit.raised[0])
+        self.assertEqual(len(emit.raised), 2)
+        self.assertEqual(emit.calls[2:], [(Z, True), (Z, False), (SHIFT, False)])
+        self.assertEqual((emit.active, rig.input._holds.held()), ({CTRL}, {CTRL}))
+        rig.keys_down(1, kb)
+        rig.keys_down(1, kb, ONE)
+        rig.keys_down(1, kb)
+        self.assertEqual(emit.calls[5:], [(SHIFT, True), (SHIFT, False)])
+        rig.input.release([CTRL], "mouse")
+        self.assertEqual((emit.calls[-1], emit.active, rig.input._holds.held()), ((CTRL, False), set(), set()))
+
+    def test_an_interrupt_ends_the_report_and_the_next_report_takes_up_the_rest(self):
+        rig, kb, emit = self.rig({"0x0053": actions.keys("LEFTSHIFT"), "0x0f01": actions.keys("LEFTCTRL")})
+        emit.trips[(SHIFT, True)] = KeyboardInterrupt
+        self.fails(rig.keys_down, 1, kb, ONE, TWO, error=KeyboardInterrupt)
+        self.assertEqual(emit.calls, [(SHIFT, True), (SHIFT, False)])  # TWO never began
+        rig.keys_down(1, kb, ONE, TWO)
+        self.assertEqual(emit.calls[2:], [(CTRL, True)])  # ONE that failed is not pressed again
+        rig.keys_down(1, kb)
+        self.assertEqual(emit.calls[3:], [(CTRL, False)])
+        self.assertEqual((emit.active, rig.input._holds.held()), (set(), set()))
+
+    def test_after_an_interrupted_up_the_key_works_again(self):
+        rig, kb, emit = self.rig({"0x0053": actions.keys("LEFTCTRL")})
+        rig.keys_down(1, kb, ONE)
+        emit.trips[(CTRL, False)] = KeyboardInterrupt
+        self.fails(rig.keys_down, 1, kb, error=KeyboardInterrupt)
+        rig.keys_down(1, kb, ONE)
+        rig.keys_down(1, kb)
+        self.assertEqual(emit.calls, [(CTRL, True), (CTRL, False)] * 2)
+        self.assertEqual((emit.active, rig.input._holds.held()), (set(), set()))
+
+    def test_the_mouse_going_away_in_a_hook_does_not_stop_the_keyboard_s_report(self):
+        calls = Calls(("synthetic", "press"), kind=hidpp.HidppClosed)
+        rig, kb, emit = self.rig({"0x0053": {"type": "hook", "name": "synthetic"}, "0x0f01": actions.keys("LEFTSHIFT")},
+                                 hook=calls)
+        rig.keys_down(1, kb, TWO)
+        self.fails(rig.keys_down, 1, kb, ONE, error=hidpp.HidppClosed)
+        self.assertEqual(emit.calls, [(SHIFT, True), (SHIFT, False)])
+        self.assertEqual((emit.active, rig.input._holds.held()), (set(), set()))
+
+
+
+class Told:
+    """A listener method that records each call and raises once, at the call ``at`` picks."""
+
+    def __init__(self, at, kind=OSError):
+        self.at, self.kind, self.seen, self.raised = at, kind, [], []
+
+    def __call__(self, *args):
+        self.seen.append(args)
+        if not self.raised and self.at(*args):
+            self.raised.append(self.kind(f"synthetic listener {args}"))
+            raise self.raised[-1]
+
+
+class ReportListeners(Failing):
+    """What is told about a report failing (the program's listener) neither stops the report nor hides its error:
+    every control of it is still handled at once, and the first error is raised."""
+
+    rig = MouseButtonFailures.rig
+
+    def test_the_listener_failing_on_a_button_up_still_lets_every_other_button_go_up(self):
+        not_last = False
+        for failing in ("back", "forward"):
+            with self.subTest(failing=failing):
+                buttons, rig, emit = self.rig(back=actions.keys("LEFTCTRL"), forward=actions.keys("LEFTSHIFT"))
+                buttons(BACK, FORWARD)
+                told = Told(lambda kind, payload, failing=failing: (kind, payload) == ("button", (failing, False)))
+                with mock.patch.object(rig.listener, "on_event", side_effect=told):
+                    self.assertIs(self.fails(buttons), told.raised[0])
+                self.assertEqual(sorted(told.seen), [("button", ("back", False)), ("button", ("forward", False))])
+                not_last = not_last or told.seen[0] == ("button", (failing, False))
+                self.assertEqual((emit.active, rig.input._holds.held()), (set(), set()))
+                buttons(BACK)
+                buttons()
+                self.assertEqual(emit.calls[4:], [(CTRL, True), (CTRL, False)])
+        self.assertTrue(not_last)  # at least once the listener failed before the other button was handled
+
+    def test_the_listener_failing_on_a_button_down_still_lets_another_go_up_in_the_same_report(self):
+        buttons, rig, emit = self.rig(back=actions.keys("LEFTSHIFT"), forward=actions.keys("LEFTCTRL"))
+        buttons(BACK)
+        told = Told(lambda kind, payload: (kind, payload) == ("button", ("forward", True)))
+        with mock.patch.object(rig.listener, "on_event", side_effect=told):
+            self.assertIs(self.fails(buttons, FORWARD), told.raised[0])  # back up, forward down
+        self.assertEqual(told.seen, [("button", ("forward", True)), ("button", ("back", False))])
+        self.assertEqual(emit.calls, [(SHIFT, True), (CTRL, True), (SHIFT, False)])
+        buttons()
+        self.assertEqual((emit.active, rig.input._holds.held()), (set(), set()))
+
+    def test_the_listener_failing_on_a_key_s_hook_still_lets_the_other_key_go_up(self):
+        rig, kb, emit = KeyboardKeyFailures.rig(self, {"0x0053": {"type": "hook", "name": "synthetic"},
+                                                       "0x0f01": actions.keys("LEFTSHIFT")})
+        rig.keys_down(1, kb, ONE, TWO)
+        told = Told(lambda kind, payload: (kind, payload) == ("hook", ("synthetic", "release")))
+        with mock.patch.object(rig.listener, "on_event", side_effect=told):
+            self.assertIs(self.fails(rig.keys_down, 1, kb), told.raised[0])  # keys in their order: ONE first
+        self.assertEqual(emit.calls, [(SHIFT, True), (SHIFT, False)])
+        self.assertEqual((emit.active, rig.input._holds.held()), (set(), set()))
+
+    def test_the_buttons_held_are_told_and_a_failure_telling_them_hides_no_earlier_error(self):
+        buttons, rig, emit = self.rig(back=actions.keys("LEFTCTRL"))
+        buttons(BACK)
+        emit.trips[(CTRL, False)] = OSError
+        told = Told(lambda keys: True, kind=RuntimeError)
+        with mock.patch.object(rig.listener, "on_pressed", side_effect=told):
+            self.assertIs(self.fails(buttons), emit.raised[0])
+        self.assertEqual(told.seen, [(frozenset(),)])  # told all the same, once the report was handled
+        self.assertEqual((emit.active, rig.input._holds.held()), (set(), set()))
+
+    def test_a_failure_telling_the_buttons_held_is_raised_when_nothing_else_failed(self):
+        buttons, rig, emit = self.rig(back=actions.keys("LEFTCTRL"))
+        told = Told(lambda keys: True, kind=RuntimeError)
+        with mock.patch.object(rig.listener, "on_pressed", side_effect=told):
+            self.assertIs(self.fails(buttons, BACK, error=RuntimeError), told.raised[0])
+        self.assertEqual(told.seen, [(frozenset({"back"}),)])
+        buttons()
+        self.assertEqual(emit.calls, [(CTRL, True), (CTRL, False)])
+
+    def test_each_button_down_told_has_its_up_even_when_its_action_failed(self):
+        for trips in ({(Z, True): OSError}, {(Z, False): OSError}):
+            with self.subTest(trips=trips):
+                buttons, rig, emit = self.rig(back=actions.keys("LEFTCTRL", "Z"), forward=actions.keys("LEFTSHIFT"))
+                emit.trips.update(trips)
+                if (Z, True) in trips:
+                    self.fails(buttons, BACK, FORWARD)
+                    buttons()
+                else:
+                    buttons(BACK, FORWARD)
+                    self.fails(buttons)
+                told = [payload for kind, payload in rig.listener.events if kind == "button"]
+                self.assertEqual(sorted(told), [("back", False), ("back", True), ("forward", False), ("forward", True)])
+                for name in ("back", "forward"):
+                    self.assertLess(told.index((name, True)), told.index((name, False)))
+                self.assertEqual((emit.active, rig.input._holds.held()), (set(), set()))
+
+
+class WaitingSetting(Failing):
+    """A change of a keyboard setting waits while a key is down; the key's up starts it at once, though the up
+    failed, before that error is raised."""
+
+    def test_a_change_waiting_for_a_key_goes_once_the_key_is_up_though_its_up_failed(self):
+        dev = test_kbsettings.fn_keyboard()
+        rig = test_keyboard.Rig(self, {1: dev, 2: test_keyboard.mouse_device()}, keys={"0x0f01": test_keyboard.COPY}).start()
+        emit = rig.input._holds._emit = Refusing()
+        rig.keys_down(1, dev, 0x0F01)
+        rig.kb.set_setting("fn", True)
+        rig.settle()
+        self.assertEqual(dev.setting_writes, [])  # waits for the key
+        self.assertTrue(test_kbsettings.fn(rig)["busy"])
+        emit.trips[(C, False)] = OSError
+        self.assertIs(self.fails(rig.keys_down, 1, dev), emit.raised[0])
+        rig.settle()  # runs only a task already started: none is started by it
+        self.assertEqual(dev.setting_writes, [(test_kbsettings.HOSTS, b"\x00\x00")])
+        self.assertFalse(test_kbsettings.fn(rig)["busy"])
+        self.assertEqual((emit.active, rig.input._holds.held()), (set(), set()))
 
 
 if __name__ == "__main__":
