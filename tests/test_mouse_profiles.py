@@ -2102,7 +2102,9 @@ class SuggestedSettings(unittest.TestCase):
                 i18n.setup(language)
                 store = self.make_store()
                 self.assertTrue(store.add_mouse_profile(KATE))
-                with mock.patch.object(pages.FirmwareQuery, "start"):
+                with (mock.patch.object(pages.FirmwareQuery, "start"),
+                      mock.patch.object(pages.MouseView, "_prerender"),
+                      mock.patch.object(threading.Thread, "start") as worker_start):
                     window = MainWindow(store, hide_on_close=False)
                     try:
                         window.show()
@@ -2112,6 +2114,7 @@ class SuggestedSettings(unittest.TestCase):
                                 store.set_mouse_app(None)
                                 for _ in range(8):
                                     APP.processEvents()
+                                window.buttons_page.view._settle.timeout.emit()
                                 expected_width = window.width()
                                 store.set_mouse_app(KATE)
                                 for _ in range(8):
@@ -2132,6 +2135,7 @@ class SuggestedSettings(unittest.TestCase):
                         window.hide()
                         window.deleteLater()
                         APP.sendPostedEvents(window, QEvent.Type.DeferredDelete)
+                    worker_start.assert_not_called()
         finally:
             APP.setStyle(old_style)
             APP.setStyleSheet(old_sheet)
