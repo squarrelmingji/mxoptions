@@ -378,6 +378,12 @@ What can be tuned there:
 - **Keep the corners free:** the share of the edge, at each end, that does not lead across, so that
   hot corners keep working.
 - **Full-screen windows:** by default a game or a film in full screen keeps the mouse.
+- **Only while Ctrl is held:** off by default. On, the edge sends the mouse across only while
+  either Ctrl key is held; the action *Move to the other computer (Flow)* and the Easy-Switch
+  buttons do not need it. Works on X11 and Windows (Windows written from Microsoft's
+  documentation, not yet tried on a Windows computer). A Wayland desktop does not tell a program
+  in the background whether Ctrl is held, so there the edge keeps the mouse while it is on; the
+  action still works. Older versions of MX Options ignore it and cross without Ctrl.
 - **What goes along:** text and pictures, files and folders, and the largest amount to send in one
   go. Files are sent when you cross and wait in `~/.cache/mxoptions/flow-files` for a day. The
   clipboard of the computer you arrive on is left as it is until all of them are there; then they

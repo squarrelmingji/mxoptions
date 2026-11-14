@@ -40,6 +40,7 @@ FLOW_KEYS = {
     "corner": "portable", "fullscreen": "portable", "clipboard": "portable", "files": "portable",
     "files_max_mb": "portable", "cue_arrived": "portable", "cue_failed": "portable", "channel": "local",
     "mouse_follows_keyboard": "portable", "keyboard_follows_mouse": "portable",
+    "hold_ctrl": "portable",
 }
 
 

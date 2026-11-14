@@ -576,6 +576,17 @@ STRINGS = {
     "Cross while a full-screen window is in front": "Переходити, коли попереду повноекранне вікно",
     "Off, a game or a film in full screen keeps the mouse however hard you push.":
         "Якщо вимкнено, гра чи фільм на весь екран не відпустять мишу, хоч як тисни.",
+    "Cross only while Ctrl is held": "Переходити лише із затиснутою Ctrl",
+    "Hold either Ctrl key while pushing past the edge, so that only reaching the edge keeps the mouse here. "
+    "The action “Move to the other computer (Flow)” and the Easy-Switch buttons do not need it.":
+        "Тримайте будь-яку з клавіш Ctrl, коли продавлюєте за край, тож сам лише край лишає мишу тут. "
+        "Дії «Перейти на інший комп'ютер (Flow)» і кнопкам Easy-Switch це не потрібно.",
+    "This desktop does not tell MX Options whether Ctrl is held: while this is on, the edge keeps the "
+    "mouse here. The action “Move to the other computer (Flow)” still sends it.":
+        "Цей робочий стіл не каже MX Options, чи затиснуто Ctrl: поки це ввімкнено, край лишає мишу тут. "
+        "Дія «Перейти на інший комп'ютер (Flow)» усе одно її переводить.",
+    "This desktop does not tell MX Options whether Ctrl is held, so this cannot be used here.":
+        "Цей робочий стіл не каже MX Options, чи затиснуто Ctrl, тож тут цим не скористатися.",
     "Mouse follows the keyboard": "Миша йде за клавіатурою",
     "Switch the keyboard to one of these computers with its Easy-Switch key, and the mouse goes along. "
     "Only between computers running MX Options; this is not Logitech's Easy-Switch of Options+.":

@@ -15,6 +15,7 @@ _lock = threading.Lock()
 _lib = None
 _display = None
 _handler = None  # kept: Xlib calls it for as long as the program runs
+CONTROL_MASK = 1 << 2  # ControlMask, X.h (Xlib manual, "Keyboard and Pointer Events")
 
 
 def _open():
@@ -128,3 +129,27 @@ def fullscreen_in_front():
         if not active or not active[0]:
             return False
         return _atom("_NET_WM_STATE_FULLSCREEN") in _property(active[0], "_NET_WM_STATE")
+
+
+def available():
+    """Whether there is an X server to ask."""
+    with _lock:
+        return _open() is not None
+
+
+def ctrl_held():
+    """Whether a Ctrl key is down now: ControlMask in what XQueryPointer says of the modifier keys (their logical
+    state). None where there is no X server, or the pointer is on another screen. Every call into Xlib here holds
+    _lock, so no two run at once from different threads, which the Xlib manual allows without XInitThreads."""
+    with _lock:
+        if _open() is None:
+            return None
+        query = _lib.XQueryPointer
+        query.restype = ctypes.c_int
+        query.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.POINTER(ctypes.c_ulong), ctypes.POINTER(ctypes.c_ulong),
+                          *[ctypes.POINTER(ctypes.c_int)] * 4, ctypes.POINTER(ctypes.c_uint)]
+        windows = [ctypes.c_ulong() for _ in range(2)]
+        places = [ctypes.c_int() for _ in range(4)]
+        mask = ctypes.c_uint()
+        same = query(_display, _lib.XDefaultRootWindow(_display), *map(ctypes.byref, windows + places), ctypes.byref(mask))
+    return bool(mask.value & CONTROL_MASK) if same else None

@@ -2,6 +2,8 @@
 two computers (here: two links on this one), and the engine's part in handing the mouse over."""
 
 import asyncio
+import copy
+import ctypes
 import gc
 import json
 import os
@@ -12,11 +14,15 @@ import sys
 import tempfile
 import threading
 import time
+import types
 import unittest
 import warnings
+from unittest import mock
 
 from tests.support import make_engine
 from mxoptions import engine as engine_module, flow, flow_files, hidpp
+import mxoptions
+from mxoptions import environment, x11
 
 KEY = "ABCD-EFGH-IJKL-MNOP"
 
@@ -1251,6 +1257,294 @@ class Leaving(unittest.TestCase):
         engine = engine_with_hosts()
         engine._device_action({"type": "flow"}, "trigger")
         self.assertEqual(self.outcome(engine), [("asked", None)])
+
+
+class HoldingCtrl(unittest.TestCase):
+    """Flow, "Cross only while Ctrl is held": the edge sends the mouse across only while Ctrl is known to be down.
+    What the system says of Ctrl is made up here and counted; nothing real is asked."""
+
+    def setUp(self):
+        self.engine = engine_with_hosts(hold_ctrl=True)
+        self.per_mm = self.engine._counts_per_mm()
+        self.held, self.asked = None, 0
+
+        def ctrl_held():
+            self.asked += 1
+            return self.held
+
+        patch = mock.patch.object(environment, "ctrl_held", ctrl_held)
+        patch.start()
+        self.addCleanup(patch.stop)
+
+    def sent(self):
+        return self.engine.mouse.sent
+
+    def said(self):
+        return [payload for kind, payload in self.engine.listener.events if kind == "flow"]
+
+    def push(self, mm, when):
+        self.engine._on_push(mm * self.per_mm, 0, when)
+
+    def test_off_the_edge_crosses_without_asking(self):
+        self.held = False  # it would refuse, were it asked
+        for engine in (engine_with_hosts(), engine_with_hosts(hold_ctrl=False)):
+            self.engine = engine
+            engine._flow_arm((1, "right", 10.0))
+            self.push(11, 0.0)
+            engine._flow_arm((1, "right", 0.0))  # at a touch
+            engine._watcher = Watcher(time.monotonic(), tracks_motion=False)
+            engine._flow_arm((1, "right", 10.0))  # resting at the edge
+            engine._push["deadline"] = time.monotonic() - 0.01
+            engine._tick()
+            self.assertEqual(engine.mouse.sent, [1, 1, 1])
+            self.assertEqual(self.said(), [("left", 1)] * 3)
+        self.assertEqual(self.asked, 0)
+
+    def test_with_ctrl_held_the_push_crosses(self):
+        self.held = True
+        self.engine._flow_arm((1, "right", 10.0))
+        self.push(6, 0.00)
+        self.assertEqual(self.asked, 0)  # asked only once the push is enough
+        self.push(5, 0.05)
+        self.assertEqual(self.sent(), [1])
+        self.assertEqual(self.said(), [("left", 1)])
+        self.assertEqual(self.asked, 1)
+        self.assertIsNone(self.engine._push)
+        self.engine._flow_arm((1, "right", 0.0))  # at a touch, Ctrl held: at once
+        self.assertEqual(self.sent(), [1, 1])
+
+    def test_without_ctrl_no_push_crosses_and_nothing_is_said(self):
+        self.held = False
+        self.engine._flow_arm((1, "right", 10.0))
+        for step in range(5):
+            self.push(11, 0.05 * step)
+        self.assertEqual(self.sent(), [])
+        self.assertEqual(self.said(), [])
+        self.assertEqual(self.asked, 5)
+        self.assertIsNotNone(self.engine._push)  # still armed
+        self.assertIsNotNone(self.engine._watcher.on_motion)
+        self.assertEqual(self.engine._push["got"], 0.0)
+
+    def test_when_ctrl_cannot_be_told_the_edge_keeps_the_mouse(self):
+        self.held = None
+        self.engine._flow_arm((1, "right", 10.0))
+        self.push(11, 0.00)
+        self.engine._flow_arm((1, "right", 0.0))
+        self.engine._watcher = Watcher(time.monotonic(), tracks_motion=False)
+        self.engine._flow_arm((1, "right", 10.0))
+        self.engine._push["deadline"] = time.monotonic() - 0.01
+        self.engine._tick()
+        self.assertEqual(self.sent(), [])
+        self.assertEqual(self.said(), [])
+        self.assertEqual(self.asked, 3)
+
+    def test_at_a_touch_ctrl_is_asked_and_a_little_more_push_asks_again(self):
+        self.held = False
+        self.engine._flow_arm((1, "right", 0.0))
+        self.assertEqual((self.sent(), self.asked), ([], 1))
+        self.assertAlmostEqual(self.engine._push["need"], engine_module.CTRL_AGAIN_MM * self.per_mm)
+        self.assertIsNotNone(self.engine._watcher.on_motion)
+        self.push(0.5, 0.00)
+        self.assertEqual(self.asked, 1)
+        self.held = True
+        self.push(0.6, 0.02)
+        self.assertEqual(self.sent(), [1])
+        self.assertEqual(self.asked, 2)
+        self.engine._watcher = Watcher(time.monotonic(), tracks_motion=False)  # and where only resting can do
+        self.held = False
+        self.engine._flow_arm((1, "right", 0.0))
+        self.assertEqual(self.sent(), [1])
+        push = self.engine._push
+        self.assertAlmostEqual(push["dwell"], engine_module.PUSH_DWELL + engine_module.CTRL_AGAIN_MM * engine_module.PUSH_DWELL_PER_MM)
+        self.held = True
+        push["deadline"] = time.monotonic() - 0.01
+        self.engine._tick()
+        self.assertEqual(self.sent(), [1, 1])
+
+    def test_resting_at_the_edge_waits_for_ctrl(self):
+        self.engine._watcher = Watcher(time.monotonic(), tracks_motion=False)
+        self.held = False
+        self.engine._flow_arm((1, "right", 10.0))
+        push = self.engine._push
+        self.assertEqual(push["dwell"], engine_module.PUSH_DWELL + 10.0 * engine_module.PUSH_DWELL_PER_MM)
+        push["deadline"] = time.monotonic() - 0.01
+        before = time.monotonic()
+        self.engine._tick()
+        self.assertEqual((self.sent(), self.said(), self.asked), ([], [], 1))
+        self.assertIs(self.engine._push, push)
+        self.assertGreaterEqual(push["deadline"], before + push["dwell"])  # asked again only after another dwell
+        self.engine._tick()
+        self.assertEqual(self.asked, 1)
+        self.held = True
+        push["deadline"] = time.monotonic() - 0.01
+        self.engine._tick()
+        self.assertEqual(self.sent(), [1])
+
+    def test_ctrl_let_go_before_the_push_is_enough_keeps_the_mouse(self):
+        self.held = True
+        self.engine._flow_arm((1, "right", 10.0))
+        self.push(6, 0.00)
+        self.held = False  # let go while pushing
+        self.push(5, 0.05)
+        self.assertEqual((self.sent(), self.said(), self.asked), ([], [], 1))
+        self.assertIsNotNone(self.engine._push)
+
+    def test_ctrl_pressed_after_a_refusal_needs_a_whole_push(self):
+        self.held = False
+        self.engine._flow_arm((1, "right", 10.0))
+        self.push(11, 0.00)
+        self.assertEqual(self.sent(), [])
+        self.held = True  # pressed while resting at the edge: no new report from the edge needed
+        self.push(5, 0.05)
+        self.assertEqual(self.sent(), [])  # what was pushed before the refusal does not count
+        self.push(6, 0.10)
+        self.assertEqual(self.sent(), [1])
+
+    def test_switching_it_while_armed_counts_at_once(self):
+        """Through the engine's own queue, as the settings window and the API change it."""
+        engine = self.engine = engine_with_hosts()
+
+        def change(hold_ctrl):
+            cfg = copy.deepcopy(engine.cfg)
+            cfg["flow"]["hold_ctrl"] = hold_ctrl
+            engine.set_config(cfg)
+            while not engine._queue.empty():
+                engine._handle(engine._queue.get_nowait())
+
+        self.held = False
+        engine._flow_arm((1, "right", 10.0))
+        self.push(6, 0.00)
+        change(True)
+        self.assertIsNotNone(engine._push)  # still armed
+        self.push(5, 0.05)
+        self.assertEqual((self.sent(), self.asked), ([], 1))
+        change(False)
+        self.push(11, 0.10)
+        self.assertEqual(self.sent(), [1])
+        self.assertEqual(self.asked, 1)
+
+    def test_nothing_is_logged_about_ctrl(self):
+        with self.assertNoLogs("mxoptions", level="DEBUG"):
+            for self.held in (False, None):
+                self.engine._flow_arm((1, "right", 10.0))
+                self.push(11, 0.00)
+                self.engine._flow_arm((1, "right", 0.0))
+        self.assertEqual(self.said(), [])
+        self.assertEqual(set(self.engine._push), {"channel", "axes", "need", "got", "last", "deadline", "dwell"})
+        self.assertNotIn("hold_ctrl", self.engine._push)
+
+    def test_disconnect_drops_the_wait(self):
+        self.held = False
+        self.engine._flow_arm((1, "right", 10.0))
+        self.push(11, 0.00)
+        self.engine._reset_input_state()  # the mouse went away
+        self.assertIsNone(self.engine._push)
+        self.held = True
+        self.push(11, 0.05)
+        self.assertEqual(self.sent(), [])
+
+    def test_the_action_does_not_need_ctrl(self):
+        self.held = False
+        self.engine._flow_leave(1, False)  # the action, or the mouse following the keyboard
+        self.assertEqual(self.sent(), [1])
+        self.engine._device_action({"type": "flow"}, "trigger")
+        self.assertEqual(self.said(), [("left", 1), ("asked", None)])
+        self.assertEqual(self.asked, 0)
+
+    def test_a_held_button_still_keeps_the_mouse(self):
+        self.held = True
+        self.engine._hid_buttons = 0x01
+        self.engine._flow_arm((1, "right", 10.0))
+        self.push(11, 0.00)
+        self.assertEqual(self.sent(), [])
+        self.assertEqual(self.said(), [("refused", "held")])
+
+
+class CtrlSource(unittest.TestCase):
+    """Where "is Ctrl held" comes from on each desktop; the system calls are made up, nothing real is asked."""
+
+    def x11_lib(self, mask, same=1):
+        lib = types.SimpleNamespace(XDefaultRootWindow=lambda display: 7)
+        asked = []
+
+        def query(*args):
+            asked.append(args[:2])
+            args[-1]._obj.value = mask
+            return same
+
+        lib.XQueryPointer = query
+        return lib, asked
+
+    def test_x11_reads_control_mask_only(self):
+        shift, lock, mod1, mod4 = 1 << 0, 1 << 1, 1 << 3, 1 << 6
+        for mask, same, held in ((1 << 2, 1, True), (shift | 1 << 2 | 1 << 8, 1, True), (0, 1, False),
+                                 (shift | lock | mod1 | mod4 | 1 << 8, 1, False), (0xFFFF & ~(1 << 2), 1, False),
+                                 (1 << 2, 0, None)):
+            lib, asked = self.x11_lib(mask, same)
+            with self.subTest(mask=mask, same=same), mock.patch.object(x11, "_open", lambda: 1234), \
+                    mock.patch.object(x11, "_lib", lib), mock.patch.object(x11, "_display", 1234):
+                self.assertIs(x11.ctrl_held(), held)
+                self.assertEqual(asked, [(1234, 7)])  # the default root window of the open display
+                self.assertIs(x11.available(), True)
+        with mock.patch.object(x11, "_open", lambda: None):
+            self.assertIsNone(x11.ctrl_held())
+            self.assertIs(x11.available(), False)
+
+    def test_windows_trusts_only_the_high_bit(self):
+        asked = []
+
+        class User32:
+            def __init__(self, raw):
+                self.raw = raw
+
+                def GetAsyncKeyState(vk):  # noqa: N802 as Windows names it
+                    asked.append(vk)
+                    return GetAsyncKeyState.restype(self.raw).value  # as ctypes hands back what it returned
+
+                self.GetAsyncKeyState = GetAsyncKeyState
+
+        made = {}
+
+        def win_dll(name):
+            self.assertEqual(name, "user32")
+            return made["dll"]
+
+        with mock.patch.dict(sys.modules, {"winreg": types.ModuleType("winreg")}), \
+                mock.patch.object(ctypes, "WinDLL", win_dll, create=True):
+            sys.modules.pop("mxoptions.windows", None)
+            try:
+                import mxoptions.windows as windows
+                for raw, held in ((0x8000, True), (0x8001, True), (0xFFFF, True), (0x0001, False), (0x0000, None)):
+                    made["dll"] = User32(raw)
+                    with self.subTest(raw=hex(raw)):
+                        self.assertIs(windows.ctrl_held(), held)
+                        self.assertIs(made["dll"].GetAsyncKeyState.restype, ctypes.c_short)
+                        self.assertEqual(made["dll"].GetAsyncKeyState.argtypes, [ctypes.c_int])
+                self.assertEqual(set(asked), {0x11})  # VK_CONTROL: either Ctrl key
+                with mock.patch.object(ctypes, "WinDLL", mock.Mock(side_effect=OSError("synthetic")), create=True):
+                    self.assertIsNone(windows.ctrl_held())
+            finally:
+                sys.modules.pop("mxoptions.windows", None)
+                if hasattr(mxoptions, "windows"):
+                    del mxoptions.windows
+
+    def test_each_desktop_asks_its_own_system(self):
+        fake_windows = types.SimpleNamespace(ctrl_held=lambda: "from windows")
+        with mock.patch.object(x11, "ctrl_held", lambda: "from x11"), mock.patch.object(x11, "available", lambda: "x11 there"), \
+                mock.patch.object(mxoptions, "windows", fake_windows, create=True), \
+                mock.patch.dict(sys.modules, {"mxoptions.windows": fake_windows}):
+            for kind, held, readable in (("x11", "from x11", "x11 there"), ("windows", "from windows", True)):
+                with self.subTest(kind=kind), mock.patch.object(environment, "session", lambda kind=kind: kind):
+                    self.assertEqual(environment.ctrl_held(), held)
+                    self.assertEqual(environment.ctrl_readable(), readable)
+
+    def test_wayland_cannot_tell_even_with_an_x_server(self):
+        trap = mock.Mock(side_effect=AssertionError("XWayland asked"))
+        with mock.patch.object(environment, "session", lambda: "wayland"), mock.patch.dict(os.environ, {"DISPLAY": ":0"}), \
+                mock.patch.object(x11, "ctrl_held", trap), mock.patch.object(x11, "available", trap):
+            self.assertIsNone(environment.ctrl_held())
+            self.assertIs(environment.ctrl_readable(), False)
+        trap.assert_not_called()
 
 
 if __name__ == "__main__":

@@ -57,6 +57,7 @@ PUSH_PAUSE = 0.30    # s without pushing after which the push against the edge s
 PUSH_DWELL = 0.25    # where the mouse's movement cannot be followed, the pointer has to rest against the edge
 PUSH_DWELL_PER_MM = 0.03  # ... this long, plus this much for every millimetre of push asked for
 EDGE_AXES = {"left": (-1, 0), "right": (1, 0), "top": (0, -1), "bottom": (0, 1)}  # in the mouse's counts, down is positive
+CTRL_AGAIN_MM = 1.0  # Flow, Ctrl to hold: at a touch with no Ctrl held, this much pushing on asks again
 # Rumble from games (rumble.py): below the first strength it is "light", below the second "medium", else "strong".
 RUMBLE_STEPS = ((0.34, "light"), (0.67, "medium"), (float("inf"), "strong"))
 RUMBLE_TEST = ((0.0, 0.2), (0.45, 0.5), (0.9, 1.0), (1.5, 0.0))  # the test: (s from its start, strength)
@@ -450,8 +451,7 @@ class Engine:
             self._rumble_pulse(now)
         push = self._push
         if push is not None and push["deadline"] is not None and now >= push["deadline"]:
-            self._flow_arm(None)
-            self._flow_leave(push["channel"], True)
+            self._push_done()
         if now >= self._next_battery:
             self._next_battery = now + BATTERY_INTERVAL
             self._read_status(hosts=False)
@@ -990,14 +990,19 @@ class Engine:
             return
         channel, edge, push_mm = armed
         if push_mm <= 0 or edge not in EDGE_AXES:
-            self._flow_leave(channel, True)  # no resistance asked for: touching the edge is enough
-            return
+            if not self._ctrl_waits():
+                self._flow_leave(channel, True)  # no resistance asked for: touching the edge is enough
+                return
+            if edge not in EDGE_AXES:
+                return
+            push_mm = CTRL_AGAIN_MM  # Ctrl is to be held and is not: pushing on a little asks again
+        dwell = PUSH_DWELL + push_mm * PUSH_DWELL_PER_MM
         self._push = {"channel": channel, "axes": EDGE_AXES[edge], "need": push_mm * self._counts_per_mm(), "got": 0.0,
-                      "last": 0.0, "deadline": None}
+                      "last": 0.0, "deadline": None, "dwell": dwell}
         if self._watcher is not None and self._watcher.tracks_motion:
             self._watcher.on_motion = lambda watcher, dx, dy, when: self._queue.put(("hid_motion", watcher, dx, dy, when))
         else:  # the hand cannot be followed here: resting against the edge for a while has to do
-            self._push["deadline"] = time.monotonic() + PUSH_DWELL + push_mm * PUSH_DWELL_PER_MM
+            self._push["deadline"] = time.monotonic() + dwell
 
     def _on_push(self, dx, dy, when):
         """The mouse moved while the pointer rests against the edge: add up how far it was pushed on."""
@@ -1009,8 +1014,25 @@ class Engine:
         push["last"] = when
         push["got"] = max(0.0, push["got"] + dx * push["axes"][0] + dy * push["axes"][1])
         if push["got"] >= push["need"]:
-            self._flow_arm(None)
-            self._flow_leave(push["channel"], True)
+            self._push_done()
+
+    def _ctrl_waits(self):
+        """Flow: crossing at the edge has to wait, Ctrl being asked for (flow.hold_ctrl) and not known to be held now.
+        Asked of the system each time; the answer is never kept, logged or sent."""
+        return self.cfg["flow"].get("hold_ctrl") is True and environment.ctrl_held() is not True
+
+    def _push_done(self):
+        """The push against the edge is enough: send the mouse across, unless Ctrl has to be held and is not; then the
+        push starts over, so Ctrl pressed afterwards and another push will do."""
+        push = self._push
+        if self._ctrl_waits():
+            push["got"] = 0.0
+            if push["deadline"] is not None:
+                # ponytail: asks once per dwell while the pointer rests at the edge; stop after FLOW_MOVED idle if it shows
+                push["deadline"] = time.monotonic() + push["dwell"]
+            return
+        self._flow_arm(None)
+        self._flow_leave(push["channel"], True)
 
     def _flow_leave(self, channel, by_edge):
         mouse = self.mouse

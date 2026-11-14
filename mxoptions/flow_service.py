@@ -171,6 +171,7 @@ class FlowService(QObject):
             "here": bool(self.store.state["connected"]),   # the mouse is on this computer
             "edges": bool(self._watcher and self._watcher.watching),  # the screen edges are being watched
             "edge_watch": self._watcher.name if self._watcher else "",  # by what (flow_edges.py)
+            "ctrl": environment.ctrl_readable(),  # whether Ctrl can be told held here (never whether it is)
             "copies": self.clipboard.available(),           # what was copied can cross at all
             "rich": self.clipboard.rich(),                  # pictures and files can cross, not only text
             "pairing": pairing,

@@ -254,6 +254,14 @@ class FlowPage(ScrollPage):
             _("Cross while a full-screen window is in front"),
             _("Off, a game or a film in full screen keeps the mouse however hard you push."),
             self.fullscreen))
+        self.ctrl = Switch()
+        self.ctrl.setAccessibleName(_("Cross only while Ctrl is held"))
+        self.ctrl.toggled.connect(lambda on: self.store.set("flow", "hold_ctrl", on))
+        self.ctrl_row = card.add(Row(
+            _("Cross only while Ctrl is held"),
+            _("Hold either Ctrl key while pushing past the edge, so that only reaching the edge keeps the mouse here. "
+              "The action “Move to the other computer (Flow)” and the Easy-Switch buttons do not need it."),
+            self.ctrl, note=" "))
         self.follow = Switch()
         self.follow.toggled.connect(lambda on: self.store.set("flow", "mouse_follows_keyboard", on))
         self.follow_row = card.add(Row(
@@ -447,7 +455,7 @@ class FlowPage(ScrollPage):
             status = service.status()
         else:  # the page on its own, as when it is drawn for the documentation
             status = {"supported": flow.supported(), "on": False, "address": "", "problem": "", "channel": cfg["channel"],
-                      "here": bool(self.store.state["connected"]), "edges": True, "edge_watch": "", "copies": True, "rich": True,
+                      "here": bool(self.store.state["connected"]), "edges": True, "edge_watch": "", "ctrl": True, "copies": True, "rich": True,
                       "pairing": None,
                       "transfer": None, "offers": [], "pair_error": "",
                       "peers": [{"pair": flow.pair_id(entry["key"]), "name": entry["name"], "edge": entry["edge"], "address": entry["address"],
@@ -567,6 +575,15 @@ class FlowPage(ScrollPage):
         self.push.set_value(cfg["push_mm"])
         self.corner.set_value(cfg["corner"])
         self.fullscreen.set_checked_silently(cfg["fullscreen"])
+        readable = status.get("ctrl", True)
+        self.ctrl.set_checked_silently(cfg["hold_ctrl"])
+        self.ctrl.setEnabled(readable or cfg["hold_ctrl"])  # can always be switched off
+        self.ctrl_row.note.setText(
+            "" if readable
+            else _("This desktop does not tell MX Options whether Ctrl is held: while this is on, the edge keeps the "
+                   "mouse here. The action “Move to the other computer (Flow)” still sends it.") if cfg["hold_ctrl"]
+            else _("This desktop does not tell MX Options whether Ctrl is held, so this cannot be used here."))
+        self.ctrl_row.note.setVisible(not readable)
         self.follow.set_checked_silently(cfg["mouse_follows_keyboard"])
         self.crossing_card.set_row_visible(self.follow_row, self.store.state.get("keyboard") is not None)
         self.lead.set_checked_silently(cfg["keyboard_follows_mouse"])

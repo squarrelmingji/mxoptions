@@ -315,6 +315,7 @@ DEFAULTS = {
         "push_mm": 10.0,      # how far the mouse has to be pushed on, once the pointer is at the edge, to cross
         "corner": 10,         # percent of the edge at each of its ends where pushing does nothing (hot corners live there)
         "fullscreen": False,  # cross even while a full-screen window (a game, a film) is in front
+        "hold_ctrl": False,   # cross at the edge only while a Ctrl key is held; where that cannot be told, never
         "clipboard": True,    # hand the copied text or picture over with the pointer
         "files": True,        # ... and copied files and folders
         "files_max_mb": 2048,  # at most this much in one go, sending or receiving
@@ -717,6 +718,7 @@ def _sanitize(cfg):
     link = cfg["flow"]
     for key in ("enabled", "clipboard", "files", "fullscreen", "mouse_follows_keyboard", "keyboard_follows_mouse"):
         link[key] = bool(link.get(key))
+    link["hold_ctrl"] = link.get("hold_ctrl") is True  # anything but true: off, as when it is not there
     link["peers"] = _flow_peers(link)
     link["id"] = link["id"][:64] if isinstance(link.get("id"), str) else ""
     for old in ("key", "peer", "peer_name", "edge", "edge_at"):  # where the one other computer was kept before there could be two

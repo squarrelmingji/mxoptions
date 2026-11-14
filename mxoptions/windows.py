@@ -17,6 +17,7 @@ _RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 # What SHQueryUserNotificationState says when something fills the screen: a full-screen program, a game drawing
 # with Direct3D, a presentation.
 _FILLS_THE_SCREEN = (2, 3, 4)
+VK_CONTROL = 0x11  # either Ctrl key (Microsoft, "Virtual-Key Codes")
 
 
 def fullscreen_in_front():
@@ -28,6 +29,19 @@ def fullscreen_in_front():
     except (OSError, AttributeError):
         return False
     return state.value in _FILLS_THE_SCREEN
+
+
+def ctrl_held():
+    """Whether a Ctrl key is down now: the high bit of GetAsyncKeyState(VK_CONTROL). Zero is also its answer when it
+    cannot tell (another desktop in front, UIPI), so zero is None: not known to be down."""
+    try:
+        user32 = ctypes.WinDLL("user32")
+    except OSError:
+        return None
+    user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+    user32.GetAsyncKeyState.restype = ctypes.c_short
+    state = user32.GetAsyncKeyState(VK_CONTROL)
+    return True if state < 0 else None if state == 0 else False
 
 
 def replace_file(source, target):

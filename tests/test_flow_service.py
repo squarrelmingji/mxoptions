@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 import unittest
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -22,6 +23,7 @@ import tests.support  # noqa: E402,F401
 from tests.test_flow import free_port  # noqa: E402
 from tests.test_flow import Held, on_link  # noqa: E402
 from mxoptions import clipboard, config, flow, flow_edges, flow_files, flow_service, vinput  # noqa: E402
+from mxoptions import environment  # noqa: E402
 from mxoptions.ui.store import Store  # noqa: E402
 
 APP = QGuiApplication.instance() or QApplication([])  # the Flow page is drawn too
@@ -1478,6 +1480,183 @@ class PausedOverTheLink(Services):
                 self.laptop.flow.link.send({"t": "clipboard", "text": "fresh", "token": "f1"})
                 self.assertTrue(wait(lambda: self.desk.clipboard.written))
                 self.assertEqual([written["text"] for written in self.desk.clipboard.written], ["fresh"])
+
+
+class HoldCtrlSettings(unittest.TestCase):
+    """flow.hold_ctrl, "Cross only while Ctrl is held": true or false only, off at first, carried by settings files."""
+
+    def store(self, cfg):
+        store = Store(cfg, Engine())
+        store.flush = lambda: None  # made-up settings: never written anywhere
+        store._save_timer.timeout.disconnect()
+        return store
+
+    def test_hold_ctrl_is_off_at_first_and_only_true_counts(self):
+        self.assertIs(config.DEFAULTS["flow"]["hold_ctrl"], False)
+        self.assertEqual(config.DEFAULTS["version"], 6)
+        self.assertIs(config.clean({"flow": {}})["flow"]["hold_ctrl"], False)  # settings from before it
+        self.assertIs(config.clean({"flow": {"hold_ctrl": True}})["flow"]["hold_ctrl"], True)
+        for value in (False, None, 1, 1.0, "true", "yes", [True], {"on": True}, 0):
+            with self.subTest(value=value):
+                self.assertIs(config.clean({"flow": {"hold_ctrl": value}})["flow"]["hold_ctrl"], False)
+        self.assertNotIn("hold_ctrl", config.LOCAL_FLOW)
+
+    def test_hold_ctrl_travels_in_settings_files_and_the_setter_takes_only_bools(self):
+        here = config.clean({"flow": {"enabled": True, "id": "this-computer", "channel": 1, "hold_ctrl": True,
+                                      "peers": [{"key": KEY, "id": "peer", "address": "", "name": "peer", "edge": "right",
+                                                 "edge_at": 0.0}]}})
+        raw = config.export_data(here)
+        self.assertIs(json.loads(raw)["config"]["flow"]["hold_ctrl"], True)  # it goes along, as push_mm does
+        other = config.clean({"flow": {"id": "other-computer", "channel": 2}})
+        imported = config.import_data(raw, other)
+        self.assertIs(imported["flow"]["hold_ctrl"], True)
+        self.assertEqual((imported["flow"]["id"], imported["flow"]["channel"], imported["flow"]["peers"]),
+                         ("other-computer", 2, []))  # what is of this computer stays
+        document = json.loads(raw)
+        for value, kept in ((False, False), ("yes", False), (1, False), (None, False)):
+            document["config"]["flow"]["hold_ctrl"] = value
+            with self.subTest(imported=value):
+                self.assertIs(config.import_data(json.dumps(document).encode(), here)["flow"]["hold_ctrl"], kept)
+        del document["config"]["flow"]["hold_ctrl"]  # a file from before it: off
+        self.assertIs(config.import_data(json.dumps(document).encode(), here)["flow"]["hold_ctrl"], False)
+        store = self.store(config.clean({"flow": {}}))
+        self.assertTrue(store.set_path("flow.hold_ctrl", True))
+        self.assertIs(store.cfg["flow"]["hold_ctrl"], True)
+        for value in (1, 0, "true", "false", [], {}):
+            with self.subTest(set_path=value):
+                self.assertFalse(store.set_path("flow.hold_ctrl", value))
+                self.assertIs(store.cfg["flow"]["hold_ctrl"], True)
+        self.assertTrue(store.set_path("flow.hold_ctrl", None))  # null: back to the default
+        self.assertIs(store.cfg["flow"]["hold_ctrl"], False)
+
+    def test_the_ctrl_switch_explains_itself_where_ctrl_cannot_be_told(self):
+        from PySide6.QtCore import QObject, Signal
+        from mxoptions.ui import flow_page
+
+        class Service(QObject):
+            changed = Signal()
+
+            def __init__(self):
+                super().__init__()
+                self.readable = True
+
+            def watch_offers(self, on):
+                pass
+
+            def status(self):
+                return {"supported": True, "on": False, "address": "", "problem": "", "channel": -1, "here": False,
+                        "edges": True, "edge_watch": "", "ctrl": self.readable, "copies": True, "rich": True,
+                        "pairing": None, "transfer": None, "offers": [], "pair_error": "", "peers": []}
+
+        store = self.store(copy.deepcopy(config.DEFAULTS))
+        store.flow = service = Service()
+        page = flow_page.FlowPage(store)
+        self.addCleanup(page.deleteLater)
+        page.show()
+        row, switch = page.ctrl_row, page.ctrl
+        self.assertEqual(row.title.text(), "Cross only while Ctrl is held")
+        self.assertEqual(switch.accessibleName(), "Cross only while Ctrl is held")
+        self.assertIn("Easy-Switch buttons do not need it", row.info.text())
+        self.assertFalse(row.isHidden())
+        self.assertTrue(switch.isEnabled())
+        self.assertFalse(switch.isChecked())
+        self.assertTrue(row.note.isHidden())  # Ctrl can be told here: nothing to say
+        switch.toggle()
+        self.assertIs(store.cfg["flow"]["hold_ctrl"], True)
+        switch.toggle()
+        self.assertIs(store.cfg["flow"]["hold_ctrl"], False)
+
+        service.readable = False  # Wayland, say
+        service.changed.emit()
+        self.assertFalse(switch.isEnabled())  # off, it cannot be switched on here
+        self.assertFalse(row.note.isHidden())
+        self.assertEqual(row.note.text(), "This desktop does not tell MX Options whether Ctrl is held, so this cannot be "
+                                          "used here.")
+        store.set("flow", "hold_ctrl", True)  # on from before, or from a settings file
+        self.assertTrue(switch.isChecked())
+        self.assertTrue(switch.isEnabled())  # so that it can be switched off
+        self.assertIn("while this is on, the edge keeps the mouse here", row.note.text())
+        self.assertIn("still sends it", row.note.text())
+        switch.toggle()
+        self.assertIs(store.cfg["flow"]["hold_ctrl"], False)
+        self.assertFalse(switch.isEnabled())
+        self.assertFalse(switch.isChecked())
+
+    def test_switching_it_through_the_settings_reaches_an_armed_engine(self):
+        """The real Store and the engine's own queue: a push under way when it is switched counts the new setting."""
+        from tests.test_flow import engine_with_hosts
+        engine = engine_with_hosts()
+        store = self.store(copy.deepcopy(engine.cfg))
+        store.engine = engine
+        per_mm = engine._counts_per_mm()
+        held, asked = [None], []
+
+        def ctrl_held():
+            asked.append(held[0])
+            return held[0]
+
+        def handle():
+            while not engine._queue.empty():
+                engine._handle(engine._queue.get_nowait())
+
+        def push(mm, when):
+            engine._on_push(mm * per_mm, 0, when)
+
+        with mock.patch.object(environment, "ctrl_held", ctrl_held):
+            engine._flow_arm((1, "right", 10.0))
+            push(6, 0.00)
+            store.set("flow", "hold_ctrl", True)
+            self.assertIs(engine.cfg["flow"]["hold_ctrl"], False)  # the engine takes it from its queue, in order
+            handle()
+            self.assertIs(engine.cfg["flow"]["hold_ctrl"], True)
+            push(5, 0.05)  # Ctrl cannot be told: refused, still armed
+            self.assertEqual((engine.mouse.sent, asked), ([], [None]))
+            held[0] = False
+            push(11, 0.10)
+            self.assertEqual(engine.mouse.sent, [])
+            held[0] = True
+            push(11, 0.15)
+            self.assertEqual(engine.mouse.sent, [1])
+            engine._flow_arm((1, "right", 10.0))
+            held[0] = False
+            push(6, 0.20)
+            self.assertTrue(store.set_path("flow.hold_ctrl", False))  # as the API does
+            handle()
+            push(5, 0.25)
+            self.assertEqual(engine.mouse.sent, [1, 1])
+            self.assertEqual(len(asked), 3)  # off: not asked any more
+
+
+class HoldCtrl(Services):
+    """The service's part: it says whether Ctrl can be told here, and the setting leaves the edge armed as it is."""
+
+    def setUp(self):
+        super().setUp()
+        self.x = self.desk
+        self.x.store.set_section("flow", dict(self.x.cfg, enabled=True, peers=[
+            {"key": KEY, "id": "peer", "address": "", "name": "peer", "edge": "right", "edge_at": 0.0}]))
+        self.pair = flow.pair_id(KEY)
+        self.x.mouse(True, 0)
+        self.x.flow._on_link("up", {"name": "peer", "channel": 1, "present": False, "edge": "left", "edge_at": 0.0}, self.pair)
+
+    def test_status_says_whether_ctrl_can_be_told(self):
+        trap = mock.Mock(side_effect=AssertionError("Ctrl asked for a status"))
+        with mock.patch.object(environment, "ctrl_held", trap):
+            for readable in (True, False):
+                with self.subTest(readable=readable), mock.patch.object(environment, "ctrl_readable", lambda r=readable: r):
+                    self.assertIs(self.x.flow.status()["ctrl"], readable)
+        trap.assert_not_called()
+
+    def test_switching_it_leaves_the_edge_armed(self):
+        self.x.at_edge("right", 0.5)
+        self.assertEqual(self.x.engine.asked("flow_arm"), [(1, "right", 10.0)])
+        self.x.store.set("flow", "hold_ctrl", True)
+        self.x.store.set("flow", "hold_ctrl", False)
+        APP.processEvents()
+        self.assertEqual(self.x.engine.asked("flow_disarm"), [])
+        self.assertEqual(self.x.engine.asked("flow_arm"), [(1, "right", 10.0)])
+        self.x.at_edge("right", 0.6)  # sliding along it: still the one push
+        self.assertEqual(len(self.x.engine.asked("flow_arm")), 1)
 
 
 if __name__ == "__main__":
