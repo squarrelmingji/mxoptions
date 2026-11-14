@@ -101,6 +101,10 @@ class FlowService(QObject):
         self._kb_hosts = {}        # pair -> {"token", "channel"} that computer said of its keyboard, on the link now up
         self._kb_attempt = None    # the last one asked of the engine: {"pair", "id", "said", "link", "event"}
         self._leave_cause = None   # "follow" while the mouse is being sent after the keyboard
+        self._taking = frozenset()  # pairs whose computers take part: in the settings and not paused
+        self._paused = frozenset()  # pairs whose computers are paused
+        self._fenced = {}           # pair -> mark: nothing said on its link is taken until the link's "mark" says so
+        self._marks = 0             # the last mark asked of the link
         self._watcher = flow_edges.create(self, click=self._click_through, scroll=self._scroll_through)
         if self._watcher is not None:
             self._watcher.reported.connect(self._edge_report)
@@ -126,6 +130,11 @@ class FlowService(QObject):
     def _entry(self, pair):
         return next((entry for found, entry in self._entries() if found == pair), None)
 
+    def _admitted(self, pair):
+        """Whether what the link says of ``pair`` is taken: that computer takes part, and was not paused since the
+        link last marked where it stands."""
+        return pair in self._taking and pair not in self._fenced
+
     def _change(self, pair, **values):
         """Change something about one of them in the settings."""
         peers = copy.deepcopy(self.store.cfg["flow"]["peers"])
@@ -150,7 +159,8 @@ class FlowService(QObject):
             said = self._peers.get(pair)
             peers.append({"pair": pair, "name": self._name(pair), "edge": entry["edge"], "address": entry["address"],
                           "key": entry["key"], "linked": said is not None, "channel": (said or {}).get("channel"),
-                          "present": bool((said or {}).get("present")), "quiet": bool((said or {}).get("quiet"))})
+                          "present": bool((said or {}).get("present")), "quiet": bool((said or {}).get("quiet")),
+                          "paused": entry.get("paused") is True})
         return {
             "supported": flow.supported(),
             "on": self._on(),
@@ -244,6 +254,13 @@ class FlowService(QObject):
         moved["edge"] = edge
         self.store.set("flow", "peers", peers)
 
+    def set_paused(self, pair, paused):
+        """Pause one of the other computers (True), or have it take part again (False). Paused, it stays paired and
+        in its place, but the link to it is down and what it still had on its way is not taken."""
+        if type(paused) is not bool:
+            raise TypeError("paused is True or False")
+        self._change(pair, paused=paused)
+
     def _info(self):
         cfg = self.store.cfg["flow"]
         return {"name": socket.gethostname(), "port": cfg["port"], "id": cfg["id"]}
@@ -271,19 +288,21 @@ class FlowService(QObject):
 
     def _configure(self):
         cfg, entries = self.store.cfg["flow"], self._entries()
-        on = bool(cfg["enabled"] and flow.supported() and entries)
+        active = [(pair, entry) for pair, entry in entries if entry.get("paused") is not True]
+        on = bool(cfg["enabled"] and flow.supported() and active)
         attempt = self._kb_attempt
         if attempt is not None and (not on or not cfg["keyboard_follows_mouse"] or self._entry(attempt["pair"]) is None):
             self._cancel_follow()
-        wanted = (on, cfg["port"], tuple((entry["key"], entry["address"], entry["edge"]) for _pair, entry in entries))
+        wanted = (on, cfg["port"], tuple((entry["key"], entry["address"], entry["edge"], entry.get("paused") is True)
+                                         for _pair, entry in entries))
         self.link.accept_files(cfg["files_max_mb"] * MIB if on and cfg["files"] and self.clipboard.rich() else None)
         if wanted == self._applied:
-            self._watch_edges(on, entries)  # how it is watched may have changed,
+            self._watch_edges(on, active)   # how it is watched may have changed,
             self._send_status()             # and when an edge was chosen, all the same
             return
         previous, self._applied = self._applied, wanted
         if previous is not None and not self._adopting:
-            before = {key: edge for key, _address, edge in previous[2]}
+            before = {key: edge for key, _address, edge, _paused in previous[2]}
             moved = {entry["key"] for _pair, entry in entries if before.get(entry["key"], entry["edge"]) != entry["edge"]}
             if moved:  # chosen here and now: the computers behind those edges follow
                 peers = copy.deepcopy(cfg["peers"])
@@ -291,18 +310,33 @@ class FlowService(QObject):
                     if entry["key"] in moved:
                         entry["edge_at"] = time.time()
                 self.store.set("flow", "peers", peers)
+        taking = frozenset(pair for pair, _entry in active)
+        gone, resumed = self._taking - taking, self._paused & taking
+        self._taking, self._paused = taking, frozenset(pair for pair, _entry in entries) - taking
+        mark = None
+        if resumed:  # what its old link still had on its way is not taken: only what is said after this mark
+            self._marks += 1
+            mark = self._marks
+            self._fenced.update(dict.fromkeys(resumed, mark))
         if on:
-            self.link.configure([{"key": entry["key"], "address": entry["address"]} for _pair, entry in entries], cfg["port"])
+            self.link.configure([{"key": entry["key"], "address": entry["address"]} for _pair, entry in active],
+                                cfg["port"], mark=mark)
             if self._pointer is None and not environment.places_pointer():
                 self._pointer = vinput.create_pointer()
         else:
-            self.link.configure(None)
+            self.link.configure(None, mark=mark)
             self._problem = ""
             if self._pointer is not None:
                 self._pointer.close()
                 self._pointer = None
+        if gone:  # paused or forgotten: its link is over here and now, and so are its files
+            self.link.cancel_files(gone)
+            for pair in gone:
+                self._link_gone(pair)
+            if self._crossed[0] in gone:
+                self._crossed = ("", 0.0)  # what was copied before goes nowhere once it takes part again
         self._disarm()
-        self._watch_edges(on, entries)
+        self._watch_edges(on, active)
         self._send_status()
         self.changed.emit()
 
@@ -438,7 +472,7 @@ class FlowService(QObject):
                         self._armed or self._leaving)
             self._armed = self._leaving = None
             entry = self._entry(pair) if pair else None
-            if entry is None:
+            if entry is None or pair not in self._taking:  # gone there all the same: nothing goes along
                 self._leave_cause = None
                 return
             self._crossed = (pair, time.monotonic())
@@ -500,6 +534,11 @@ class FlowService(QObject):
             self.link.send({"t": "cue", "what": what}, pair=pair)
 
     def _on_link(self, kind, payload, pair):
+        if kind == "mark":  # everything said before it has been heard
+            self._fenced = {fenced: mark for fenced, mark in self._fenced.items() if mark > payload}
+            return
+        if kind in ("up", "status", "quiet", "message") and not self._admitted(pair):
+            return  # from a link closed here since: that computer is paused, forgotten, or was until a moment ago
         if kind in ("up", "status"):
             before = self._peers.get(pair) or {}
             link_id = payload.get("id") if kind == "up" else before.get("id")
@@ -527,13 +566,7 @@ class FlowService(QObject):
             if payload and self._armed == pair:
                 self._disarm()
         elif kind == "down":
-            self._peers.pop(pair, None)
-            self._heard.pop(pair, None)
-            self._kb_hosts.pop(pair, None)
-            if self._kb_attempt is not None and self._kb_attempt["pair"] == pair:
-                self._cancel_follow()
-            if self._armed == pair:
-                self._disarm()
+            self._link_gone(pair)
         elif kind == "problem":
             self._problem = payload
         elif kind == "message":
@@ -541,24 +574,32 @@ class FlowService(QObject):
                 self._on_message(payload, pair)
             return
         elif kind == "files-coming":
+            if not self._admitted(pair):
+                return  # from a computer paused here: nothing of it is shown
             self._progress(dict(payload, done=0), pair, sending=False)  # the clipboard here stays as it is until they are in
         elif kind == "files-progress":
+            if not self._admitted(pair):
+                return
             self._progress(payload, pair)
         elif kind == "files":
-            self._transfer = None
-            if self.clipboard.write(files=payload["paths"]):
-                self._shared[pair] = self.clipboard.signature(files=payload["paths"])
-            self._cue("arrived", pair)
+            self._transfer_over(pair, sending=False)
+            if not self._admitted(pair):  # in place just as that computer was paused here: not taken, not kept
+                self.link.discard_files(payload["paths"])
+            else:
+                if self.clipboard.write(files=payload["paths"]):
+                    self._shared[pair] = self.clipboard.signature(files=payload["paths"])
+                self._cue("arrived", pair)
         elif kind == "files-declined":
-            self._transfer = None
-            if payload != "cancelled":
+            self._transfer_over(pair, sending=False)
+            if payload != "cancelled" and self._admitted(pair):
                 self._cue("failed", pair)
         elif kind == "files-sent":
-            self._transfer = None
-            if pair in self._offered:
-                self._shared[pair] = self._offered.pop(pair)
+            self._transfer_over(pair, sending=True)
+            mark = self._offered.pop(pair, None)
+            if mark is not None and self._admitted(pair):
+                self._shared[pair] = mark
         elif kind == "files-refused":
-            self._transfer = None
+            self._transfer_over(pair, sending=True)
             self._offered.pop(pair, None)
         elif kind == "offer":
             known = payload["id"] in self._offers
@@ -577,6 +618,21 @@ class FlowService(QObject):
         else:
             return
         self.changed.emit()
+
+    def _link_gone(self, pair):
+        """The link to the computer of ``pair`` is down, or no longer counts here: nothing it said holds any more."""
+        self._peers.pop(pair, None)
+        self._heard.pop(pair, None)
+        self._kb_hosts.pop(pair, None)
+        if self._kb_attempt is not None and self._kb_attempt["pair"] == pair:
+            self._cancel_follow()
+        if self._armed == pair:
+            self._disarm()
+
+    def _transfer_over(self, pair, sending):
+        """The file transfer with the computer of ``pair``, that way, has ended: no longer shown, unless another is."""
+        if self._transfer is not None and (self._transfer["pair"], self._transfer["sending"]) == (pair, sending):
+            self._transfer = None
 
     # -- the mouse following the keyboard ------------------------------------------------
 

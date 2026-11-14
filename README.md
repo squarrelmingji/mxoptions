@@ -383,6 +383,11 @@ What can be tuned there:
   clipboard of the computer you arrive on is left as it is until all of them are there; then they
   take it over, and the mouse gives a vibration of your choice (another one if they could not be
   brought over). The Flow page shows how far a transfer is and can cancel it.
+- **Pausing one computer:** the switch next to *Forget* takes a paired computer out of Flow for a
+  while and keeps the pairing and its place. Paused, the link to it is down: the mouse does not
+  cross to it or back, nothing copied goes along, the keyboard does not follow, and files on their
+  way stop. A switch already under way when you pause still finishes. The Easy-Switch buttons still
+  reach it. Switch it on to resume. The other computer sees it as not connected.
 
 How it works, and how it is kept private:
 

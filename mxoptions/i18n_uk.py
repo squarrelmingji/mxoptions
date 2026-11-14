@@ -532,6 +532,14 @@ STRINGS = {
     "Connected, everything between the two is encrypted.": "З'єднано, усе між ними зашифровано.",
     "Not connected right now.": "Зараз не з'єднано.",
     "Forget": "Забути",
+    "Paused": "Призупинено",
+    "Use {} with Flow": "Використовувати {} у Flow",
+    "Paused. It stays paired: switch it on to use it with Flow again.":
+        "Призупинено. Спарювання лишається: увімкніть, щоб знову користуватися ним у Flow.",
+    "{} is paused: from now on the mouse does not cross to it or back, and nothing copied goes along; a switch "
+    "already under way still finishes. The mouse's Easy-Switch button still switches to it.":
+        "{} призупинено: відтепер миша не переходить на нього й назад, а скопійоване не передається; перемикання, "
+        "що вже почалося, завершиться. Кнопка Easy-Switch на миші й далі перемикає на нього.",
     "Pair with another computer": "Спарувати з іншим комп'ютером",
     "Press this on one of the two computers. On the other, open this page: it finds this computer by itself and asks "
     "for the code.":

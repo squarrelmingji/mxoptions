@@ -20,6 +20,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 import tests.support  # noqa: E402,F401
 from tests.test_flow import free_port  # noqa: E402
+from tests.test_flow import Held, on_link  # noqa: E402
 from mxoptions import clipboard, config, flow, flow_edges, flow_files, flow_service, vinput  # noqa: E402
 from mxoptions.ui.store import Store  # noqa: E402
 
@@ -814,6 +815,12 @@ class KeyboardFollows(Services):
         self.assertTrue(event.is_set())
         self.assertEqual(self.cancelled(), [event])
 
+    def test_pausing_that_computer_calls_it_off(self):
+        event = self.attempt()
+        self.x.flow.set_paused(self.pair, True)
+        self.assertTrue(event.is_set())
+        self.assertEqual(self.cancelled(), [event])
+
     def test_only_what_was_said_on_this_link(self):
         self.up(2)
         self.x.flow._on_link("down", None, self.pair)
@@ -1064,6 +1071,28 @@ class ThreeServices(Services):
         for computer in (self.laptop, self.tower):
             self.assertEqual(computer.engine.asked("keyboard_follow"), [])
 
+    def test_a_paused_computer_stays_paired_and_nothing_crosses_either_way_until_it_is_resumed(self):
+        laptop = self.desk.pair_of(0)
+        self.desk.flow.set_paused(laptop, True)
+        self.assertFalse(self.desk.peer(0)["linked"])  # at once: nothing it said a moment ago counts any more
+        self.assertTrue(self.desk.peer(0)["paused"])
+        self.desk.at_edge("right", 0.5)
+        self.assertEqual(self.desk.engine.asked("flow_arm"), [])
+        self.desk.flow.on_engine(("asked", None))
+        self.assertEqual(self.desk.engine.asked("flow_leave"), [(2, False)])  # the tower takes it instead
+        self.assertTrue(wait(lambda: not self.laptop.linked() and self.desk.linked() and self.tower.linked()))
+        self.assertFalse(self.desk.peer(0)["linked"])
+        self.assertEqual(self.desk.entry(0)["key"], self.laptop.entry()["key"])
+        self.assertIs(self.desk.entry(0)["paused"], True)
+        self.laptop.mouse(True, 1)
+        self.laptop.flow.on_engine(("asked", None))  # nor back from the laptop
+        self.assertEqual(self.laptop.engine.asked("flow_leave"), [])
+        self.laptop.mouse(False)
+        self.desk.flow.set_paused(laptop, False)
+        self.assertTrue(wait(lambda: self.desk.linked(2) and self.laptop.linked() and self.desk.peer(0).get("channel") == 1))
+        self.desk.at_edge("right", 0.5)
+        self.assertEqual(self.desk.engine.asked("flow_arm"), [(1, "right", 10.0)])
+
     def third_pairing(self, paired=lambda: None):
         """A fourth computer pairs with the desk; ``paired`` runs once the fourth has it. Returns the fourth."""
         fourth = self.computer()
@@ -1093,6 +1122,362 @@ class ThreeServices(Services):
         fourth = self.third_pairing(then)
         self.assertEqual(late, [])
         self.assertTrue(fourth.cfg["peers"])
+
+
+SECOND = "SYNT-HETI-CKEY-0002"
+
+
+class PausedSettings(unittest.TestCase):
+    """What the settings keep of a paused computer: true or false only, and only on this computer, as the pairing."""
+
+    def entry(self, **more):
+        return dict({"key": KEY, "id": "peer", "address": "", "name": "peer", "edge": "right", "edge_at": 0.0}, **more)
+
+    def peers(self, **more):
+        return config.clean({"flow": {"peers": [self.entry(**more)]}})["flow"]["peers"]
+
+    def test_only_true_or_false_is_kept_and_no_settings_file_carries_it(self):
+        for value in (True, False):
+            self.assertIs(self.peers(paused=value)[0]["paused"], value)
+        for value in ("yes", 1, 0, None, [], "true"):
+            self.assertNotIn("paused", self.peers(paused=value)[0])
+        self.assertEqual(self.peers(), [self.entry()])  # settings from before stay exactly as they were
+        current = config.clean({"flow": {"enabled": True, "peers": [self.entry(paused=True)]}})
+        raw = config.export_data(current)
+        self.assertNotIn(b"paused", raw)
+        self.assertEqual(json.loads(raw)["config"]["flow"]["peers"], [])
+        imported = config.import_data(config.export_data(config.clean({"flow": {}})), current)
+        self.assertIs(imported["flow"]["peers"][0]["paused"], True)  # the computers paired here stay as they are here
+        store = Store(current, Engine())
+        store.flush = lambda: None
+        store._save_timer.timeout.disconnect()
+        self.assertTrue(store.set_path("flow.peers.0.paused", False))
+        self.assertIs(store.cfg["flow"]["peers"][0]["paused"], False)
+        self.assertFalse(store.set_path("flow.peers.0.paused", "no"))
+        store = Store(config.clean({"flow": {"peers": [self.entry()]}}), Engine())
+        store.flush = lambda: None
+        store._save_timer.timeout.disconnect()
+        self.assertFalse(store.set_path("flow.peers.0.paused", True))  # not there: the whole list is set instead
+
+
+class Edges:
+    """Stands in for what watches the screen edges: remembers which edges it was asked to watch."""
+
+    name = "synthetic"
+
+    def __init__(self):
+        self.watching = False
+        self.asked = []
+
+    def watch(self, edges, corner=0.1, fullscreen=False):
+        self.asked.append(set(edges))
+        self.watching = bool(edges)
+
+    def close(self):
+        pass
+
+
+class Paused(Services):
+    """Two other computers, one of them paused, with what they say made up and handed in as the link hands it."""
+
+    def setUp(self):
+        super().setUp()
+        self.x = self.desk
+        self.x.store.set_section("flow", dict(
+            self.x.cfg, enabled=True, clipboard=True, files=True, mouse_follows_keyboard=True, keyboard_follows_mouse=True,
+            peers=[{"key": KEY, "id": "peer", "address": "", "name": "peer", "edge": "right", "edge_at": 0.0},
+                   {"key": SECOND, "id": "peer2", "address": "", "name": "peer2", "edge": "left", "edge_at": 0.0}]))
+        self.a, self.b = flow.pair_id(KEY), flow.pair_id(SECOND)
+        self.x.mouse(True, 0)
+        kb_here(self.x, LINK, True, channel=0)
+        self.up(self.a, 1)
+        self.up(self.b, 2)
+
+    def said(self, pair, channel, **more):
+        """A status as that computer sends it, saying on which channel its keyboard is paired there."""
+        key, name, edge = (KEY, "peer", "left") if pair == self.a else (SECOND, "peer2", "right")
+        return dict({"name": name, "channel": channel, "present": False, "edge": edge, "edge_at": 0.0,
+                     "keyboard_host": {"token": flow_service.keyboard_token(key, LINK), "channel": channel}}, **more)
+
+    def say(self, kind, payload, pair):
+        self.x.flow._on_link(kind, payload, pair)
+
+    def up(self, pair, channel):
+        self.say("up", self.said(pair, channel), pair)
+
+    def pause(self, pair, paused=True):
+        self.x.flow.set_paused(pair, paused)
+
+    def fresh(self):
+        """Wait for the link's mark: what it says from then on is said on a link of now."""
+        self.assertTrue(wait(lambda: not self.x.flow._fenced))
+
+    def nothing_done(self):
+        engine = self.x.engine
+        self.assertEqual([written["text"] for written in self.x.clipboard.written if written["text"] == "stale"], [])
+        self.assertEqual(engine.asked("expect_mouse"), [])
+        self.assertEqual(engine.asked("flow_leave"), [])
+        self.assertEqual(engine.asked("play_haptic"), [])
+        self.assertEqual(self.x.flow._pointer.moves if self.x.flow._pointer else [], [])
+        self.assertFalse(self.x.peer(0)["linked"])
+
+    def test_what_its_old_link_still_had_on_its_way_is_never_taken_even_after_resume(self):
+        token = flow_service.keyboard_token(KEY, LINK)
+        keyboard(self.x, LINK, False, ago=0.0)  # gone a moment ago: if it arrived there now, the mouse would follow
+        stale = [("up", self.said(self.a, 5)),
+                 ("status", self.said(self.a, 3, keyboard={"token": token, "here": True, "seq": 7})),
+                 ("quiet", True),
+                 ("message", {"t": "clipboard", "text": "stale", "token": "s1"}),
+                 ("message", {"t": "enter", "edge": "right", "at": 0.5}),
+                 ("message", {"t": "cue", "what": "arrived"})]
+
+        def hand_stale():
+            for kind, payload in stale:
+                self.say(kind, copy.deepcopy(payload), self.a)
+            self.nothing_done()
+
+        self.pause(self.a)
+        self.assertFalse(self.x.peer(0)["linked"])
+        self.assertNotIn(self.a, self.x.flow._kb_hosts)
+        hand_stale()
+        self.say("message", {"t": "clipboard", "text": "for the other one", "token": "b1"}, self.b)
+        self.assertEqual([written["text"] for written in self.x.clipboard.written], ["for the other one"])
+        self.pause(self.a, False)
+        hand_stale()  # resumed, but the link has not marked where it stands yet
+        first = self.x.flow._fenced[self.a]
+        self.pause(self.a)
+        self.pause(self.a, False)
+        self.say("mark", first, "")  # an older mark clears nothing newer
+        hand_stale()
+        self.fresh()
+        self.up(self.a, 1)
+        self.assertTrue(self.x.peer(0)["linked"])
+        self.assertEqual(self.x.peer(0)["channel"], 1)
+        self.assertEqual(self.x.engine.asked("flow_leave"), [])  # the first word on a link only says how things are
+        keyboard(self.x, LINK, True)
+        keyboard(self.x, LINK, False, ago=0.0)
+        self.say("status", self.said(self.a, 1, keyboard={"token": token, "here": True, "seq": 8}), self.a)
+        self.assertEqual(self.x.engine.asked("flow_leave"), [(1, False)])
+        self.say("message", {"t": "clipboard", "text": "fresh", "token": "f1"}, self.a)
+        self.assertEqual([written["text"] for written in self.x.clipboard.written], ["for the other one", "fresh"])
+        self.say("message", {"t": "enter", "edge": "right", "at": 0.5}, self.a)
+        self.assertEqual(len(self.x.engine.asked("expect_mouse")), 1)
+
+    def test_nothing_goes_along_with_a_mouse_sent_there_just_after_the_pause(self):
+        link, sent = self.x.flow.link, []
+        send = link.send
+
+        def spy(message, data=None, pair=None):
+            sent.append((message.get("t"), pair))
+            send(message, data, pair=pair)
+
+        link.send = spy
+        self.x.clipboard.content["text"] = "copied here"
+        self.x.flow.on_engine(("left", 1))  # while it takes part: the pointer, what was copied and the keyboard go
+        self.assertEqual([what for what in sent if what[1] == self.a], [("enter", self.a), ("clipboard", self.a)])
+        self.assertEqual(len(self.x.engine.asked("keyboard_follow")), 1)
+        sent.clear()
+        self.x.clipboard.content["text"] = "copied later"
+        self.pause(self.a)
+        self.x.flow.on_engine(("left", 1))  # gone there all the same, by a switch already under way
+        self.assertEqual([what for what in sent if what[1] == self.a], [])
+        self.assertEqual(len(self.x.engine.asked("keyboard_follow")), 1)
+        self.pause(self.a, False)
+        self.fresh()
+        self.x.mouse(False)  # the mouse is over there: a crossing still remembered would send the clipboard again
+        self.up(self.a, 1)
+        self.assertEqual([what for what in sent if what[1] == self.a], [])
+        self.x.mouse(True, 0)
+        self.x.flow.on_engine(("left", 1))
+        self.assertEqual([what for what in sent if what[1] == self.a], [("enter", self.a), ("clipboard", self.a)])
+        self.assertEqual(len(self.x.engine.asked("keyboard_follow")), 2)
+
+    def test_files_stop_with_the_pause_and_only_theirs(self):
+        link, calls = self.x.flow.link, []
+        cancel = link.cancel_files
+
+        def spy(pairs=None):
+            calls.append(None if pairs is None else set(pairs))
+            cancel(pairs)
+
+        link.cancel_files = spy
+        self.pause(self.a)
+        self.assertEqual(calls, [{self.a}])
+        self.pause(self.a, False)
+        self.assertEqual(calls, [{self.a}])
+        self.x.flow.unpair(self.b)
+        self.assertEqual(calls, [{self.a}, {self.b}])
+
+    def test_its_edge_is_no_longer_watched(self):
+        self.x.flow._watcher = edges = Edges()
+        self.pause(self.a)
+        self.assertEqual(edges.asked[-1], {"left"})
+        self.pause(self.a, False)
+        self.assertEqual(edges.asked[-1], {"right", "left"})
+
+    def test_only_true_or_false_pauses_it(self):
+        for value in (1, "yes", None, 0):
+            with self.subTest(value=value):
+                with self.assertRaises(TypeError):
+                    self.pause(self.a, value)
+                self.assertNotIn("paused", self.x.entry(0))
+        self.pause(self.a)
+        self.assertIs(self.x.entry(0)["paused"], True)
+
+    def test_the_page_switch_pauses_and_resumes_it_and_keeps_the_focus(self):
+        from mxoptions.ui import flow_page
+        self.x.store.flow = self.x.flow
+        page = flow_page.FlowPage(self.x.store)
+        self.addCleanup(page.deleteLater)
+        page.show()
+        use = page._uses[self.a]
+        self.assertTrue(use.isChecked())
+        self.assertEqual(use.accessibleName(), "Use peer with Flow")
+        use.setFocus()
+        use.toggle()
+        self.assertIs(self.x.entry(0)["paused"], True)
+        now = page._uses[self.a]
+        self.assertIsNot(now, use)
+        self.assertFalse(now.isChecked())
+        self.assertIs(page.window().focusWidget(), now)  # flipped from the keyboard, it keeps the focus
+        self.assertTrue(now.parentWidget().parentWidget().note.text().startswith("Paused."))
+        self.assertIn("a switch already under way still finishes", page.head.note.text())
+        self.assertTrue(page._uses[self.b].isChecked())
+        now.toggle()
+        self.assertIs(self.x.entry(0)["paused"], False)
+        self.assertTrue(page._uses[self.a].isChecked())
+
+    def test_files_of_a_paused_computer_are_not_taken_and_its_endings_clear_only_its_own(self):
+        def shown():
+            transfer = self.x.flow.status()["transfer"]
+            return transfer and (transfer["name"], transfer["sending"])
+
+        self.say("files-coming", {"count": 1, "total": 100}, self.b)
+        self.assertEqual(shown(), ("peer2", False))
+        self.pause(self.a)
+        self.say("files-coming", {"count": 2, "total": 200}, self.a)
+        self.say("files-progress", {"done": 1, "total": 200, "count": 2, "sending": False}, self.a)
+        self.assertEqual(shown(), ("peer2", False))
+        self.say("files-declined", "failed", self.a)
+        self.say("files-refused", "failed", self.a)
+        self.say("files-sent", {"count": 1, "total": 5}, self.a)
+        self.assertEqual(shown(), ("peer2", False))
+        staged = os.path.join(flow_files.STAGING, "20261113-000000-synthetic")
+        outside = os.path.join(self.folder, "outside")
+        for folder, name in ((staged, "a.txt"), (outside, "b.txt")):
+            os.makedirs(folder)
+            with open(os.path.join(folder, name), "w") as f:
+                f.write("synthetic")
+        self.say("files", {"paths": [os.path.join(staged, "a.txt")], "count": 1, "total": 9}, self.a)
+        self.say("files", {"paths": [os.path.join(outside, "b.txt")], "count": 1, "total": 9}, self.a)
+        self.assertEqual(self.x.clipboard.written, [])
+        self.assertEqual(self.x.vibrated(), [])
+        self.assertTrue(wait(lambda: not os.path.exists(staged)))  # arrived as it was paused: not kept either
+        self.assertTrue(os.path.exists(os.path.join(outside, "b.txt")))  # only what arrived here is removed
+        self.say("files-sent", {"count": 1, "total": 5}, self.b)  # the other way: the files coming here stay shown
+        self.assertEqual(shown(), ("peer2", False))
+        self.say("files", {"paths": [os.path.join(outside, "b.txt")], "count": 1, "total": 9}, self.b)
+        self.assertIsNone(shown())
+        self.assertEqual(len(self.x.clipboard.written), 1)
+        self.assertEqual(self.x.vibrated(), [self.x.cfg["cue_arrived"]])
+        self.pause(self.a, False)
+        self.say("files", {"paths": [os.path.join(outside, "b.txt")], "count": 1, "total": 9}, self.a)  # before the mark
+        self.assertEqual(len(self.x.clipboard.written), 1)
+        self.fresh()
+        self.up(self.a, 1)
+        self.say("files-coming", {"count": 1, "total": 50}, self.a)
+        self.assertEqual(shown(), ("peer", False))
+        self.say("files", {"paths": [os.path.join(outside, "b.txt")], "count": 1, "total": 9}, self.a)
+        self.assertIsNone(shown())
+        self.assertEqual(len(self.x.clipboard.written), 2)
+        self.assertEqual(len(self.x.vibrated()), 2)
+
+
+class PausedOverTheLink(Services):
+    """A computer paused and resumed between two services over a real link."""
+
+    pair = TwoServices.pair
+    meet = TwoServices.meet
+
+    def test_a_computer_moved_while_paused_keeps_the_place_chosen_here_once_resumed(self):
+        self.pair()
+        self.assertTrue(wait(lambda: self.laptop.entry()["edge"] == "left"))
+        pair = self.desk.pair_of()
+        self.desk.flow.set_paused(pair, True)
+        self.assertTrue(wait(lambda: not self.laptop.linked()))
+        before = self.desk.entry()["edge_at"]
+        self.desk.flow.place(pair, "top")
+        self.assertGreater(self.desk.entry()["edge_at"], before)  # chosen here, now
+        self.desk.flow.set_paused(pair, False)
+        self.assertTrue(wait(lambda: self.laptop.entry()["edge"] == "bottom"))
+
+    def only_the_laptop_calls(self):
+        """From now on the desk is only called by the laptop: its end of every call outlives its own calling."""
+        pair, link = self.desk.pair_of(), self.desk.flow.link
+        flow.broadcast_addresses = lambda: []  # put back by the test that asks for this
+        old = on_link(link, lambda: link._conns.get(pair))
+        self.desk.store.set("flow", "peers", [dict(self.desk.entry(), address="")])
+
+        def answered():
+            conn = link._conns.get(pair)
+            return conn not in (None, old) and not conn.dialed
+        self.assertTrue(wait(lambda: on_link(link, answered) and self.desk.linked()))
+        return pair
+
+    def test_a_call_replaced_before_the_pause_takes_nothing_after_resume(self):
+        broadcast = flow.broadcast_addresses
+        self.addCleanup(setattr, flow, "broadcast_addresses", broadcast)
+        for cycles in (1, 2):
+            with self.subTest(cycles=cycles):
+                if cycles > 1:  # afresh
+                    flow.broadcast_addresses = broadcast
+                    self.desk.flow.close()
+                    self.laptop.flow.close()
+                    self.desk, self.laptop = self.computer(), self.computer()
+                self.meet()
+                self.desk.store.set("flow", "mouse_follows_keyboard", True)
+                pair, link = self.only_the_laptop_calls(), self.desk.flow.link
+                token = flow_service.keyboard_token(self.desk.entry()["key"], LINK)
+                helds = []
+                for cycle in range(cycles):
+                    conn = on_link(link, lambda: link._conns[pair])
+                    held = on_link(link, lambda: Held(conn))
+                    self.laptop.flow.link.send({"t": "note"})  # the read under way returns: the next one is held
+                    self.assertTrue(held.reading.wait(5))
+                    on_link(link, lambda: held.let_go({"t": "clipboard", "text": "control", "token": "c1"}))
+                    self.assertTrue(wait(lambda: self.desk.clipboard.written))  # a held call does reach the service
+                    self.assertEqual(self.desk.clipboard.written.pop()["text"], "control")
+                    on_link(link, lambda: held.lines.extend([
+                        {"t": "status", "name": "stale", "channel": 9, "present": True, "edge": "left", "edge_at": 0.0,
+                         "keyboard": {"token": token, "here": True, "seq": 1000},
+                         "keyboard_host": {"token": token, "channel": 9}},
+                        {"t": "clipboard", "text": "stale", "token": "s1"},
+                        {"t": "enter", "edge": "right", "at": 0.5},
+                        {"t": "files", "id": f"stale{cycle}", "items": [{"path": "d", "dir": True}], "inline": True}]))
+                    on_link(self.laptop.flow.link, lambda: [call.close() for call in self.laptop.flow.link._conns.values()])
+                    self.assertTrue(wait(lambda: on_link(link, lambda: link._conns.get(pair) not in (None, conn))))
+                    self.desk.flow.set_paused(pair, True)
+                    self.desk.flow.set_paused(pair, False)
+                    self.assertTrue(wait(lambda: not self.desk.flow._fenced and self.desk.linked()))
+                    helds.append(held)
+                keyboard(self.desk, LINK, True)
+                keyboard(self.desk, LINK, False, ago=0.0)  # gone a moment ago: if it arrived there now, the mouse would follow
+                for held in helds:
+                    on_link(link, held.let_go)
+                wait(lambda: False, 1.0)  # whatever comes of it has come
+                self.assertEqual(self.desk.clipboard.written, [])
+                self.assertEqual(self.desk.engine.asked("expect_mouse"), [])
+                self.assertEqual(self.desk.engine.asked("flow_leave"), [])
+                self.assertEqual(self.desk.vibrated(), [])
+                self.assertIsNone(self.desk.flow._transfer)
+                self.assertNotEqual(self.desk.peer()["channel"], 9)
+                self.assertNotIn(9, [said["channel"] for said in self.desk.flow._kb_hosts.values()])
+                self.assertFalse(on_link(link, lambda: link._receiver.busy))
+                self.laptop.mouse(True, 2)  # what is said now is taken
+                self.assertTrue(wait(lambda: self.desk.peer()["channel"] == 2))
+                self.laptop.flow.link.send({"t": "clipboard", "text": "fresh", "token": "f1"})
+                self.assertTrue(wait(lambda: self.desk.clipboard.written))
+                self.assertEqual([written["text"] for written in self.desk.clipboard.written], ["fresh"])
 
 
 if __name__ == "__main__":

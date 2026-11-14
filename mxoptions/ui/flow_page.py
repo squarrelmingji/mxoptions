@@ -43,7 +43,7 @@ class FlowMap(QWidget):
         self._hover = None
 
     def set_state(self, here, peers, corner, mouse_here, enabled, selected):
-        """``peers``: [{"pair", "edge", "name", "linked", "mouse": the mouse is on it}]."""
+        """``peers``: [{"pair", "edge", "name", "linked", "paused", "mouse": the mouse is on it}]."""
         state = (here, tuple(tuple(sorted(peer.items())) for peer in peers), corner, mouse_here, enabled, selected)
         if state != self._state:
             self._state = state
@@ -147,14 +147,14 @@ class FlowMap(QWidget):
             painter.setPen(QPen(QColor(theme.BORDER), 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
             painter.drawLine(start, end)
             if enabled:
-                lit = QColor(theme.ACCENT if peer["linked"] else theme.MUTED)
+                lit = QColor(theme.ACCENT if peer["linked"] and not peer["paused"] else theme.MUTED)
                 painter.setPen(QPen(lit, 4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
                 painter.drawLine(start + (end - start) * corner, start + (end - start) * (1.0 - corner))
         self._computer(painter, here, here_name, _("This computer"), True, mouse_here)
         for peer in peers:
-            caption = _("Connected") if peer["linked"] else _("Not connected")
-            self._computer(painter, slots[peer["edge"]], peer["name"] or _("The other one"), caption, peer["linked"], peer["mouse"],
-                           picked=len(peers) > 1 and peer["pair"] == selected)
+            caption = _("Paused") if peer["paused"] else _("Connected") if peer["linked"] else _("Not connected")
+            self._computer(painter, slots[peer["edge"]], peer["name"] or _("The other one"), caption,
+                           peer["linked"] and not peer["paused"], peer["mouse"], picked=len(peers) > 1 and peer["pair"] == selected)
 
 
 class FlowPage(ScrollPage):
@@ -168,6 +168,7 @@ class FlowPage(ScrollPage):
         self.store = store
         self._offers_shown = None
         self._paired_shown = None
+        self._uses = {}       # pairing -> the switch that pauses that computer
         self._codes = {}      # offer id -> the line edit its code is typed into
         self._selected = ""   # the pairing of the computer the picture and the fields below are about
 
@@ -403,6 +404,10 @@ class FlowPage(ScrollPage):
         name = peer["name"] or _("the other computer")
         channel = peer["channel"]
         known = isinstance(channel, int) and not isinstance(channel, bool) and channel >= 0
+        if peer["paused"]:
+            return _("{} is paused: from now on the mouse does not cross to it or back, and nothing copied goes along; "
+                     "a switch already under way still finishes. The mouse's Easy-Switch button still switches to it."
+                     ).format(name)
         if not peer["linked"]:
             return _("Looking for {}…").format(name)
         if peer.get("quiet"):
@@ -446,7 +451,8 @@ class FlowPage(ScrollPage):
                       "pairing": None,
                       "transfer": None, "offers": [], "pair_error": "",
                       "peers": [{"pair": flow.pair_id(entry["key"]), "name": entry["name"], "edge": entry["edge"], "address": entry["address"],
-                                 "key": entry["key"], "linked": False, "channel": None, "present": False, "quiet": False}
+                                 "key": entry["key"], "linked": False, "channel": None, "present": False, "quiet": False,
+                                 "paused": entry.get("paused") is True}
                                 for entry in cfg["peers"]]}
         peers, pairing = status["peers"], status["pairing"]
         if self._selected not in [peer["pair"] for peer in peers]:
@@ -457,7 +463,7 @@ class FlowPage(ScrollPage):
         self.enabled.setEnabled(status["supported"] and bool(peers))
         self.head.note.setText(self._status_text(cfg, status))
         self.map.set_state(socket.gethostname(), [
-            {"pair": peer["pair"], "edge": peer["edge"], "name": peer["name"], "linked": peer["linked"],
+            {"pair": peer["pair"], "edge": peer["edge"], "name": peer["name"], "linked": peer["linked"], "paused": peer["paused"],
              "mouse": peer["present"] and not status["here"]} for peer in peers],
             cfg["corner"] / 100.0, status["here"], status["supported"], self._selected)
         if len(peers) > 1:
@@ -478,21 +484,37 @@ class FlowPage(ScrollPage):
             self.transfer_row.note.setText("  ·  ".join(parts))
 
         # pairing
-        shown = tuple((peer["pair"], peer["name"], peer["linked"]) for peer in peers)
+        shown = tuple((peer["pair"], peer["name"], peer["linked"], peer["paused"]) for peer in peers)
         if shown != self._paired_shown:
             self._paired_shown = shown
+            focused = next((pair for pair, use in self._uses.items() if use is self.window().focusWidget()), None)
+            self._uses = {}
             while self.paired_layout.count():
                 item = self.paired_layout.takeAt(0)
                 if item.widget():
                     item.widget().deleteLater()
             for peer in peers:
                 name = peer["name"] or _("the other computer")
+                use = Switch()
+                use.set_checked_silently(not peer["paused"])
+                use.setAccessibleName(_("Use {} with Flow").format(name))
+                use.toggled.connect(lambda on, p=peer["pair"]: self.store.flow and self.store.flow.set_paused(p, not on))
+                self._uses[peer["pair"]] = use
                 forget = QPushButton(_("Forget"))
                 forget.setCursor(Qt.CursorShape.PointingHandCursor)
                 forget.clicked.connect(lambda _checked=False, p=peer["pair"], n=name: self._forget(p, n))
-                self.paired_layout.addWidget(Row(
-                    _("Paired with {}").format(name), None, forget,
-                    note=_("Connected, everything between the two is encrypted.") if peer["linked"] else _("Not connected right now.")))
+                controls = QWidget()
+                line = QHBoxLayout(controls)
+                line.setContentsMargins(0, 0, 0, 0)
+                line.setSpacing(14)
+                line.addWidget(use)
+                line.addWidget(forget)
+                note = (_("Paused. It stays paired: switch it on to use it with Flow again.") if peer["paused"]
+                        else _("Connected, everything between the two is encrypted.") if peer["linked"]
+                        else _("Not connected right now."))
+                self.paired_layout.addWidget(Row(_("Paired with {}").format(name), None, controls, note=note))
+            if focused in self._uses:
+                self._uses[focused].setFocus()  # a switch flipped from the keyboard keeps the focus
         self.paired.setVisible(bool(peers))
         room = len(peers) < flow.MAX_PEERS
         self.pair_card.set_row_visible(self.start_row, room and pairing is None)

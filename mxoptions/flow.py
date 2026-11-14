@@ -322,6 +322,7 @@ class _Connection:
         self.heard = time.monotonic()  # when the other side last said anything
         self.quiet = False             # it has not answered for a while
         self.port = None               # where the other side listens, as it said in its hello
+        self.admit = None              # Link._admit[pair] when it was let in: once that is gone, nothing more is taken from it
 
     def send(self, message, data=None):
         """One message; ``data`` (bytes) rides behind it as it is, announced by "n"."""
@@ -387,6 +388,7 @@ class Link:
         "status"        its status changed
         "message"       anything else it sent, as a dict with "t" naming what it is ("data": bytes that came with it)
         "down"          the link is gone
+        "mark"          the number given to configure(): everything said before it was said before those settings
         "quiet"         True: that computer has not answered for a while (the network stalls, or it sleeps); False: it is back
         "problem"       text: why this computer cannot listen ("" once it can)
         "files-coming"  files are on their way here: {"count", "total"}
@@ -410,6 +412,7 @@ class Link:
         self._server = None
         self._dialers = {}          # pair -> the task that keeps calling that computer
         self._conns = {}            # pair -> the connection in use
+        self._admit = {}            # pair -> token: the same while that computer stays linked here, new when it comes back
         self._closing = False
         self._found = {}            # pair -> (address, port) a signed "here I am" came from
         self._udp = None
@@ -421,6 +424,7 @@ class Link:
         self._receive_limit = None  # bytes of files accepted in one go (None: none)
         self._outgoing = None       # files offered and not yet sent: {"id", "items", "sources"}
         self._sending = None        # the task that sends them, on a connection of its own
+        self._sending_to = ""       # the pairing whose computer they are sent to
         self._arriving = None       # the connection files are arriving on
         self._promised = ""         # the pairing whose computer was told it may send files
 
@@ -434,14 +438,15 @@ class Link:
             self._loop.call_soon_threadsafe(self._shutdown)
             self._thread.join(timeout=3.0)
 
-    def configure(self, peers=None, port=PORT, peer=""):
+    def configure(self, peers=None, port=PORT, peer="", mark=None):
         """Switch the link on for these other computers, [{"key", "address"}], or off (none). For a
-        single one its key may be given as it is, with its address as ``peer``."""
+        single one its key may be given as it is, with its address as ``peer``. With ``mark``, a "mark" event
+        carrying it comes before anything said under these settings."""
         if isinstance(peers, str):
             peers = [{"key": peers, "address": peer}]
         entries = tuple((pair_id(entry["key"]), entry["key"], str(entry.get("address") or "").strip())
                         for entry in (peers or []) if key_usable(entry.get("key") or ""))
-        self._call(self._apply, (int(port), entries) if entries and supported() else None)
+        self._call(self._apply, (int(port), entries) if entries and supported() else None, mark)
 
     def set_status(self, status, per_pair=None):
         """What the other computers should know about this one, and (``per_pair``: {pair: more}) what only
@@ -461,9 +466,14 @@ class Link:
         if not given), if it will have them."""
         self._call(self._offer_files, list(items), list(sources), pair)
 
-    def cancel_files(self):
-        """Give up the file transfer in progress, whichever way it is going."""
-        self._call(self._cancel_files)
+    def cancel_files(self, pairs=None):
+        """Give up the file transfer in progress, whichever way it is going; with ``pairs``, only one with the
+        computers of those pairings."""
+        self._call(self._cancel_files, None if pairs is None else frozenset(pairs))
+
+    def discard_files(self, paths):
+        """Remove files that arrived ("files") and will not be pasted after all."""
+        self._call(self._receiver.discard, list(paths))
 
     def watch_offers(self, wanted):
         """Report computers nearby that show a pairing code ("offer" events)."""
@@ -527,12 +537,16 @@ class Link:
         for conn in list(self._conns.values()):
             conn.close()
 
-    def _apply(self, settings):
+    def _apply(self, settings, mark=None):
+        if mark is not None:  # first: whatever the link said before this, it said before these settings
+            self._emit("mark", mark)
         if settings == self._settings:
             return
         self._teardown()
         self._settings = settings
         self._keys = {pair: key for pair, key, _address in settings[1]} if settings else {}
+        # A computer taken out loses its token, and with it every call it still has, replaced ones too.
+        self._admit = {pair: self._admit.get(pair) or object() for pair in self._keys}
         self._found = {}
         self._sync_udp()
         if settings is None:
@@ -636,6 +650,7 @@ class Link:
             conn.dialer = self.id if dialed else str(hello.get("id"))
             port = hello.get("port")
             conn.port = port if isinstance(port, int) and not isinstance(port, bool) and 0 < port < 65536 else None
+            conn.admit = self._admit[pair]
             if not self._adopt(conn):
                 return
             log.info("flow: linked with %s", hello.get("name") or "the other computer")
@@ -644,6 +659,8 @@ class Link:
                 try:
                     message = await asyncio.wait_for(conn.read(), PING_INTERVAL)
                 except asyncio.TimeoutError:
+                    if self._revoked(conn):
+                        return
                     silent = time.monotonic() - conn.heard
                     if silent > DEAD_AFTER:
                         log.info("flow: the other computer went silent")
@@ -654,11 +671,15 @@ class Link:
                         self._emit("quiet", True, pair)
                     conn.send({"t": "ping"})
                     continue
+                if self._revoked(conn):
+                    return  # what was still on its way from a computer taken out since is not taken
                 if conn.quiet:
                     conn.quiet = False
                     log.info("flow: the other computer answers again")
                     self._emit("quiet", False, pair)
                 data = await conn.read_data(message)  # never cut short: what follows would make no sense
+                if self._revoked(conn):
+                    return
                 kind = message.get("t")
                 if kind == "ping":
                     conn.send({"t": "pong"})
@@ -685,6 +706,10 @@ class Link:
                     self._outgoing = None
                 log.info("flow: link down")
                 self._emit("down", None, conn.pair)
+
+    def _revoked(self, conn):
+        """Its computer has been taken out here (paused, forgotten, Flow off) since this call was let in."""
+        return self._admit.get(conn.pair) is not conn.admit
 
     def _hello(self, pair):
         settings = self._settings
@@ -749,6 +774,8 @@ class Link:
             while True:
                 message = await asyncio.wait_for(conn.read(), STREAM_TIMEOUT)
                 data = await conn.read_data(message)
+                if conn.cancelled:
+                    break  # given up here: nothing more of it is taken, not even its end
                 kind = message.get("t")
                 if kind == "chunk":
                     self._receiver.chunk(transfer, message.get("i"), data)
@@ -759,10 +786,10 @@ class Link:
                                                       "count": self._receiver.count, "sending": False}, conn.pair)
                 elif kind == "files-end":
                     arrived = self._receiver.end(transfer)
+                    log.info("flow: %d file(s) arrived, %d bytes", arrived["count"], arrived["total"])
+                    self._emit("files", arrived, conn.pair)  # in place: said before anything else can happen here
                     conn.send({"t": "files-got"})
                     await conn.writer.drain()
-                    log.info("flow: %d file(s) arrived, %d bytes", arrived["count"], arrived["total"])
-                    self._emit("files", arrived, conn.pair)
                     return
                 else:  # the sender gave up
                     why = "cancelled"
@@ -824,6 +851,7 @@ class Link:
         if conn.pair not in self._keys or not peer or not conn.port:
             self._emit("files-refused", "failed", conn.pair)
             return
+        self._sending_to = conn.pair
         self._sending = self._loop.create_task(self._send_files(peer[0], conn.port, conn.pair, outgoing))
 
     async def _send_files(self, address, port, pair, outgoing):
@@ -878,13 +906,16 @@ class Link:
             writer.close()
         self._emit("files-refused", why, pair)
 
-    def _cancel_files(self):
-        if self._sending is not None:
+    def _cancel_files(self, pairs=None):
+        def mine(pair):
+            return pairs is None or pair in pairs
+        if self._sending is not None and mine(self._sending_to):
             self._sending.cancel()
         if self._arriving is not None:
-            self._arriving.cancelled = True
-            self._arriving.close()  # the loop reading from it ends, and what arrived so far is dropped
-        elif self._receiver.busy:
+            if mine(self._arriving.pair):
+                self._arriving.cancelled = True
+                self._arriving.close()  # the loop reading from it ends, and what arrived so far is dropped
+        elif self._receiver.busy and mine(self._promised):
             self._receiver.abort()
             self._emit("files-declined", "cancelled", self._promised)
 

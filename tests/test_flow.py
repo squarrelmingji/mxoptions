@@ -1,6 +1,7 @@
 """Flow: the pairing key, the geometry of crossing from one desktop to another, the link between
 two computers (here: two links on this one), and the engine's part in handing the mouse over."""
 
+import asyncio
 import json
 import os
 import queue
@@ -8,6 +9,7 @@ import shutil
 import socket
 import sys
 import tempfile
+import threading
 import time
 import unittest
 
@@ -519,6 +521,296 @@ class Files(TwoComputers):
         self.connect()
         self.desk.link.offer_files(*flow_files.collect([os.path.join(source, "notes.txt")], 1024 * 1024))
         self.assertEqual(self.desk.expect("files-refused"), "off")
+
+    def test_giving_up_another_computer_s_transfer_leaves_this_one_alone(self):
+        self.connect()
+        self.slow(self.laptop)
+        self.laptop.link.accept_files(4 * 1024 ** 3)
+        self.desk.link.offer_files(*flow_files.collect([self.big()], 4 * 1024 ** 3))
+        self.desk.expect("files-progress")
+        self.desk.link.cancel_files([flow.pair_id(OTHER_KEY)])  # a computer these files are not going to
+        self.assertTrue(self.desk.quiet("files-refused", 0.5))
+        self.desk.link.cancel_files([flow.pair_id(KEY)])
+        self.assertEqual(self.desk.expect("files-refused"), "cancelled")
+        self.assertEqual(self.laptop.expect("files-declined"), "cancelled")
+        self.assertEqual(self.arrived_folders(), [])
+
+    def test_the_receiver_gives_up_only_that_computer_s_transfer(self):
+        self.connect()
+        self.slow(self.laptop)
+        self.laptop.link.accept_files(4 * 1024 ** 3)
+        self.desk.link.offer_files(*flow_files.collect([self.big()], 4 * 1024 ** 3))
+        self.laptop.expect("files-progress")
+        self.laptop.link.cancel_files([flow.pair_id(OTHER_KEY)])
+        self.assertTrue(self.laptop.quiet("files-declined", 0.5))
+        self.laptop.link.cancel_files([flow.pair_id(KEY)])
+        self.assertEqual(self.laptop.expect("files-declined"), "cancelled")
+        self.assertEqual(self.desk.expect("files-refused"), "failed")
+        self.assertEqual(self.arrived_folders(), [])
+
+    def one_mebibyte(self):
+        """A file too large to go along with the offer: it travels on a connection of its own, in 16 pieces."""
+        path = os.path.join(self.folder, "one.bin")
+        with open(path, "wb") as f:
+            f.write(os.urandom(1024 * 1024))
+        return path
+
+    def test_a_transfer_given_up_takes_nothing_more_that_was_on_its_way(self):
+        self.connect()
+        link = self.laptop.link
+        receiver, take = link._receiver, link._receiver.chunk
+
+        def chunk(*args):  # the last piece is written; its end is on its way or here already
+            took = take(*args)
+            if receiver.done == receiver.total:
+                conn = link._arriving
+                link._cancel_files()
+                conn.reader.feed_data(b'{"t":"files-end"}\n')  # read off the socket before it was closed, not acted on
+            return took
+
+        receiver.chunk = chunk
+        link.accept_files(4 * 1024 * 1024)
+        self.desk.link.offer_files(*flow_files.collect([self.one_mebibyte()], 4 * 1024 * 1024))
+        self.assertEqual(self.laptop.expect("files-declined", timeout=15), "cancelled")
+        self.assertTrue(self.laptop.quiet("files", 0.5))
+        self.assertEqual(self.arrived_folders(), [])
+
+    def test_files_in_place_are_said_before_the_answer_goes(self):
+        self.connect()
+        link, said, told = self.laptop.link, [], []
+        hear, receive = link._on_event, link._receive_files
+
+        def on_event(kind, payload, pair=""):
+            said.append(kind)
+            hear(kind, payload, pair)
+
+        async def receive_files(conn, hello):
+            send = conn.send
+
+            def answer(message, data=None):
+                if message.get("t") == "files-got":
+                    told.append("files" in said)
+                send(message, data)
+
+            conn.send = answer
+            await receive(conn, hello)
+
+        link._on_event, link._receive_files = on_event, receive_files
+        link.accept_files(4 * 1024 * 1024)
+        self.desk.link.offer_files(*flow_files.collect([self.one_mebibyte()], 4 * 1024 * 1024))
+        self.laptop.expect("files", timeout=15)
+        self.assertEqual(told, [True])
+
+
+def on_link(link, function):
+    """Run ``function`` on the link's own thread, between two of its steps, and return what it gives."""
+    done = queue.Queue()
+    link._call(lambda: done.put(function()))
+    return done.get(timeout=5)
+
+
+class Held:
+    """A call whose reading is held: from now on it is given only the lines put in ``lines`` (an exception there is
+    raised instead), and only once let go. Its connection and what the other side sends on it are left alone: lines
+    that were on their way and not yet acted on. Used on the link's own thread, through on_link."""
+
+    def __init__(self, conn):
+        self.lines = []
+        self.reading = threading.Event()  # set once the call waits for its next line here
+        self._go = asyncio.Event()
+        conn.read = self.read
+
+    def let_go(self, *lines):
+        self.lines.extend(lines)
+        self._go.set()
+
+    async def read(self):
+        self.reading.set()
+        while True:
+            await self._go.wait()
+            if self.lines:
+                line = self.lines.pop(0)
+                if isinstance(line, BaseException):
+                    raise line
+                return line
+            self._go.clear()
+
+
+class HeldData:
+    """A call whose bytes behind a message are read as they come and then held until let go: the message has been
+    read, what rides behind it is in, and the call waits for it. Used on the link's own thread, but ``reached``."""
+
+    def __init__(self, conn):
+        self.reached = queue.Queue()  # the message whose bytes are held, as soon as they are
+        self._go = asyncio.Event()
+        self._read_data = conn.read_data
+        conn.read_data = self.read_data
+
+    def let_go(self):
+        self._go.set()
+
+    async def read_data(self, message):
+        data = await self._read_data(message)
+        if data:
+            self.reached.put(dict(message))
+            await self._go.wait()
+        return data
+
+
+STALE = [{"t": "status", "name": "stale", "channel": 9, "present": True}, {"t": "clipboard", "text": "stale"},
+         {"t": "files", "id": "stale1", "items": [{"path": "d", "dir": True}], "inline": True},
+         {"t": "files", "id": "stale2", "items": [{"path": "a.txt", "size": 3}]}]
+
+
+@unittest.skipUnless(flow.supported(), "this Python has no pre-shared keys for TLS")
+class TakenOut(TwoComputers):
+    """The desk takes the laptop out (pause, forget, Flow off) while a call of the laptop still has words on their
+    way: nothing of them is taken, whenever they come, not even once the laptop is back. Only the laptop calls here,
+    so that the desk's end of every call is one it was called on, which outlives the desk's own calling."""
+
+    def setUp(self):
+        super().setUp()
+        for name, value in (("PING_INTERVAL", 60.0), ("broadcast_addresses", lambda: [])):  # no "are you there" in the middle
+            self.addCleanup(setattr, flow, name, getattr(flow, name))
+            setattr(flow, name, value)
+        self.pair = flow.pair_id(KEY)
+
+    def call(self):
+        """The call in use at the desk, which the laptop made."""
+        conn = on_link(self.desk.link, lambda: self.desk.link._conns[self.pair])
+        self.assertFalse(conn.dialed)
+        return conn
+
+    def take_out(self, mark):
+        """The desk takes the laptop out and has it back at once, as a pause and a resume do."""
+        self.desk.link.configure(None)
+        self.desk.link.configure(KEY, self.desk.port, "", mark=mark)
+        self.assertEqual(self.desk.expect("mark"), mark)
+        self.desk.expect("up")  # the laptop has called again: the call in use is a new one
+
+    def keep(self):
+        """The desk changes its settings but keeps the laptop, as when the address or another computer changes."""
+        self.desk.link.configure(KEY, self.desk.port, "127.0.0.1:1")
+
+    def heard(self, for_=1.0):
+        """Everything the desk hears for a while, as (kind, payload)."""
+        found, deadline = [], time.monotonic() + for_
+        while time.monotonic() < deadline:
+            try:
+                found.append(self.desk.heard.get(timeout=0.05))
+            except queue.Empty:
+                pass
+        return found
+
+    def held(self, conn):
+        """Hold the reading of ``conn``, once the read under way has returned."""
+        held = on_link(self.desk.link, lambda: Held(conn))
+        self.laptop.link.send({"t": "cycle"})
+        self.assertEqual(self.desk.expect("message")["t"], "cycle")
+        self.assertTrue(held.reading.wait(5))
+        return held
+
+    def test_a_computer_taken_out_says_nothing_more_on_its_old_call(self):
+        self.connect()
+
+        def late(settings):
+            conn = self.desk.link._conns[self.pair]
+            self.desk.link._apply(settings, 7)
+            conn.reader.feed_data(b'{"t":"late"}\n')  # read off the socket before it was closed, not yet acted on
+
+        self.call()
+        on_link(self.desk.link, lambda: late(None))
+        kinds = [kind for kind, _payload in self.heard()]
+        self.assertIn("down", kinds)
+        self.assertLess(kinds.index("mark"), kinds.index("down"))
+        self.assertNotIn("message", kinds)
+        self.desk.link.configure(KEY, self.desk.port, "")
+        self.desk.expect("up")
+        self.call()
+        on_link(self.desk.link, lambda: late((self.desk.port, ((self.pair, KEY, "127.0.0.1:1"),))))  # it stays
+        self.assertEqual(self.desk.expect("message")["t"], "late")
+
+    def test_a_call_replaced_before_the_pause_says_nothing_after_resume(self):
+        for cycles in (1, 2):
+            with self.subTest(cycles=cycles):
+                if cycles > 1:  # afresh
+                    for end in (self.desk, self.laptop):
+                        end.link.stop()
+                    self.desk = End("desk", os.path.join(self.folder, "at-desk"))
+                    self.laptop = End("laptop", os.path.join(self.folder, "at-laptop"))
+                    self.addCleanup(self.desk.link.stop)
+                    self.addCleanup(self.laptop.link.stop)
+                self.connect()
+                self.desk.link.accept_files(1 << 20)
+                helds = []
+                for cycle in range(cycles):
+                    conn = self.call()
+                    held = self.held(conn)
+                    on_link(self.desk.link, lambda: held.let_go({"t": "warm"}))
+                    self.assertEqual(self.desk.expect("message")["t"], "warm")  # a held call does deliver
+                    on_link(self.desk.link, lambda: held.lines.extend(STALE))
+                    on_link(self.laptop.link, lambda: [call.close() for call in self.laptop.link._conns.values()])
+                    self.desk.expect("up")  # the laptop called again, and that call took over
+                    self.assertIsNot(self.call(), conn)
+                    self.take_out(7 + cycle)
+                    helds.append(held)
+                for held in helds:
+                    on_link(self.desk.link, held.let_go)
+                for kind, payload in self.heard():
+                    self.assertNotIn(kind, ("files", "files-coming", "files-declined"))
+                    self.assertNotIn("stale", (payload.get("name"), payload.get("text")) if isinstance(payload, dict) else ())
+                self.assertFalse(on_link(self.desk.link, lambda: self.desk.link._receiver.busy))
+                self.laptop.link.set_status({"name": "fresh", "channel": 3, "present": False})
+                while self.desk.expect("status")["name"] != "fresh":
+                    pass
+                self.laptop.link.send({"t": "clipboard", "text": "fresh"})
+                self.assertEqual(self.desk.expect("message")["text"], "fresh")
+                self.laptop.link.offer_files([{"path": "d", "dir": True}], [None])
+                self.assertEqual(len(self.desk.expect("files")["paths"]), 1)
+
+    def test_bytes_still_on_their_way_when_its_computer_is_taken_out_are_not_taken(self):
+        self.connect()
+        self.desk.link.accept_files(1 << 20)
+        stale = [({"t": "clip", "mime": "image/png"}, b"stale picture"),
+                 ({"t": "files", "id": "stale1", "items": [{"path": "a.txt", "size": 5}], "inline": True}, b"stale")]
+        for cycle, (message, data) in enumerate(stale):
+            conn = self.call()
+            held = on_link(self.desk.link, lambda: HeldData(conn))
+            self.laptop.link.send(message, data)
+            self.assertEqual(held.reached.get(timeout=5)["t"], message["t"])  # read, its bytes in, and held
+            self.take_out(7 + cycle)
+            on_link(self.desk.link, held.let_go)
+            kinds = [kind for kind, _payload in self.heard()]
+            self.assertFalse(set(kinds) & {"message", "files", "files-coming", "files-declined"}, kinds)
+            self.assertFalse(on_link(self.desk.link, lambda: self.desk.link._receiver.busy))
+        conn = self.call()  # the laptop stays: what it sends is taken, bytes and all, however the settings change
+        held = on_link(self.desk.link, lambda: HeldData(conn))
+        self.laptop.link.send({"t": "clip", "mime": "image/png"}, b"kept picture")
+        held.reached.get(timeout=5)
+        self.keep()
+        on_link(self.desk.link, held.let_go)
+        self.assertEqual(self.desk.expect("message")["data"], b"kept picture")
+
+    def test_a_read_that_runs_out_of_time_after_its_computer_was_taken_out_says_nothing(self):
+        self.addCleanup(setattr, flow, "QUIET_AFTER", flow.QUIET_AFTER)
+        flow.QUIET_AFTER = 0.0  # any time without a word counts: a read running out of time is a stall at once
+        self.connect()
+        held = self.held(self.call())
+        on_link(self.desk.link, lambda: held.let_go(asyncio.TimeoutError(), {"t": "warm"}))
+        self.assertIs(self.desk.expect("quiet"), True)  # the call in use: as always, a stall, and then it is back
+        self.assertIs(self.desk.expect("quiet"), False)
+        self.assertEqual(self.desk.expect("message")["t"], "warm")
+        self.take_out(7)
+        on_link(self.desk.link, lambda: held.let_go(asyncio.TimeoutError(), dict(STALE[0])))
+        found = [(kind, payload) for kind, payload in self.heard() if kind in ("quiet", "status", "message")]
+        self.assertEqual(found, [])
+        self.laptop.link.set_status({"name": "fresh", "channel": 3, "present": False})
+        while self.desk.expect("status")["name"] != "fresh":
+            pass
+        held = self.held(self.call())  # the laptop stays: its call runs out of time as always, settings changed or not
+        self.keep()
+        on_link(self.desk.link, lambda: held.let_go(asyncio.TimeoutError()))
+        self.assertIs(self.desk.expect("quiet"), True)
 
 
 class Collecting(unittest.TestCase):

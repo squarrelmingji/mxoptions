@@ -307,7 +307,7 @@ DEFAULTS = {
         # The other computers, two at most: {"key": the pairing key both hold, "id": what it goes by, "address":
         # where it was last reached (may be empty), "name": what it calls itself, "edge": the edge of this desktop
         # it is behind (left | right | top | bottom), "edge_at": when that was chosen (Unix time): the later choice of
-        # two decides}
+        # two decides; "paused": true while it takes no part but stays paired (false, or not there: it takes part)}
         "peers": [],
         "port": flow.PORT,    # where this computer listens for the others
         "push_mm": 10.0,      # how far the mouse has to be pushed on, once the pointer is at the edge, to cross
@@ -391,6 +391,8 @@ def _flow_peers(link):
             "edge": edge,
             "edge_at": float(min(max(chosen, 0.0), 4.0e9)) if isinstance(chosen, (int, float)) and not isinstance(chosen, bool) else 0.0,
         })
+        if type(entry.get("paused")) is bool:
+            peers[-1]["paused"] = entry["paused"]  # not added where it never was: settings from before stay the same
     return peers
 
 
