@@ -69,6 +69,8 @@ EFFECT_AGAIN = 0.4   # s: a press of a Spotlight button this soon after a short 
 FRONT_DELAY = 0.3    # s another app has to stay in front before the keys do what its profile says: the last one counts
 HID_BUTTONS = ("left", "right", "middle", "back", "forward")  # bit order of the receiver's mouse report
 
+THUMB_STEPS_MAX = 8  # steps of thumb wheel from one report at most (own choice: two clicks at top speed); more dropped
+REPEAT_MAX = 4  # repeats of held swipe from one report at most (own choice); further whole steps dropped
 # thumb wheel function -> (wheel clicks per step, action forward, action backward)
 THUMB_STEPS = {
     "volume": (1, keys("VOLUMEUP"), keys("VOLUMEDOWN")),
@@ -1370,10 +1372,11 @@ class Engine:
                 axis, step = gesture["axis"], settings["step_mm"] * per_mm
                 names = ("left", "right") if axis == 0 else ("up", "down")
                 value = gesture["y" if axis else "x"]
-                while abs(value) >= step:
-                    self._fire_gesture(gesture, names[value > 0], "repeated")
-                    value -= math.copysign(step, value)
-                gesture["x"], gesture["y"] = (0, value) if axis else (value, 0)
+                whole = int(value / step)
+                value -= whole * step  # beyond REPEAT_MAX dropped, never fired later
+                gesture["x"], gesture["y"] = (0, value) if axis else (value, 0)  # before firing: nothing owed after an error
+                for _ in range(min(abs(whole), REPEAT_MAX)):
+                    self._fire_gesture(gesture, names[whole > 0], "repeated")
         if now - gesture["shown"] >= GESTURE_TRACE_INTERVAL:
             self._show_gesture(gesture)
 
@@ -1519,9 +1522,10 @@ class Engine:
         if thumb["function"] == "keys":
             self._thumb_keys(thumb, step, now)
             return
-        while abs(state["acc"]) >= step:
-            positive = state["acc"] > 0
-            state["acc"] -= step if positive else -step
+        whole = int(state["acc"] / step)
+        state["acc"] -= whole * step  # before sending: nothing owed, even when a step fails; beyond THUMB_STEPS_MAX dropped
+        positive = whole > 0
+        for _ in range(min(abs(whole), THUMB_STEPS_MAX)):
             if thumb["function"] == "zoom":
                 self._zoom(1 if positive else -1)
             else:

@@ -22,6 +22,42 @@ def swipe(engine, moves, cid=GESTURE):
     return engine.listener.gestures[-1]["result"], held
 
 
+class FailingActions(Actions):
+    """``fail``: triggers that raise first, as running an action can."""
+
+    def __init__(self):
+        super().__init__()
+        self.fail = 0
+
+    def trigger(self, action):
+        if self.fail:
+            self.fail -= 1
+            raise OSError(5, "synthetic")
+        super().trigger(action)
+
+
+def repeating(test, dpi=100, step_mm=2.0, dry=False):
+    """Gesture button held in repeat mode, first swipe up done (axis set), Clock standing in for time until test
+    ends. Returns (engine, vibrations played, counts of one repeat step)."""
+    clock = Clock()
+    clock.__enter__()
+    test.addCleanup(clock.__exit__)
+    engine, played = make_engine(pointer={"dpi": dpi}, gestures={"trigger": "repeat", "step_mm": step_mm})
+    engine.executor = FailingActions()
+    engine._gesture_dry = dry
+    per_mm = max(4.0, dpi / 25.4)
+    first = -int(17 * per_mm / 2) - 1
+    engine._on_buttons({GESTURE})
+    engine._on_raw_xy(0, first)
+    engine._on_raw_xy(0, first)
+    test.assertEqual(engine._gesture["axis"], 1)
+    return engine, played, step_mm * per_mm
+
+
+def fired(engine):
+    return [payload for kind, payload in engine.listener.events if kind == "gesture"]
+
+
 class Direction(unittest.TestCase):
     def test_axes(self):
         self.assertEqual(gestures.direction(10, 1), "right")
@@ -107,6 +143,41 @@ class Recognition(unittest.TestCase):
         self.assertEqual(engine.mouse.reporting[panel], (True, True))
         self.assertEqual(swipe(engine, [(-227, 19)], cid=panel)[0], "tap")   # stale movement, not a swipe
         self.assertEqual(swipe(engine, [(-227, 19)], cid=panel)[0], "left")  # from then on it counts
+
+    def test_one_huge_repeat_report_fires_a_bounded_number_and_owes_nothing(self):
+        for dy, name in ((-32768, "up"), (32767, "down")):
+            for dry in (False, True):
+                with self.subTest(dy=dy, dry=dry):
+                    engine, played, step = repeating(self, dry=dry)
+                    ran, said, felt = len(engine.executor.ran), len(fired(engine)), len(played)
+                    engine._on_raw_xy(0, dy)
+                    self.assertEqual(fired(engine)[said:], [name] * mx_engine.REPEAT_MAX)
+                    self.assertEqual(len(engine.executor.ran) - ran, 0 if dry else mx_engine.REPEAT_MAX)
+                    self.assertEqual(len(played) - felt, mx_engine.REPEAT_MAX)
+                    self.assertLess(abs(engine._gesture["y"]), step)
+                    engine._on_raw_xy(0, int(math.copysign(step, dy)))  # one step more: one repeat, none owed
+                    self.assertEqual(len(fired(engine)) - said, mx_engine.REPEAT_MAX + 1)
+                    engine._on_buttons(set())
+                    self.assertEqual(engine.listener.gestures[-1]["result"], "repeat")
+
+    def test_ordinary_two_step_repeat_report_fires_twice(self):
+        engine, _, step = repeating(self, dpi=1000, step_mm=8.0)
+        said = len(fired(engine))
+        engine._on_raw_xy(3, -int(2 * step) - 1)
+        self.assertEqual(fired(engine)[said:], ["up", "up"])
+        engine._on_raw_xy(0, int(2 * step) + 2)  # turned round: down twice
+        self.assertEqual(fired(engine)[said:], ["up", "up", "down", "down"])
+        engine._on_raw_xy(0, int(step / 2))
+        self.assertEqual(len(fired(engine)) - said, 4)
+
+    def test_a_failed_repeat_owes_nothing(self):
+        engine, _, step = repeating(self)
+        engine.executor.fail = 1
+        said = len(fired(engine))
+        with self.assertRaises(OSError):
+            engine._on_raw_xy(0, -int(3 * step) - 1)
+        engine._on_raw_xy(0, -1)
+        self.assertEqual(len(fired(engine)) - said, 1)  # the failed one only; nothing fired again
 
 
 class Vibration(unittest.TestCase):
