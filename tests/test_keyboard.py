@@ -1581,7 +1581,7 @@ class Picker(unittest.TestCase):
                     self.assertIn(preset.id, keyboard_page.KEYBOARD_EXCLUDE)
                 else:
                     self.assertNotIn(preset.id, keyboard_page.KEYBOARD_EXCLUDE)
-        self.assertEqual(set(keyboard_page.KEYBOARD_EXCLUDE), {"gestures", "wheel_mode", "dpi_cycle", "dpi_shift", "flow"})
+        self.assertEqual(set(keyboard_page.KEYBOARD_EXCLUDE), {"gestures", "wheel_mode", "dpi_cycle", "dpi_shift", "flow", "spotlight"})
 
 
 # -- the keyboard following the mouse (KeyboardSide.follow) ----------------------------------------------------------

@@ -37,6 +37,11 @@ service and a D-Bus API for other programs.
   their own ring of bubbles (three levels deep), or are *dials* that you turn with the wheel or the
   thumb wheel without closing the menu: volume, tabs, zoom, undo, tracks and more. The cursor stays
   free while the ring is open. Presets are included and your own can be saved.
+- **Spotlight effects.** Hold a button and an effect follows the pointer until you let go:
+  *Highlight* darkens the screen around a clear circle, *Digital Laser* is a coloured dot, and *Still
+  Magnify* enlarges a still picture of the screen taken when you pressed (this program's own kind
+  of magnifier, not a live one). Each has its size and colour; with more than one switched on,
+  double-click and hold for the next. Buttons for all apps only, for now; see [Known limits](#known-limits).
 - **Wheels.** Pointer speed (two speeds and a precision speed), SmartShift and its threshold,
   ratchet force, natural direction, high-resolution scrolling, and what the thumb wheel does. An
   optional click, felt or heard, marks SmartShift letting the wheel go and catching it again.
@@ -100,6 +105,7 @@ each desktop allows:
 |---|---|---|---|---|
 | Ready actions for windows and the desktop | KDE's own shortcuts: all of them | `swaymsg`, `hyprctl`; a launcher, screenshots and a terminal from what is installed (fuzzel, wofi, rofi; grim and slurp) | GNOME's key combinations as it ships them | the usual key combinations (Alt+F4, Ctrl+Alt+arrows, Print, …) |
 | Actions Ring | on a layer above the windows | the same | in a window on the session's X server (XWayland), which takes no focus; a little soft where the display is scaled by a fraction | in a window the window manager leaves alone; as a panel of the ring's size where nothing composites |
+| Spotlight effects | Highlight and Digital Laser, on the layer above the windows | the same | Highlight and Digital Laser, in the XWayland window | all three, where something composites; none where nothing does |
 | Flow: the screen edge | a KWin script | a see-through line one pixel wide along the edge | not possible: use the *Move to the other computer (Flow)* action | the pointer's position is asked for |
 | Haptics: a tick on switching screens | the same KWin script | not possible | not possible | the pointer's position is asked for |
 | Flow: what was copied | KGuiAddons, else wl-clipboard | the same | wl-clipboard | Qt itself |
@@ -574,6 +580,16 @@ only files you trust.
   computer once every key the app changed is back to normal; if one cannot be given back, it stays
   here with its keys as set, and the Keyboard page says so. The keyboard's own Easy-Switch keys are
   the keyboard's: when they are used, the app is not asked.
+- **Spotlight effects are a first part.** They are set for a button of all apps, not for a key or
+  in an app profile. While one shows it covers the screen it is on (all screens with XWayland):
+  clicks and scrolling there do nothing until the button comes up, the thumb wheel's scrolling and
+  zooming included; keys and thumb wheel functions that send keys work as usual. Still Magnify shows
+  the screen as it was at the press, kept in memory only (at most 64 MiB) and dropped on release;
+  it is not offered on Wayland, where a program gets no picture of the screen without asking, and
+  live magnifying is not done yet. Without a compositing manager on X11, and on Wayland desktops
+  with neither layer-shell nor XWayland, there are no effects at all. No ring opens while a
+  Spotlight button is held. None of this was tried on a desktop yet: tests with made-up screens and
+  pictures cover it.
 - **The haptic panel does not answer while a main button is held.** With the left button down the
   mouse reports nothing for the panel, however hard it is pressed; the gesture button is reported
   all the same. So gestures made while a window is being dragged want the gesture button, not the

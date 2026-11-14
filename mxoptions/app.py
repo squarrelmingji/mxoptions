@@ -29,6 +29,7 @@ class Bridge(QObject, Listener):
     ring = Signal(str, object, object)
     pressed = Signal(object)
     ring_turn = Signal(float)
+    effect = Signal(str, object)
     gesture = Signal(object)
     event = Signal(str, object)
 
@@ -46,6 +47,9 @@ class Bridge(QObject, Listener):
 
     def on_ring_turn(self, clicks):
         self.ring_turn.emit(clicks)
+
+    def on_effect(self, event, look=None):
+        self.effect.emit(event, look)
 
     def on_gesture(self, event):
         self.gesture.emit(event)
@@ -284,6 +288,7 @@ def main(argv=None):
     store.changed.connect(config_changed)
     bridge.ring.connect(overlay.handle)
     bridge.ring_turn.connect(overlay.turn)
+    bridge.effect.connect(overlay.effect)
     overlay.opened.connect(engine.set_ring_open)
     overlay.triggered.connect(engine.ring_action)
     overlay.cue.connect(engine.feedback)

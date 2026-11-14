@@ -1054,4 +1054,25 @@ STRINGS = {
     "moving still runs the tap action.":
         "Поки кнопку утримано, рух угору збільшує масштаб, а вниз зменшує, як Ctrl з колесом. Натискання без руху "
         "й далі виконує дію натискання.",
+    # Spotlight effects
+    "Spotlight effects": "Ефекти прожектора",
+    "Highlight": "Підсвічування",
+    "Still Magnify": "Нерухома лупа",
+    "Digital Laser": "Цифрова лазерна указка",
+    "On": "Увімк.",
+    "Show this effect": "Показувати цей ефект",
+    "Size": "Розмір",
+    "Colour": "Колір",
+    "Hold the button: the effect follows the pointer until you let go. With more than one effect on, "
+    "double-click and hold for the next one. Clicks and scrolling do nothing while it shows. Still Magnify "
+    "shows the screen as it was when you pressed, and not on Wayland desktops.":
+        "Утримуйте кнопку: ефект іде за вказівником, доки ви її не відпустите. Якщо ввімкнено кілька ефектів, "
+        "двічі клацніть і утримуйте, щоб перейти до наступного. Поки ефект видно, клацання й прокрутка нічого не "
+        "роблять. Нерухома лупа показує екран таким, яким він був у мить натискання, і не працює на стільницях Wayland.",
+    "Shows the screen as it was when you pressed: a still picture, kept in memory until you let go. "
+    "Not a live magnifier.":
+        "Показує екран таким, яким він був у мить натискання: нерухомий знімок, що зберігається лише в пам'яті, "
+        "доки ви не відпустите кнопку. Це не жива лупа.",
+    "Not available on Wayland desktops.": "Недоступно на стільницях Wayland.",
+    "Not available on this desktop.": "Недоступно на цій стільниці.",
 }

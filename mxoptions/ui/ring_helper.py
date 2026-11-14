@@ -55,6 +55,8 @@ def main():
         elif do == "open":
             bubbles = message.get("bubbles")
             overlay.open(None if bubbles is None else config.clean_bubbles(bubbles))
+        elif do == "effect":
+            overlay.effect(message.get("event"), message.get("look"))  # checked there
         elif do == "close":
             overlay.close()
 

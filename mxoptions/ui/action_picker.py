@@ -5,7 +5,8 @@ import copy
 from PySide6.QtCore import QPointF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from PySide6.QtWidgets import (
-    QButtonGroup, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QStackedWidget, QVBoxLayout, QWidget,
+    QAbstractButton, QButtonGroup, QFrame, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QStackedWidget,
+    QVBoxLayout, QWidget,
 )
 
 from .. import actions, config, gestures
@@ -13,7 +14,7 @@ from ..i18n import _
 from . import icons, ring, theme
 from .editors import MacroDialog, ScriptDialog
 from .recorder import ShortcutRecorder
-from .widgets import ElidedButton, ElidedLabel, InfoButton, titled, ui_scale
+from .widgets import ElidedButton, ElidedLabel, InfoButton, Row, SliderRow, SwatchRow, Switch, hint_label, titled, ui_scale
 
 GESTURE_LABELS = {
     "tap": "Tap",
@@ -30,6 +31,9 @@ SHAPE_LABELS = {
     "circle_cw": "Circle, clockwise", "circle_ccw": "Circle, anticlockwise",
     "zigzag_h": "Shake sideways", "zigzag_v": "Shake up and down",
 }
+# "Still Magnify" is this program's own: a still picture of the screen, not a live magnifier
+EFFECT_LABELS = {"highlight": "Highlight", "magnify": "Still Magnify", "laser": "Digital Laser"}
+EFFECT_COLORS = ["#000000", "#ffffff", "#f2605d", "#2fd6a7", "#4c9bff", "#f2c744", "#ff6fa8", "#8f7bff"]
 
 
 def shape_icon(name, size=26):
@@ -335,6 +339,36 @@ class ActionPicker(QFrame):
         block.addWidget(shapes)
         layout.addWidget(self.gesture_block)
 
+        self.spotlight_block = QWidget()  # the three Spotlight effects of the button, each to open and set up
+        block = QVBoxLayout(self.spotlight_block)
+        block.setContentsMargins(0, 0, 16, 0)
+        block.setSpacing(4)
+        self._effect_rows = {}
+        for effect in config.EFFECTS:
+            row = QPushButton()
+            row.setObjectName("chip")
+            row.setCursor(Qt.CursorShape.PointingHandCursor)
+            inner = QHBoxLayout(row)
+            inner.setContentsMargins(12, 8, 12, 8)
+            name = QLabel(_(EFFECT_LABELS[effect]))
+            name.setObjectName("chipTitle")
+            value = ElidedLabel()
+            value.setObjectName("chipValue")
+            value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            for label in (name, value):
+                label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+            inner.addWidget(name)
+            inner.addWidget(value, 1)
+            row.setMinimumHeight(38)
+            row.clicked.connect(lambda _checked=False, e=effect: self._edit_effect(e))
+            block.addWidget(row)
+            self._effect_rows[effect] = (row, value)
+        block.addWidget(hint_label(_(
+            "Hold the button: the effect follows the pointer until you let go. With more than one effect on, "
+            "double-click and hold for the next one. Clicks and scrolling do nothing while it shows. Still Magnify "
+            "shows the screen as it was when you pressed, and not on Wayland desktops.")))
+        layout.addWidget(self.spotlight_block)
+
         self.list = ActionList(exclude=(frozenset() if allow_button_actions else actions.BUTTON_ONLY) | frozenset(exclude or ()))
         self.list.picked.connect(self._picked)
         layout.addWidget(self.list, 1)
@@ -433,6 +467,41 @@ class ActionPicker(QFrame):
         layout.addWidget(area, 1)
         self.stack.addWidget(drawn)
 
+        # page 4: one Spotlight effect of the button
+        self._effect = None
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 16, 0)
+        layout.setSpacing(10)
+        back = QPushButton("‹  " + _("Back"))
+        back.setObjectName("flat")
+        back.setCursor(Qt.CursorShape.PointingHandCursor)
+        back.clicked.connect(lambda: self.stack.setCurrentIndex(0))
+        layout.addWidget(back, 0, Qt.AlignmentFlag.AlignLeft)
+        self.effect_title = QLabel()
+        self.effect_title.setObjectName("pickerTitle")
+        layout.addWidget(self.effect_title)
+        self.effect_switch = Switch()
+        self.effect_switch.setAccessibleName(_("Show this effect"))
+        self.effect_switch.toggled.connect(lambda on: self._effect_changed(self._effect, "on", on))
+        layout.addWidget(Row(_("Show this effect"), control=self.effect_switch))
+        self.effect_size = SliderRow(_("Size"), *config.EFFECT_SIZE)
+        self.effect_size.slider.setAccessibleName(_("Size"))
+        self.effect_size.changed.connect(lambda value: self._effect_changed(self._effect, "size", int(value)))
+        layout.addWidget(self.effect_size)
+        colour = QLabel(_("Colour"))
+        colour.setObjectName("rowTitle")
+        layout.addWidget(colour)
+        self.effect_color = SwatchRow(EFFECT_COLORS)
+        for swatch in self.effect_color.findChildren(QAbstractButton):
+            swatch.setAccessibleName(swatch.color)
+        self.effect_color.selected.connect(lambda color: self._effect_changed(self._effect, "color", color))
+        layout.addWidget(self.effect_color)
+        self.effect_note = hint_label("")
+        layout.addWidget(self.effect_note)
+        layout.addStretch(1)
+        self.stack.addWidget(page)
+
     def show_fixed(self, title, value, text):
         """Describe a control whose function is built into the mouse."""
         self._action = None
@@ -457,6 +526,14 @@ class ActionPicker(QFrame):
         self.list.set_current(self._action)
         is_gestures = action.get("type") == "gestures"
         self.gesture_block.setVisible(is_gestures)
+        is_spotlight = action.get("type") == "spotlight"
+        self.spotlight_block.setVisible(is_spotlight)
+        if is_spotlight:
+            look = config.spotlight(action)
+            for effect, (row, value) in self._effect_rows.items():
+                state = _("On") if look[effect]["on"] else _("Off")
+                value.setText(state)
+                row.setAccessibleName(f"{_(EFFECT_LABELS[effect])}: {state}")
         if is_gestures:
             for direction, label in self._gesture_rows.items():
                 label.setText(actions.describe(action.get(direction)))
@@ -475,13 +552,47 @@ class ActionPicker(QFrame):
             self._refresh()
             self.changed.emit(None)
             return
-        if action.get("type") == "gestures":
-            if (self._action or {}).get("type") == "gestures":
+        if action.get("type") in ("gestures", "spotlight"):
+            if (self._action or {}).get("type") == action["type"]:
                 return
-            action = config.default_gestures()
+            action = config.default_gestures() if action["type"] == "gestures" else config.default_spotlight()
         self._action = action
         self._refresh()
         self.changed.emit(copy.deepcopy(action))
+
+    def _edit_effect(self, name):
+        """Set up one Spotlight effect of the button."""
+        self._effect = name
+        self._fill_effect()
+        self.stack.setCurrentIndex(4)
+
+    def _fill_effect(self):
+        look = config.spotlight(self._action)
+        effect = look[self._effect]
+        self.effect_title.setText(_(EFFECT_LABELS[self._effect]))
+        self.effect_switch.set_checked_silently(effect["on"])
+        # the one effect left on stays on: a press shows something
+        self.effect_switch.setEnabled(not effect["on"] or sum(look[name]["on"] for name in config.EFFECTS) > 1)
+        self.effect_size.set_value(effect["size"])
+        self.effect_color.set_value(effect["color"])
+        kind = ring.overlay_kind()
+        if self._effect in ring.effects_here(kind):
+            note = _("Shows the screen as it was when you pressed: a still picture, kept in memory until you let go. "
+                     "Not a live magnifier.") if self._effect == "magnify" else ""
+        elif self._effect == "magnify" and kind != ring.X11:
+            note = _("Not available on Wayland desktops.")
+        else:
+            note = _("Not available on this desktop.")
+        self.effect_note.setText(note)
+        self.effect_note.setVisible(bool(note))
+
+    def _effect_changed(self, name, key, value):
+        updated = config.spotlight(self._action)
+        updated[name][key] = value
+        self._action = config.spotlight(updated)
+        self._refresh()
+        self._fill_effect()
+        self.changed.emit(copy.deepcopy(self._action))
 
     def _edit_slot(self, slot):
         """Choose the action for one direction, the tap, or one shape of a gesture button."""

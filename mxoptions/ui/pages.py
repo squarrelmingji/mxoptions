@@ -264,8 +264,8 @@ class ButtonsPage(QWidget):
             profile = chosen_profile(self.store)
             if profile is None:
                 self.picker.edit(_(BUTTON_TITLES[key]), self.store.cfg["buttons"][key], hint)
-            else:  # gesture settings are for all apps only
-                self.picker.edit(_(BUTTON_TITLES[key]), profile["buttons"].get(key), hint, inherit=True, hide=("gestures",))
+            else:  # gesture and spotlight settings are for all apps only
+                self.picker.edit(_(BUTTON_TITLES[key]), profile["buttons"].get(key), hint, inherit=True, hide=("gestures", "spotlight"))
 
     def _changed(self, action):
         if self._key and self._key not in FIXED_BUTTONS:

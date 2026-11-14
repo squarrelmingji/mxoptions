@@ -183,7 +183,7 @@ class BubbleEditor(QFrame):
         layout.addLayout(fields)
 
         self.stack = QStackedWidget()
-        self.actions = ActionList(exclude=frozenset({"default", "gestures", "ring", "dpi_shift"}))
+        self.actions = ActionList(exclude=actions.BUTTON_ONLY)
         self.actions.picked.connect(lambda action: self.changed.emit("action", action))
         self.stack.addWidget(self.actions)
         folder = QWidget()

@@ -63,6 +63,7 @@ RUMBLE_STEPS = ((0.34, "light"), (0.67, "medium"), (float("inf"), "strong"))
 RUMBLE_TEST = ((0.0, 0.2), (0.45, 0.5), (0.9, 1.0), (1.5, 0.0))  # the test: (s from its start, strength)
 EXPECT_FOR = 12.0    # s the mouse is looked for more often after the other computer sent it here
 EXPECT_INTERVAL = 0.1
+EFFECT_AGAIN = 0.4   # s: a press of a Spotlight button this soon after a short one of it shows its next effect (own)
 FRONT_DELAY = 0.3    # s another app has to stay in front before the keys do what its profile says: the last one counts
 HID_BUTTONS = ("left", "right", "middle", "back", "forward")  # bit order of the receiver's mouse report
 
@@ -100,6 +101,10 @@ class Listener:
         """The Actions Ring from a button or a key. "down" opens ``bubbles`` (checked) as ring number ``session``;
         "up" and "cancel" without a number are for the ring held; "cancel" with a number closes every ring of the
         engine up to it."""
+
+    def on_effect(self, event, look=None):
+        """Spotlight from a mouse button: "down" shows ``look`` ({"effect", "size", "color"}) at the pointer; "up" or
+        "cancel" ends it. Every "down" is followed by exactly one of them."""
 
     def on_pressed(self, keys):
         """Buttons held down right now, as a frozenset of button keys (plus "left"/"right")."""
@@ -150,6 +155,9 @@ class Engine:
         self._raw_fresh = set()    # buttons whose raw XY reporting was (re)armed and not used since
         self._ring_by = None  # who holds the Actions Ring: ("mouse" | "keyboard", control id), or None
         self._ring_open = False
+        self._effect_by = None     # the button (control id) whose Spotlight effect is on, or None
+        self._effect_last = None   # (control id, pressed, released or None) of the last Spotlight press
+        self._effect_pick = {}     # button key -> which of its switched-on effects shows; never saved
         self._dpi_alt = False
         self._dpi_shift = False
         self._dpi_override = None  # set by another program until it gives the speed back
@@ -516,6 +524,9 @@ class Engine:
             if self._ring_by == ("mouse", cid):
                 self._ring_by = None
                 self.listener.on_ring("cancel", self._ring_session)  # a ring another program opened stays
+            self._effect_pick.pop(key, None)
+            if self._effect_by == cid:
+                self._effect_end("cancel")
             held = self._held_actions.pop(cid, None)
             if held is not None and self.executor:
                 self.executor.release(held)
@@ -678,6 +689,7 @@ class Engine:
         self._dpi_shift = False
         self._flow_arm(None)
         self._rumble["level"] = 0.0
+        self._effect_end("cancel")
         self._ring_gone("mouse")
         self._publish_pressed()
 
@@ -1155,6 +1167,8 @@ class Engine:
             self._show_gesture(self._gesture)
         elif kind == "ring":
             self._ring_event(("mouse", cid), "down")
+        elif kind == "spotlight":
+            self._effect_down(cid, key, action)
         elif kind not in ("default", "none"):
             self._held_actions[cid] = action
             self.executor.press(action)
@@ -1165,10 +1179,39 @@ class Engine:
             self._show_gesture(gesture, self._finish_gesture(gesture))
         elif self._ring_by == ("mouse", cid):
             self._ring_event(self._ring_by, "up")
+        elif self._effect_by == cid:
+            self._effect_last = (cid, self._effect_last[1], time.monotonic())
+            self._effect_end("up")
         else:
             action = self._held_actions.pop(cid, None)
             if action:
                 self.executor.release(action)
+
+    def _effect_down(self, cid, key, action):
+        """A Spotlight button went down: its effect shows until it comes up. One effect at a time, the first button's.
+        Pressed again right after a short press, it shows the next effect that is switched on."""
+        if self._effect_by is not None:
+            return
+        look = config.spotlight(action)
+        shown = [name for name in config.EFFECTS if look[name]["on"]]
+        now, last = time.monotonic(), self._effect_last
+        pick = self._effect_pick.get(key, 0) % len(shown)
+        if (last is not None and last[0] == cid and last[2] is not None
+                and last[2] - last[1] <= EFFECT_AGAIN and now - last[2] <= EFFECT_AGAIN):
+            pick = (pick + 1) % len(shown)
+        self._effect_pick[key] = pick
+        self._effect_by, self._effect_last = cid, (cid, now, None)
+        name = shown[pick]
+        self.listener.on_effect("down", {"effect": name, "size": look[name]["size"], "color": look[name]["color"]})
+
+    def _effect_end(self, event):
+        """The Spotlight effect ends: "up" (its button came up) or "cancel" (the button changed or the mouse went)."""
+        if self._effect_by is None:
+            return
+        self._effect_by = None
+        if event == "cancel":
+            self._effect_last = None  # no press to count a double-click from
+        self.listener.on_effect(event)
 
     # -- gestures -----------------------------------------------------------
 

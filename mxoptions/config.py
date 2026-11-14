@@ -81,6 +81,36 @@ def default_gestures():
     }
 
 
+# Spotlight effects of a button (action "spotlight"): in this order they are listed and switched through
+EFFECTS = ("highlight", "magnify", "laser")
+EFFECT_DEFAULTS = {"highlight": {"on": True, "size": 50, "color": "#000000"},
+                   "magnify": {"on": False, "size": 50, "color": "#ffffff"},
+                   "laser": {"on": False, "size": 50, "color": "#f2605d"}}
+EFFECT_SIZE = (1, 100)
+EFFECT_COLOR = re.compile(r"#[0-9a-fA-F]{6}\Z")
+
+
+def default_spotlight():
+    return {"type": "spotlight", **copy.deepcopy(EFFECT_DEFAULTS)}
+
+
+def spotlight(action):
+    """A whole, valid spotlight action made from ``action``: each effect switched on or off, its size and colour,
+    defaults where a value is missing or of the wrong kind, nothing else. At least one effect stays on. Never raises."""
+    action = action if isinstance(action, dict) else {}
+    clean = {"type": "spotlight"}
+    for name in EFFECTS:
+        given, default = action.get(name), EFFECT_DEFAULTS[name]
+        given = given if isinstance(given, dict) else {}
+        on, size, color = given.get("on"), given.get("size"), given.get("color")
+        clean[name] = {"on": on if type(on) is bool else default["on"],
+                       "size": min(EFFECT_SIZE[1], max(EFFECT_SIZE[0], size)) if type(size) is int else default["size"],
+                       "color": color.lower() if type(color) is str and EFFECT_COLOR.match(color) else default["color"]}
+    if not any(clean[name]["on"] for name in EFFECTS):
+        clean["highlight"]["on"] = True
+    return clean
+
+
 MAX_BUBBLES = 8   # per ring level
 MAX_RING_DEPTH = 3
 _OLD_RING = ("copy", "paste", "screenshot_region", "play_pause", "overview", "emoji", "lock", "krunner")
@@ -664,6 +694,8 @@ def _sanitize(cfg):
             if gestures.hold_mode(action):  # pan or zoom while held; anything else: swipes
                 clean["mode"] = action["mode"]
             cfg["buttons"][key] = clean
+        elif action["type"] == "spotlight":
+            cfg["buttons"][key] = spotlight(action)
         else:
             cfg["buttons"][key] = action
     cfg["ring"]["bubbles"] = _sanitize_bubbles(_migrate_ring(cfg["ring"]), 1) or default_bubbles()

@@ -19,6 +19,9 @@ An action is a plain JSON-able dict:
     {"type": "gestures", "tap": a, "up": a, "down": a, "left": a, "right": a}
                                              with "mode": "pan" | "zoom" it pans or zooms while held instead
     {"type": "ring"}                         open the Actions Ring
+    {"type": "spotlight", "highlight": e, "magnify": e, "laser": e}
+                                             an effect at the pointer while held, e = {"on", "size", "color"}
+                                             (config.spotlight); mouse buttons only, nothing for the Executor
     {"type": "hook", "name": "..."}          only announce it on D-Bus: another program decides what happens
 """
 
@@ -84,6 +87,7 @@ _PRESETS = [
     ("forward", "mouse", "Forward", "go-next", button("BTN_EXTRA")),
     ("gestures", "mouse", "Gestures", "transform-move", {"type": "gestures"}),
     ("ring", "mouse", "Actions Ring", "view-grid", {"type": "ring"}),
+    ("spotlight", "mouse", "Spotlight effects", "view-preview", {"type": "spotlight"}),
     ("wheel_mode", "mouse", "Switch wheel mode", "media-playlist-repeat", {"type": "wheel_mode"}),
     ("dpi_cycle", "mouse", "Switch pointer speed", "speedometer", {"type": "dpi_cycle"}),
     ("dpi_shift", "mouse", "Precision mode (hold)", "crosshairs", {"type": "dpi_shift"}),
@@ -220,7 +224,7 @@ def dial_available(name):
 
 
 # Presets that only make sense on a physical button, not inside a gesture or ring slot.
-BUTTON_ONLY = {"default", "gestures", "ring", "dpi_shift"}
+BUTTON_ONLY = {"default", "gestures", "ring", "dpi_shift", "spotlight"}
 
 _KEY_LABELS = {
     "LEFTCTRL": "Ctrl", "RIGHTCTRL": "Ctrl", "LEFTSHIFT": "Shift", "RIGHTSHIFT": "Shift",
@@ -243,11 +247,11 @@ def keys_label(key_names):
 
 
 def find_preset(action):
-    """Return the catalogue preset equal to ``action`` (gestures match by type), or None."""
+    """Return the catalogue preset equal to ``action`` (gestures and spotlight match by type), or None."""
     if not action:
         return None
-    if action.get("type") == "gestures":
-        return PRESET_BY_ID["gestures"]
+    if action.get("type") in ("gestures", "spotlight"):
+        return PRESET_BY_ID[action["type"]]
     for preset in PRESETS:
         if preset.action == action:
             return preset

@@ -14,7 +14,7 @@ from .pages import FirmwareQuery, ScrollPage, _header
 from .widgets import Card, Row, Segmented, SliderRow, Switch, hint_label
 
 # What a key may not do: what only makes sense on the mouse (catalogue ids, see config.KEYBOARD_ACTIONS)
-KEYBOARD_EXCLUDE = ("gestures", "wheel_mode", "dpi_cycle", "dpi_shift", "flow")
+KEYBOARD_EXCLUDE = ("gestures", "wheel_mode", "dpi_cycle", "dpi_shift", "flow", "spotlight")
 # Names for the keys whose control ids are known (Solaar's list of them): every other key goes by its id.
 KEY_LABELS = {
     0x00D1: "Easy-Switch 1", 0x00D2: "Easy-Switch 2", 0x00D3: "Easy-Switch 3",

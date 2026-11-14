@@ -72,9 +72,9 @@ dbus-monitor --session "type='signal',interface='org.mxoptions.Mouse1'"
 | `SwitchHost(i channel)` | `b` | Easy-Switch to another paired computer (channels count from 1). The mouse leaves this computer. |
 | `Trigger(s action)` | `b` | Runs an action: a catalogue id (see `ListActions`) or an action as JSON (see below). False if it is not an action, or one this desktop has no way of doing. |
 | `ListActions()` | `as` | Ids of the catalogue actions, e.g. `copy`, `play_pause`, `overview`. |
-| `OpenRing()` | `b` | Opens the user's Actions Ring at the pointer; it waits for a click. |
-| `ShowRing(s bubbles)` | `b` | Opens a ring of your own for one use (see below). |
-| `CloseRing()` | | Dismisses the ring if it is open. |
+| `OpenRing()` | `b` | Opens the user's Actions Ring at the pointer; it waits for a click. True means the ring was asked for, not that it is on screen yet: on GNOME with Wayland it shows a moment later, if at all. False while a ring is open, while a Spotlight button is held (whether or not its effect shows), or with nothing to show. |
+| `ShowRing(s bubbles)` | `b` | Opens a ring of your own for one use (see below); true and false as for `OpenRing`. |
+| `CloseRing()` | | Dismisses the ring if it is open, and a Spotlight effect on screen too: a Spotlight button still held shows nothing more until it is pressed again. |
 | `Get(s path)` | `s` | One setting as JSON, e.g. `pointer.dpi`, `buttons.back`, `ring.bubbles.0.label`. Empty if there is no such path. |
 | `Set(s path, s value)` | `b` | Changes one existing setting and saves it, exactly as if the user had done so in the window. `value` is JSON; text that is not valid JSON is taken as a plain string. |
 | `GetConfig()` | `s` | The whole configuration as JSON. |
@@ -155,7 +155,11 @@ click elsewhere or 20 seconds without movement.
 
 Buttons additionally take `{"type": "default"}` (leave it to the mouse), `{"type": "gestures",
 "tap": …, "up": …, "down": …, "left": …, "right": …}`, `{"type": "ring"}` and
-`{"type": "dpi_shift"}`; these cannot be passed to `Trigger`.
+`{"type": "dpi_shift"}` and `{"type": "spotlight", "highlight": e, "magnify": e, "laser": e}` with each
+`e` `{"on": bool, "size": 1–100, "color": "#rrggbb"}` (Spotlight effects while the button is held; at
+least one on; anything missing or of the wrong kind becomes its default); these cannot be passed to
+`Trigger`. Keys and the buttons of `mouse.profiles` cannot have `spotlight`. Versions before it keep
+such a button as it is and do nothing with it.
 
 A `gestures` action may have `"mode": "pan"` or `"zoom"`: while held, movement scrolls the page (both
 axes) or zooms (Ctrl and the wheel, up zooms in) instead of swipes; a press without movement still runs
