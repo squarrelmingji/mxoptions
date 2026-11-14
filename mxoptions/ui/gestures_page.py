@@ -242,6 +242,18 @@ class GesturesPage(ScrollPage):
         self.button = Segmented([(key, _(BUTTON_TITLES[key])) for key in config.GESTURE_BUTTONS])
         self.button.selected.connect(lambda key: self.store.assign_role("gestures", key))
         card.add(Row(_("Gestures are on"), _("The Actions Ring moves to the other thumb button."), self.button))
+        self.mode = Segmented([("swipes", _("Swipes")), ("pan", _("Pan")), ("zoom", _("Zoom"))])
+        self.mode.setAccessibleName(_("Holding it and moving"))
+        self.mode.selected.connect(self._set_mode)
+        self.mode_row = card.add(Row(_("Holding it and moving"), None, self.mode))
+        self.move_speed = card.add(SliderRow(_("Speed"), 0.25, 3.0, 0.05, "{:.2f}×", hint=_(
+            "How far the page moves, or how quickly it zooms, for the same movement of the hand.")))
+        self.move_speed.changed.connect(lambda value: self._set("move_speed", round(value, 2)))
+        self.move_reverse = Switch()
+        self.move_reverse.setAccessibleName(_("Reverse direction"))
+        self.move_reverse.toggled.connect(lambda on: self._set("move_reverse", on))
+        self.reverse_row = card.add(Row(_("Reverse direction"), None, self.move_reverse))
+        self.button_card = card
         right.addWidget(card)
         right.addStretch(1)
         columns.addLayout(right, 6)
@@ -294,6 +306,17 @@ class GesturesPage(ScrollPage):
     def _set(self, key, value):
         self.store.set("gestures", key, value)
 
+    def _set_mode(self, mode):
+        key = gesture_button(self.store.cfg)
+        if key is None:
+            return
+        action = copy.deepcopy(self.store.cfg["buttons"][key])
+        if mode in gestures.HOLD_MODES:
+            action["mode"] = mode
+        else:
+            action.pop("mode", None)  # swipes: left out, as settings saved before have it
+        self.store.set_button(key, action)
+
     # -- vibration patterns ---------------------------------------------------
 
     def _cue_row(self, cue, title):
@@ -343,6 +366,12 @@ class GesturesPage(ScrollPage):
     def _refresh(self):
         cfg = self.store.cfg
         settings = cfg["gestures"]
+        key = gesture_button(cfg)
+        action = cfg["buttons"][key] if key else {}
+        mode = gestures.hold_mode(action) or "swipes"
+        swipes = mode == "swipes"  # pan and zoom read no swipe: those rows wait
+        for row in (self.trigger_row, self.step_mm, self.dead, self.bias):
+            row.setEnabled(swipes)
         self.trigger.set_value(settings["trigger"])
         self.trigger_row.set_hint({
             "release": _("The swipe is judged as a whole when you let go of the button. The most accurate."),
@@ -351,7 +380,7 @@ class GesturesPage(ScrollPage):
         }[settings["trigger"]])
         self.min_mm.set_value(settings["min_mm"])
         self.far_mm.set_value(settings["far_mm"])
-        self.far_mm.setEnabled(settings["trigger"] != "release")
+        self.far_mm.setEnabled(swipes and settings["trigger"] != "release")
         self.step_mm.set_value(settings["step_mm"])
         self.recognition.set_row_visible(self.step_mm, settings["trigger"] == "repeat")
         self.dead.set_value(settings["dead"])
@@ -371,10 +400,25 @@ class GesturesPage(ScrollPage):
         for widget in (self.preset_row, self.cue_grid, self.per_direction_row, self.direction_grid):
             widget.setEnabled(settings["haptic"])
 
-        key = gesture_button(cfg)
         self.button.set_value(key)
-        action = cfg["buttons"][key] if key else {}
+        self.mode.set_value(mode)
+        self.mode.setEnabled(key is not None)
+        self.mode_row.set_hint({
+            "swipes": _("Each way you move runs its own action, set under \"Change what the gestures do…\"."),
+            "pan": _("While the button is held, the page follows your hand: up, down and sideways. The pointer stays "
+                     "where it is. A press without moving still runs the tap action."),
+            "zoom": _("While the button is held, move up to zoom in and down to zoom out, as Ctrl and the wheel do. "
+                      "A press without moving still runs the tap action."),
+        }[mode])
+        self.move_speed.set_value(settings["move_speed"])
+        self.move_reverse.set_checked_silently(settings["move_reverse"])
+        for row in (self.move_speed, self.reverse_row):
+            self.button_card.set_row_visible(row, not swipes)
         labels = {name: actions.describe(action.get(name)) for name in ("tap",) + gestures.DIRECTIONS} if key else {}
+        if mode == "pan":
+            labels.update(dict.fromkeys(gestures.DIRECTIONS, _("Pan")))
+        elif mode == "zoom":
+            labels.update(up=_("Zoom in"), down=_("Zoom out"), left="", right="")
         self.pad.set_settings(settings, labels)
         self.actions_button.setEnabled(key is not None)
         self._tap_label = labels.get("tap", "")
@@ -410,6 +454,8 @@ class GesturesPage(ScrollPage):
             self.caption.setText(_("Shape: {}").format(_(SHAPE_LABELS[result])))
         elif result == "unknown":
             self.caption.setText(_("A shape with no action"))
+        elif result in gestures.HOLD_MODES:
+            self.caption.setText(f"{_('Pan') if result == 'pan' else _('Zoom')}  ·  {_('{:.0f} mm').format(length)}")
         else:
             self.caption.setText("{}  {}  ·  {}  ·  {}".format(
                 _AXES[result][1], _(DIRECTION_NAMES[result]), _("{:.0f} mm").format(length),

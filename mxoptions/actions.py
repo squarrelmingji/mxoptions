@@ -17,6 +17,7 @@ An action is a plain JSON-able dict:
     {"type": "host", "host": n}              Easy-Switch to channel n
     {"type": "flow"}                         move to the other computer of Flow, clipboard included
     {"type": "gestures", "tap": a, "up": a, "down": a, "left": a, "right": a}
+                                             with "mode": "pan" | "zoom" it pans or zooms while held instead
     {"type": "ring"}                         open the Actions Ring
     {"type": "hook", "name": "..."}          only announce it on D-Bus: another program decides what happens
 """
@@ -31,7 +32,7 @@ import threading
 import time
 import weakref
 
-from . import device, environment, paths
+from . import device, environment, gestures, paths
 from .i18n import _
 
 log = logging.getLogger(__name__)
@@ -255,6 +256,8 @@ def find_preset(action):
 
 def describe(action):
     """Human-readable label of an action."""
+    if isinstance(action, dict) and action.get("type") == "gestures" and gestures.hold_mode(action):
+        return _(gestures.HOLD_MODES[action["mode"]])  # before find_preset, which names every gestures action alike
     preset = find_preset(action)
     if preset:
         return _(preset.label)

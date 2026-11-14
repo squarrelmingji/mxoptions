@@ -1004,4 +1004,21 @@ STRINGS = {
     "same in every app.":
         "Поки попереду {}. «Як в усіх програмах»: функція, задана для всіх програм. Напрямок, швидкість і кроки "
         "однакові в усіх програмах.",
+    "Holding it and moving": "Утримання й рух",
+    "Swipes": "Напрямки",
+    "Pan": "Панорама",
+    "Pan (hold and move)": "Панорама (утримати й рухати)",
+    "Zoom (hold and move)": "Масштаб (утримати й рухати)",
+    "How far the page moves, or how quickly it zooms, for the same movement of the hand.":
+        "Наскільки зсувається сторінка або як швидко змінюється масштаб за той самий рух руки.",
+    "Each way you move runs its own action, set under \"Change what the gestures do…\".":
+        "Кожен напрямок руху виконує власну дію, задану в «Змінити дії жестів…».",
+    "While the button is held, the page follows your hand: up, down and sideways. The pointer stays where it is. "
+    "A press without moving still runs the tap action.":
+        "Поки кнопку утримано, сторінка рухається за рукою: вгору, вниз і вбік. Вказівник лишається на місці. "
+        "Натискання без руху й далі виконує дію натискання.",
+    "While the button is held, move up to zoom in and down to zoom out, as Ctrl and the wheel do. A press without "
+    "moving still runs the tap action.":
+        "Поки кнопку утримано, рух угору збільшує масштаб, а вниз зменшує, як Ctrl з колесом. Натискання без руху "
+        "й далі виконує дію натискання.",
 }

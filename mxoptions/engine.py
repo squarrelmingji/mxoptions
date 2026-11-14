@@ -36,6 +36,12 @@ BATTERY_INTERVAL = 300.0
 GESTURE_TRACE_INTERVAL = 0.03  # s between two live updates for the settings page
 GESTURE_TRACE_POINTS = 600
 GESTURE_CUE_GAP = 0.07         # s between two "direction changed" ticks at most
+PAN_MM = 8.0  # mm of hand travel that pan or zoom one wheel detent at speed 1 (own choice; speed slider tunes it)
+# Detents in one scroll from pan or zoom at most: wheel messages carry distance in 16 signed bits (Windows
+# WM_MOUSEWHEEL high word), so stay inside that. Conservative own choice, not SendInput field limit (DWORD).
+MOVE_MAX = 32767 // vinput.NOTCH
+# ponytail: fixed gap between zoom steps, next report checks it; adapt to queue depth if fast zoom feels steppy
+ZOOM_GAP = 0.05  # s of other engine work at least between two zoom steps of held button (each holds Ctrl ~16 ms)
 # SmartShift lets the wheel go when it is spun faster than its threshold and catches it again when it
 # stops, but the mouse only announces a mode change made with the button. So the engine watches the
 # wheel's speed itself to know when that happens.
@@ -111,7 +117,8 @@ class Listener:
     def on_gesture(self, event):
         """A gesture in progress or just finished, while the settings window is watching. ``event`` has
         "points" (the movement so far, in mm), "fired" (directions recognised so far) and, once the
-        button is up, "result": a direction, "tap", "cancelled", "diagonal" or "repeat"."""
+        button is up, "result": a direction, "tap", "cancelled", "diagonal" or "repeat"; "pan" or "zoom" when
+        button with such mode panned or zoomed."""
 
 
 class Engine:
@@ -374,6 +381,8 @@ class Engine:
             self._device_action({"type": "wheel_mode", "mode": item[1]}, "trigger")
         elif kind == "practice":
             self._gesture_dry = item[1]
+            if self._gesture_dry and self._gesture and gestures.hold_mode(self._gesture["action"]):
+                self._gesture["fraction"] = [0.0, 0.0]  # live movement waiting: never sent once practising
         elif kind == "flow":
             self._flow_leave(item[1], item[2])
         elif kind == "rumble_nudge":
@@ -1108,7 +1117,9 @@ class Engine:
             self._gesture = {"cid": cid, "action": action, "x": 0, "y": 0, "path": 0, "events": 0, "fired": [],
                              "axis": None, "done": False, "since": time.monotonic(), "skip": cid in self._raw_fresh,
                              "armed": False, "pointing": None, "cued": 0.0,
-                             "shapes": bool(action.get("shapes")),  # the button has shapes to draw: judge on release
+                             # the button has shapes to draw: judge on release (never while it pans or zooms)
+                             "shapes": bool(action.get("shapes")) and not gestures.hold_mode(action),
+                             "engaged": False, "fraction": [0.0, 0.0], "zoomed": 0.0,  # pan and zoom
                              "total": [0, 0], "trace": [(0.0, 0.0)], "shown": 0.0}
             self._raw_fresh.discard(cid)
             self._show_gesture(self._gesture)
@@ -1139,6 +1150,12 @@ class Engine:
         """The button came up. Returns what the gesture turned out to be."""
         if gesture["fired"]:
             return gesture["fired"][-1] if len(gesture["fired"]) == 1 else "repeat"
+        mode = gestures.hold_mode(gesture["action"])
+        if gesture["engaged"]:
+            if mode == "zoom":
+                self._zoom_due(gesture)  # last whole detents, if ZOOM_GAP held them back
+            log.info("gesture: %s (%d reports, %.2f s)", mode, gesture["events"], time.monotonic() - gesture["since"])
+            return mode  # it panned or zoomed: no tap, no swipe after it
         settings = self.cfg["gestures"]
         minimum = settings["min_mm"] * self._counts_per_mm()
         if gesture["shapes"]:
@@ -1158,7 +1175,7 @@ class Engine:
                 if not self._gesture_dry:
                     self.executor.trigger(action)
                 return name
-        if math.hypot(gesture["x"], gesture["y"]) >= minimum:
+        if not mode and math.hypot(gesture["x"], gesture["y"]) >= minimum:  # pan, zoom: never a swipe
             direction = gestures.direction(gesture["x"], gesture["y"], settings["dead"], settings["bias"])
             if direction is None:
                 log.info("gesture: ignored, too diagonal (x=%d y=%d)", gesture["x"], gesture["y"])
@@ -1219,6 +1236,12 @@ class Engine:
         gesture["total"][1] += dy
         if len(gesture["trace"]) < GESTURE_TRACE_POINTS:
             gesture["trace"].append((gesture["total"][0] / per_mm, gesture["total"][1] / per_mm))
+        mode = gestures.hold_mode(gesture["action"])
+        if mode:
+            self._hold_move(gesture, mode, dx, dy, per_mm, now)
+            if now - gesture["shown"] >= GESTURE_TRACE_INTERVAL:
+                self._show_gesture(gesture)
+            return
 
         settings = self.cfg["gestures"]
         if gesture["axis"] is None and math.hypot(gesture["x"], gesture["y"]) >= settings["min_mm"] * per_mm:
@@ -1257,6 +1280,51 @@ class Engine:
                 gesture["x"], gesture["y"] = (0, value) if axis else (value, 0)
         if now - gesture["shown"] >= GESTURE_TRACE_INTERVAL:
             self._show_gesture(gesture)
+
+    def _hold_move(self, gesture, mode, dx, dy, per_mm, now):
+        """Pan or zoom: movement of held button scrolls as it comes, once it left press zone. Work per report is
+        same for any movement: one scroll each way, or one zoom step at most."""
+        settings = self.cfg["gestures"]
+        if not gesture["engaged"]:
+            if math.hypot(gesture["x"], gesture["y"]) < settings["min_mm"] * per_mm:
+                return  # still a press: it may be a tap
+            gesture["engaged"] = True
+            self._gesture_cue("armed")
+        if self._gesture_dry or not self.vinput:
+            return
+        rate = vinput.NOTCH / (PAN_MM * per_mm) * settings["move_speed"] * (-1 if settings["move_reverse"] else 1)
+        fraction = gesture["fraction"]
+        if mode == "zoom":
+            fraction[1] -= dy * rate  # moving up zooms in, as Ctrl and wheel turned up do
+            if now - gesture["zoomed"] >= ZOOM_GAP:
+                self._zoom_due(gesture)
+            return
+        # pan: page follows hand, as paper dragged on desk
+        fraction[1] += dy * rate
+        fraction[0] -= dx * rate
+        limit = MOVE_MAX * vinput.NOTCH
+        whole = [max(-limit, min(limit, int(value))) for value in fraction]
+        fraction[0] -= int(fraction[0])  # beyond limit: dropped, not carried into later reports
+        fraction[1] -= int(fraction[1])
+        if whole[1]:
+            self.vinput.scroll(whole[1])
+        if whole[0]:
+            self.vinput.hscroll(whole[0])
+
+    def _zoom_due(self, gesture):
+        """Zoom by whole detents held button moved since last step, as one Ctrl and wheel step."""
+        fraction = gesture["fraction"]
+        steps = int(fraction[1] / vinput.NOTCH)
+        if not steps:
+            return
+        fraction[1] -= steps * vinput.NOTCH
+        try:
+            self._zoom(1 if steps > 0 else -1, min(abs(steps), MOVE_MAX))  # beyond MOVE_MAX: dropped
+        finally:
+            gesture["zoomed"] = time.monotonic()  # from end of step: other work gets ZOOM_GAP, even after error
+        if gesture["zoomed"] - gesture["cued"] >= GESTURE_CUE_GAP:
+            gesture["cued"] = gesture["zoomed"]
+            self._gesture_cue("repeat")
 
     def _show_gesture(self, gesture, result=None):
         """Feed the live view on the gestures page."""
@@ -1363,11 +1431,14 @@ class Engine:
                 self._last_tick = now
                 self._cue(device.WAVE_TICK)
 
-    def _zoom(self, direction):
+    def _zoom(self, direction, steps=1):
+        """Ctrl and wheel turned ``steps`` detents in one go (thumb wheel: one). Two pauses, whatever ``steps``."""
         if not self.vinput:
             return
         self.vinput.press(["KEY_LEFTCTRL"])
-        time.sleep(0.008)
-        self.vinput.scroll(direction * vinput.NOTCH)
-        time.sleep(0.008)
-        self.vinput.release(["KEY_LEFTCTRL"])
+        try:
+            time.sleep(0.008)
+            self.vinput.scroll(direction * steps * vinput.NOTCH)
+            time.sleep(0.008)
+        finally:
+            self.vinput.release(["KEY_LEFTCTRL"])  # never left held, whatever went wrong; other holders keep it

@@ -194,6 +194,27 @@ class Settings(unittest.TestCase):
         self.assertTrue(self.api.Set("keyboard.keys.0x00c7", json.dumps(stoppable)))
         self.assertEqual(json.loads(self.api.Get("keyboard.keys.0x00c7")), stoppable)
 
+    def test_a_gesture_button_can_be_set_to_pan_and_its_speed_changed(self):  # A01
+        plain = copy.deepcopy(self.store.cfg["buttons"]["gesture"])
+        pan = dict(plain, mode="pan")
+        self.assertTrue(self.api.Set("buttons.gesture", json.dumps(pan)))
+        self.assertEqual(self.store.cfg["buttons"]["gesture"], pan)
+        self.assertTrue(self.api.Set("buttons.gesture.mode", json.dumps("zoom")))  # there now: one field will do
+        self.assertTrue(self.api.Set("gestures.move_speed", json.dumps(2.0)))
+        self.assertTrue(self.api.Set("gestures.move_reverse", json.dumps(True)))
+        self.assertEqual((self.store.cfg["buttons"]["gesture"]["mode"], self.store.cfg["gestures"]["move_speed"],
+                          self.store.cfg["gestures"]["move_reverse"]), ("zoom", 2.0, True))
+        before = copy.deepcopy(self.store.cfg)
+        self.assertFalse(self.api.Set("gestures.move_reverse", json.dumps("yes")))
+        for value in ("rotate", ["pan"], {"pan": 1}, True):
+            with self.subTest(leaf=value):
+                self.assertFalse(self.api.Set("buttons.gesture.mode", json.dumps(value)))
+                self.assertEqual(self.store.cfg, before)
+        for value in (["pan"], {"pan": 1}, True):
+            with self.subTest(whole=value):  # as before this mode: the action is taken, what it cannot have left out
+                self.assertTrue(self.api.Set("buttons.gesture", json.dumps(dict(plain, mode=value))))
+                self.assertEqual(self.store.cfg["buttons"]["gesture"], plain)
+
 
 class KeyChooser(unittest.TestCase):
     """The keys on the Keys page, picked and given an action with the keyboard alone."""

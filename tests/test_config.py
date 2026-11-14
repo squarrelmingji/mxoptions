@@ -6,6 +6,7 @@ import unittest
 
 import tests.support  # noqa: F401  (puts the project on the path)
 from mxoptions import actions, config
+from mxoptions import gestures, i18n_uk
 
 
 class Defaults(unittest.TestCase):
@@ -561,6 +562,77 @@ class StopOnPress(unittest.TestCase):
         loaded, saved = self.load(stored)
         self.assertEqual((loaded["buttons"]["back"], loaded["keyboard"]["keys"]), (self.MACRO, {"0x0f01": self.MACRO}))
         self.assertEqual(saved, stored)
+
+
+class HoldModeSettings(unittest.TestCase):
+    """buttons.<key>.mode ("pan", "zoom": what a gestures button does while held) and gestures.move_speed,
+    gestures.move_reverse."""
+
+    SHAPES = {"down_right": {"type": "keys", "keys": ["KEY_F9"]}}
+    load = Migration.load
+
+    @staticmethod
+    def gesture(**fields):
+        cfg = copy.deepcopy(config.DEFAULTS)
+        cfg["buttons"]["gesture"].update(fields)
+        return config.clean(cfg)["buttons"]["gesture"]
+
+    def test_pan_and_zoom_are_kept_anything_else_is_left_out(self):  # C01
+        plain = self.gesture(shapes=self.SHAPES)
+        for mode in ("pan", "zoom"):
+            with self.subTest(mode=mode):
+                self.assertEqual(self.gesture(mode=mode, shapes=self.SHAPES), dict(plain, mode=mode))
+                self.assertEqual(gestures.hold_mode({"type": "gestures", "mode": mode}), mode)
+        for mode in ("swipes", "rotate", None, 1, "PAN", True, ["pan"], {"pan": 1}):
+            with self.subTest(mode=mode):
+                self.assertEqual(self.gesture(mode=mode, shapes=self.SHAPES), plain)  # directions, shapes kept
+                self.assertIsNone(gestures.hold_mode({"type": "gestures", "mode": mode}))
+        self.assertIsNone(gestures.hold_mode({"type": "gestures"}))
+
+    def test_speed_is_clamped_and_reverse_is_true_or_false(self):  # C02
+        for value, kept in ((0, 0.25), (9, 4.0), ("x", 1.0), (True, 1.0), (None, 1.0), (2.5, 2.5)):
+            with self.subTest(speed=value):
+                self.assertEqual(config.clean({"gestures": {"move_speed": value}})["gestures"]["move_speed"], kept)
+        for value, kept in ((1, True), ("yes", True), (0, False), (None, False), (False, False)):
+            with self.subTest(reverse=value):
+                self.assertIs(config.clean({"gestures": {"move_reverse": value}})["gestures"]["move_reverse"], kept)
+
+    def test_pan_and_its_settings_survive_export_and_import_local_flow_stays_local(self):  # C03
+        cfg = copy.deepcopy(config.DEFAULTS)
+        cfg["buttons"]["gesture"]["mode"] = "zoom"
+        cfg["buttons"]["middle"] = dict(config.default_gestures(), mode="pan")
+        cfg["gestures"].update(move_speed=2.5, move_reverse=True)
+        cfg["flow"].update(id="here", channel=2)
+        cfg = config.clean(cfg)
+        current = copy.deepcopy(cfg)
+        current["flow"].update(id="mine", channel=1)
+        imported = config.import_data(config.export_data(cfg), current)
+        self.assertEqual((imported["buttons"]["gesture"]["mode"], imported["buttons"]["middle"]["mode"]), ("zoom", "pan"))
+        self.assertEqual((imported["gestures"]["move_speed"], imported["gestures"]["move_reverse"]), (2.5, True))
+        self.assertEqual((imported["flow"]["id"], imported["flow"]["channel"]), ("mine", 1))
+
+    def test_an_app_profile_cannot_pan_or_carry_the_pan_settings(self):  # C04
+        pan = dict(config.default_gestures(), mode="pan")
+        self.assertFalse(config.profile_button_action(pan))
+        profile = {"app": "kate", "name": "Kate", "buttons": {"gesture": pan, "middle": self.SHAPES["down_right"]},
+                   "ring": None}
+        self.assertEqual(list(config.mouse_profile(copy.deepcopy(profile))["buttons"]), ["middle"])
+        cfg = config.clean({"mouse": {"profiles": [profile]}})
+        self.assertEqual(config.mouse_buttons(cfg, "kate")["gesture"], config.DEFAULTS["buttons"]["gesture"])
+        self.assertEqual(set(cfg["mouse"]["profiles"][0]), {"app", "name", "buttons", "ring"})
+
+    def test_settings_saved_before_come_back_unchanged(self):  # C05
+        self.assertNotIn("mode", config.DEFAULTS["buttons"]["gesture"])
+        stored = copy.deepcopy(config.DEFAULTS)
+        for key in ("move_speed", "move_reverse"):
+            stored["gestures"].pop(key, None)  # as saved before these settings were there
+        loaded, saved = self.load(stored)
+        self.assertEqual(loaded, config.DEFAULTS)
+        self.assertEqual(saved, stored)  # loading alone writes nothing
+
+    def test_every_hold_mode_label_has_a_translation(self):  # C06
+        for label in gestures.HOLD_MODES.values():
+            self.assertIn(label, i18n_uk.STRINGS)
 
 
 if __name__ == "__main__":

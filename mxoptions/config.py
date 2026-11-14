@@ -296,6 +296,8 @@ DEFAULTS = {
         "haptic": True,       # vibration during gestures, as set out in "cues"
         "cues": dict(gestures.CUE_PRESETS["normal"], up=0x04, down=0x04, left=0x04, right=0x04),
         "per_direction": False,  # use the up/down/left/right cues instead of the one "swipe" cue
+        "move_speed": 1.0,     # pan and zoom: how far page moves for same hand movement
+        "move_reverse": False,  # pan and zoom other way round
     },
     "app": {"language": "auto", "theme": "graphite", "accent": "#2fd6a7", "model": "photo", "mouse_color": "graphite",
             "tray_icon": "outline",  # the look of the icon in the system tray
@@ -645,6 +647,8 @@ def _sanitize(cfg):
                      if name in gestures.SHAPES and isinstance(sub, dict) and sub.get("type") not in (None, "none")}
             if drawn:
                 clean["shapes"] = drawn
+            if gestures.hold_mode(action):  # pan or zoom while held; anything else: swipes
+                clean["mode"] = action["mode"]
             cfg["buttons"][key] = clean
         else:
             cfg["buttons"][key] = action
@@ -675,6 +679,8 @@ def _sanitize(cfg):
         cfg["gestures"]["trigger"] = DEFAULTS["gestures"]["trigger"]
     cfg["gestures"]["haptic"] = bool(cfg["gestures"].get("haptic"))
     cfg["gestures"]["per_direction"] = bool(cfg["gestures"].get("per_direction"))
+    cfg["gestures"]["move_reverse"] = bool(cfg["gestures"].get("move_reverse"))
+    _clamp(cfg, "gestures", "move_speed", 0.25, 4.0, float)
     cues = cfg["gestures"].get("cues")
     cues = cues if isinstance(cues, dict) else {}
     cfg["gestures"]["cues"] = {

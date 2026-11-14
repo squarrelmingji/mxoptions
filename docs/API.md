@@ -94,7 +94,7 @@ number, an action for an action). Numbers are clamped to their range; unknown wo
 | Signal | When |
 |---|---|
 | `ButtonPressed(s button)`, `ButtonReleased(s button)` | A button MX Options handles went down or up: `middle`, `back`, `forward`, `gesture`, `smartshift`, `panel`. Buttons left on *Default* are handled by the mouse itself and are not reported, nor are the two main buttons. |
-| `Gesture(s direction)` | A gesture was recognised: `tap`, `up`, `down`, `left`, `right`. A shape drawn with the button held is announced by its name: `down_right`, `up_down`, `circle_cw`, `zigzag_h` and so on. |
+| `Gesture(s direction)` | A gesture was recognised: `tap`, `up`, `down`, `left`, `right`. A shape drawn with the button held is announced by its name: `down_right`, `up_down`, `circle_cw`, `zigzag_h` and so on. Pan and zoom announce no direction; a tap of a pan or zoom button is `tap`. |
 | `WheelModeChanged(s mode)` | The wheel went to `freespin` or back to `ratchet`: by the mode button, by a request, or by SmartShift letting it go at speed and catching it when it stops. The mouse does not announce SmartShift's own changes, so those are worked out from the wheel's speed and can be off by a notch or two. |
 | `Hook(s name, s phase)` | A "Signal to another program" action ran (see below). |
 | `ConnectedChanged(b)`, `BatteryChanged(i percent, b charging)`, `DpiChanged(i)`, `ConfigChanged()` | The corresponding state changed. |
@@ -157,6 +157,11 @@ Buttons additionally take `{"type": "default"}` (leave it to the mouse), `{"type
 "tap": …, "up": …, "down": …, "left": …, "right": …}`, `{"type": "ring"}` and
 `{"type": "dpi_shift"}`; these cannot be passed to `Trigger`.
 
+A `gestures` action may have `"mode": "pan"` or `"zoom"`: while held, movement scrolls the page (both
+axes) or zooms (Ctrl and the wheel, up zooms in) instead of swipes; a press without movement still runs
+`tap`; directions and shapes stay saved. Any other mode is left out: swipes. Versions before it ignore the
+mode, and drop it when they save the settings.
+
 ## Settings worth knowing
 
 `q GetConfig` shows everything. Some paths:
@@ -172,6 +177,7 @@ Buttons additionally take `{"type": "default"}` (leave it to the mouse), `{"type
 | `rumble.enabled`, `rumble.light`, `rumble.medium`, `rumble.strong`, `rumble.interval`, `rumble.gain` | Rumble from games on the mouse: on/off (a virtual gamepad appears while it is on), the pattern numbers for weak, medium and strong rumble, milliseconds between pulses, sensitivity (0.5–2.0). |
 | `buttons.<button>` | The action of `middle`, `back`, `forward`, `gesture`, `smartshift`, `panel`. |
 | `gestures.trigger`, `gestures.min_mm`, `gestures.far_mm`, `gestures.dead`, `gestures.bias` | How swipes are read. |
+| `gestures.move_speed`, `gestures.move_reverse` | Pan and zoom: speed (0.25–4.0, 1.0 = one wheel detent for 8 mm of travel) and direction (`false`: the page follows the hand). Zoom steps come at most every 50 ms, several detents in one step when the hand moves fast. One scroll or zoom step carries at most 273 detents; more is dropped. How an app takes a zoom step of several detents is up to the app. |
 | `ring.bubbles`, `ring.style`, `ring.size` | The user's Actions Ring. |
 | `flow.enabled`, `flow.push_mm`, `flow.corner`, `flow.fullscreen` | Flow: on/off, millimetres to push past the edge, percent of the edge kept free at each end, whether to cross under a full-screen window. |
 | `flow.peers` | The other computers of Flow, two at most, each with `name`, `address`, `edge` (`left`, `right`, `top`, `bottom`: the side it stands on) and `key`, the pairing key: treat that as a password. A single field is addressed like `flow.peers.0.edge`. `paused`, where it is, is `true` while that computer is paused: it stays paired and in its place, but the link to it is down, so from then on neither the mouse nor what was copied nor the keyboard goes to it or comes from it (a switch already under way still finishes), and files on their way to or from it stop; `false`, or no `paused`, and it takes part. `flow.peers.0.paused` can be set once it is there (the Flow page writes it); before that, set the whole `flow.peers`. Versions before it drop it, and the computer takes part again. |
