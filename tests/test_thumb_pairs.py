@@ -223,9 +223,8 @@ class PairStore(unittest.TestCase):
         before = copy.deepcopy(store.cfg)
         for bad in ({"up": F13}, {"up": ["BTN_LEFT"], "down": []}, {"up": F13, "down": None}, [F13, F14], "x",
                     {"up": F13, "down": [], "app": KONSOLE}):
-            with self.subTest(keys=bad):
-                self.assertFalse(store.set_profile_thumb_keys(KATE, bad))
-                self.assertEqual(store.cfg, before)
+            self.assertFalse(store.set_profile_thumb_keys(KATE, bad), bad)
+            self.assertEqual(store.cfg, before)
         self.assertEqual(self.pushed, [])
         given = {"up": F13, "down": []}
         self.assertTrue(store.set_profile_thumb_keys(KATE, given))
