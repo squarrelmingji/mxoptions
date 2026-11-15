@@ -2109,6 +2109,8 @@ class SuggestedSettings(unittest.TestCase):
             "documents": ("Documents and slides", {"back": self.UNDO, "forward": self.REDO}, "zoom"),
             "zoom": ("Zoom meetings", {"back": ONCE_ALT_A, "forward": ONCE_ALT_V}, None),
             "teams": ("Microsoft Teams meetings", {"back": ONCE_MUTE, "forward": ONCE_VIDEO}, None),
+            "photoshop": ("Photoshop", {"back": self.UNDO, "forward": actions.keys("LEFTCTRL", "LEFTSHIFT", "Z")}, "keys"),
+            "premiere": ("Premiere", {"back": self.UNDO, "forward": actions.keys("LEFTCTRL", "LEFTSHIFT", "Z")}, "keys"),
         })
         for preset, (label, buttons, function) in config.APP_PRESETS.items():
             with self.subTest(preset=preset):
@@ -2116,7 +2118,7 @@ class SuggestedSettings(unittest.TestCase):
                 self.assertLessEqual(set(buttons), {"middle", "back", "forward"})  # gesture, wheel mode, panel: never
                 self.assertTrue(all(map(config.profile_button_action, buttons.values())))
                 self.assertIn(function, (*config.THUMB_FUNCTIONS, None))  # None: the thumb wheel stays
-                self.assertNotEqual(function, "keys")
+                self.assertEqual(function == "keys", preset in config.APP_PRESET_KEYS)  # never keys without a pair
         self.assertIs(actions.find_preset(self.UNDO), actions.PRESET_BY_ID["undo"])  # shown as the catalogue's Undo
 
     def test_only_what_an_app_does_as_in_all_apps_changes(self):
@@ -2489,7 +2491,9 @@ class MeetingSuggestions(unittest.TestCase):
                     self.assertEqual([step["do"] for step in action["steps"]], ["keys"])
                 self.assertIn(label, i18n_uk.STRINGS)
                 self.assertIn(ui.PRESET_NOTES[preset], i18n_uk.STRINGS)
-        self.assertEqual(ui.PRESET_NOTES, {"zoom": ZOOM_NOTE, "teams": TEAMS_NOTE})
+        self.assertEqual({preset: ui.PRESET_NOTES[preset] for preset in ("zoom", "teams")},
+                         {"zoom": ZOOM_NOTE, "teams": TEAMS_NOTE})
+        self.assertEqual(set(ui.PRESET_NOTES), {"zoom", "teams", *config.APP_PRESET_KEYS})  # and the two Adobe sets'
         self.assertNotIn("KEY_MICMUTE", json.dumps(config.APP_PRESETS))  # the app's mute, not the system's
         cfg = copy.deepcopy(config.DEFAULTS)
         cfg["mouse"]["profiles"] = [profile(KATE, back=ONCE_ALT_A, forward=ONCE_ALT_V)]
@@ -2497,7 +2501,8 @@ class MeetingSuggestions(unittest.TestCase):
 
     def test_teams_is_offered_on_windows_only(self):
         self.assertEqual(config.offered_presets("linux"), ["browser", "spreadsheet", "documents", "zoom"])
-        self.assertEqual(config.offered_presets("win32"), ["browser", "spreadsheet", "documents", "zoom", "teams"])
+        self.assertEqual(config.offered_presets("win32"),
+                         ["browser", "spreadsheet", "documents", "zoom", "teams", "photoshop", "premiere"])
         self.assertEqual(config.offered_presets(), config.offered_presets(sys.platform))
         store = self.make_store()
         store.cfg["mouse"]["profiles"] = [profile(KATE)]

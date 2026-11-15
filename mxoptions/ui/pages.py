@@ -1,5 +1,6 @@
 """The pages of the main window."""
 
+import copy
 import os
 import sys
 import threading
@@ -61,6 +62,16 @@ PRESET_NOTES = {  # what a suggested set without a row of Logi Options+ behind i
              "back sends Ctrl+Shift+M (mute or unmute), forward Ctrl+Shift+O (video on or off), once per press. They "
              "work while Teams is in front and its shortcuts are unchanged. Microsoft lists them for the US layout; "
              "keys are key positions.",
+    "photoshop": "Own choice after the Windows shortcuts Adobe documents, not the settings of Logi Options+. "
+                 "Adobe names [ and ] for the brush size of Pattern Stamp and Spot Healing Brush; for other tools "
+                 "it does not say. With \"Use Legacy Undo Shortcuts\" on, Ctrl+Z works otherwise. These are key "
+                 "positions of a US keyboard: with another layout, or shortcuts changed in the app, they may do "
+                 "something else.",
+    "premiere": "Own choice after the Windows shortcuts Adobe documents, not the settings of Logi Options+. Page "
+                "Down and Page Up show the next and the previous screen of the Timeline: a whole screen per step, "
+                "not smooth scrolling. Adobe says the pointer must be over the Timeline; its list of shortcuts says "
+                "the panel must have focus. These are key positions of a US keyboard: with another layout, or "
+                "shortcuts changed in the app, they may do something else.",
 }
 HAPTIC_PRESETS = [(25, "Subtle"), (45, "Low"), (60, "Medium"), (100, "High")]
 CLICK_MODE_LABELS = [("off", "Off"), ("haptic", "Vibration"), ("sound", "Sound"), ("both", "Both")]
@@ -239,17 +250,28 @@ class AppChooser(QWidget):
             own = config.app_thumb_function(self.store.cfg, app)
             lines.append(f"{_('Thumb wheel')}: {_(THUMB_LABELS[function])}" if thumb is not None else
                          stays.format(control=_("Thumb wheel"), value=_(THUMB_LABELS[own])))
+        keys = config.preset_keys(self.store.cfg, app, preset)
+        mine = copy.deepcopy(config.app_thumb_keys(self.store.cfg, app))  # as named here: "keys" written wakes it
+        if preset in config.APP_PRESET_KEYS and (config.app_thumb_function(self.store.cfg, app) or function) == "keys":
+            for direction, title in (("up", _("Turning up")), ("down", _("Turning down"))):
+                lines.append(f"{title}: {actions.keys_label(keys[direction])}" if keys is not None else stays.format(
+                    control=title, value=actions.keys_label(mine[direction]) or _("Do nothing")))
         if preset in PANNED:
             lines += ["", _("Logi Options+ also pans while the middle button is held here. These settings leave the "
                             "middle button as it is: to pan, give it Gestures for this app and choose Pan.")]
         if preset in PRESET_NOTES:
             lines += ["", _(PRESET_NOTES[preset])]
         lines += ["", _("Everything else stays as it is. To undo one of these, choose \"As in all apps\" for it.")]
+        if keys is not None:
+            lines.append(_("To undo the keystrokes of the thumb wheel, choose \"Use the keystrokes for all apps\" on "
+                           "the Point & scroll page, before its function."))
         if QMessageBox.question(self, APP_NAME, "\n".join(lines)) == QMessageBox.StandardButton.Yes:
             current = self.store.mouse_profile(app)
             if current is None:
                 return
-            if current is not profile or config.preset_changes(self.store.cfg, app, preset) != (setting, thumb):
+            if (current is not profile or config.preset_changes(self.store.cfg, app, preset) != (setting, thumb)
+                    or config.preset_keys(self.store.cfg, app, preset) != keys
+                    or thumb == "keys" and config.app_thumb_keys(self.store.cfg, app) != mine):
                 QMessageBox.information(self, APP_NAME, _(
                     "Settings changed while this dialog was open. Choose Suggested settings again."))
                 return

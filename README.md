@@ -616,6 +616,26 @@ only files you trust.
   in the app no longer matches. Keys are key positions: on French AZERTY Alt+A lands where Q is, and
   Microsoft lists its shortcuts for the US layout. These are the apps' own mute, not the system's
   *Mute microphone* (`mic_mute`), which stays a separate action. Not tried with the apps yet.
+  On Windows there are two own sets more, *Photoshop* and *Premiere*. They are partial choices after
+  Windows shortcuts Adobe documents, not the Logi Options+ sets for these apps named above: what
+  those send is not known here, so they stay left out. *Photoshop*: back Ctrl+Z, forward
+  Ctrl+Shift+Z, thumb wheel `]` turning up and `[` turning down, which Adobe names for the brush size
+  of Pattern Stamp and Spot Healing Brush. *Premiere*: the same buttons, thumb wheel Page Down and
+  Page Up: the next and previous screen of the Timeline, a whole screen per step, not smooth
+  scrolling; Adobe says the pointer must be over the Timeline, and its list of shortcuts that the
+  panel must have focus. Adobe makes these apps for Windows and macOS only, so other systems do not
+  offer the two sets; what they set stays ordinary settings of the app everywhere. They give the
+  thumb wheel keystrokes only where the app has none of its own and its thumb wheel sends keystrokes;
+  keystrokes the app has of its own stay, and the dialog names them. Shortcuts changed in the app,
+  another keyboard layout or Photoshop's "Use Legacy Undo Shortcuts" make them do something else.
+  They were not tried with Photoshop or Premiere.
+- **Photoshop actions on the ring (Windows), set up by you.** Photoshop plays a recorded action from
+  a function key you give it. Record the action in its Actions panel (Layer > New Adjustment Layer >
+  Brightness/Contrast, say), give it a Function Key such as Ctrl+Shift+F3, then give a bubble of
+  Photoshop's own ring that key as a keyboard shortcut. Each press of the bubble plays the action
+  once. This is your own setup with what the program already has, not a built-in Photoshop dial:
+  turning a dial to change a value (brightness, saturation) cannot be done this way and is not done
+  yet. No ring of F keys comes with the program: it cannot know which actions you recorded.
 - **The haptic panel does not answer while a main button is held.** With the left button down the
   mouse reports nothing for the panel, however hard it is pressed; the gesture button is reported
   all the same. So gestures made while a window is being dragged want the gesture button, not the

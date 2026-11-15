@@ -792,8 +792,22 @@ APP_PRESETS = {
     "zoom": ("Zoom meetings", {"back": _once("KEY_LEFTALT", "KEY_A"), "forward": _once("KEY_LEFTALT", "KEY_V")}, None),
     "teams": ("Microsoft Teams meetings", {"back": _once("KEY_LEFTCTRL", "KEY_LEFTSHIFT", "KEY_M"),
                                            "forward": _once("KEY_LEFTCTRL", "KEY_LEFTSHIFT", "KEY_O")}, None),
+    "photoshop": ("Photoshop", {"back": {"type": "keys", "keys": ["KEY_LEFTCTRL", "KEY_Z"]},
+                                "forward": {"type": "keys", "keys": ["KEY_LEFTCTRL", "KEY_LEFTSHIFT", "KEY_Z"]}}, "keys"),
+    "premiere": ("Premiere", {"back": {"type": "keys", "keys": ["KEY_LEFTCTRL", "KEY_Z"]},
+                              "forward": {"type": "keys", "keys": ["KEY_LEFTCTRL", "KEY_LEFTSHIFT", "KEY_Z"]}}, "keys"),
 }
-PRESET_SYSTEMS = {"teams": "win32"}  # no Teams desktop app on Linux, and its web app has no video shortcut
+# What "keys" sends turning up (the direction that scrolls right) and down in a set (mouse.thumbwheel_keys). Own
+# choices after Windows shortcuts Adobe documents: Photoshop ] larger and [ smaller brush (named for Pattern Stamp
+# and Spot Healing Brush), Premiere Page Down next and Page Up previous screen of the Timeline. Not Logi Options+'s.
+APP_PRESET_KEYS = {
+    "photoshop": {"up": ["KEY_RIGHTBRACE"], "down": ["KEY_LEFTBRACE"]},
+    "premiere": {"up": ["KEY_PAGEDOWN"], "down": ["KEY_PAGEUP"]},
+}
+PRESET_SYSTEMS = {
+    "teams": "win32",  # no Teams desktop app on Linux, and its web app has no video shortcut
+    "photoshop": "win32", "premiere": "win32",  # Adobe makes these apps for Windows and macOS only
+}
 
 
 def offered_presets(platform=None):
@@ -813,6 +827,18 @@ def preset_changes(cfg, app, preset):
     own = own_buttons(cfg, app)
     return ({key: copy.deepcopy(action) for key, action in buttons.items() if key not in own},
             function if app_thumb_function(cfg, app) is None else None)
+
+
+def preset_keys(cfg, app, preset):
+    """The keystrokes the suggested settings ``preset`` give "keys" in ``app`` (APP_PRESET_KEYS): {"up", "down"},
+    copies; None where the set has none, the app has no profile or keystrokes of its own, or its thumb wheel would
+    do something else (a function of its own other than "keys")."""
+    keys = APP_PRESET_KEYS.get(preset)
+    if keys is None or mouse_profile_of(cfg, app) is None or app_thumb_keys(cfg, app) is not None:
+        return None
+    if (app_thumb_function(cfg, app) or APP_PRESETS[preset][2]) != "keys":
+        return None
+    return copy.deepcopy(keys)
 
 
 def _sanitize(cfg):

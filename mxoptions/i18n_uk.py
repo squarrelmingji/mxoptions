@@ -1099,6 +1099,29 @@ STRINGS = {
     "Documents and slides": "Документи й слайди",
     "Zoom meetings": "Зустрічі в Zoom",
     "Microsoft Teams meetings": "Зустрічі в Microsoft Teams",
+    "Photoshop": "Photoshop",
+    "Premiere": "Premiere",
+    "Own choice after the Windows shortcuts Adobe documents, not the settings of Logi Options+. Adobe names [ and ] "
+    "for the brush size of Pattern Stamp and Spot Healing Brush; for other tools it does not say. With \"Use Legacy "
+    "Undo Shortcuts\" on, Ctrl+Z works otherwise. These are key positions of a US keyboard: with another "
+    "layout, or shortcuts changed in the app, they may do something else.":
+        "Власний вибір за клавішами Windows, які описує Adobe, а не налаштування Logi Options+. Adobe називає [ і ] "
+        "для розміру пензля в Pattern Stamp і Spot Healing Brush; про інші інструменти не каже. З увімкненим "
+        "«Use Legacy Undo Shortcuts» Ctrl+Z працює інакше. Це місця клавіш американської клавіатури: з іншою "
+        "розкладкою чи зміненими в програмі клавішами вони можуть робити інше.",
+    "Own choice after the Windows shortcuts Adobe documents, not the settings of Logi Options+. Page Down and Page "
+    "Up show the next and the previous screen of the Timeline: a whole screen per step, not smooth scrolling. Adobe "
+    "says the pointer must be over the Timeline; its list of shortcuts says the panel must have focus. These "
+    "are key positions of a US keyboard: with another layout, or shortcuts changed in the app, they may do "
+    "something else.":
+        "Власний вибір за клавішами Windows, які описує Adobe, а не налаштування Logi Options+. Page Down і Page Up "
+        "показують наступний і попередній екран Timeline: цілий екран за крок, а не плавна прокрутка. Adobe каже, що "
+        "вказівник має бути над Timeline; її список клавіш каже, що панель має бути у фокусі. Це місця клавіш "
+        "американської клавіатури: з іншою розкладкою чи зміненими в програмі клавішами вони можуть робити інше.",
+    "To undo the keystrokes of the thumb wheel, choose \"Use the keystrokes for all apps\" on the Point & scroll "
+    "page, before its function.":
+        "Щоб скасувати комбінації бічного колеса, виберіть «Використовувати комбінації для всіх програм» на сторінці "
+        "«Вказівник і прокрутка», раніше ніж його функцію.",
     "Own choice from Zoom's default shortcuts, not a set of Logi Options+: back sends Alt+A (mute or unmute your "
     "audio), forward Alt+V (start or stop your video), once per press. They work while Zoom is in front and its "
     "shortcuts are unchanged. Keys are key positions: on a layout where A or V sit elsewhere (French, for one), other "
