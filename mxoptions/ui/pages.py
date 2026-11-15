@@ -22,7 +22,8 @@ from .recorder import ShortcutRecorder
 from . import theme
 from . import tray_icon
 from .widgets import (
-    Card, ElidedLabel, IconChoice, InfoButton, PatternRow, Row, Segmented, SliderRow, SwatchRow, Switch, hint_label, titled,
+    Card, ElidedLabel, IconChoice, InfoButton, LongWordHint, PatternRow, Row, Segmented, SliderRow, SwatchRow, Switch,
+    hint_label, titled,
 )
 
 BUTTON_TITLES = {
@@ -141,7 +142,7 @@ class AppChooser(QWidget):
         line.addWidget(self.add_app)
         line.addWidget(self.remove_app)
         outer.addLayout(line)
-        self.hint = hint_label("")
+        self.hint = LongWordHint()  # it may name an app by its ID, a single word of up to 128 letters
         self.suggest = None
         if suggest:  # beside the hint, as the line above is full in some languages
             self.suggest = QPushButton(_("Suggested settings"), self)  # parent first: Tab after Remove; Qt adds the arrow

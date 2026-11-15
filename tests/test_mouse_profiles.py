@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import queue
+import subprocess
 import sys
 import threading
 import time
@@ -2080,20 +2081,35 @@ if __name__ == "__main__":
 
 
 class StudioRenders(unittest.TestCase):
-    """The studio picture of the mouse is rendered on a worker thread: a view deleted while it renders is left alone
-    and the worker raises nothing; a view still there gets its own renders, never another's. The renders wait on an
-    event; no sleep."""
+    """The studio picture of the mouse is rendered on a worker thread that touches no Qt object: it leaves the render
+    for its view, which takes it on its own thread. A view deleted while it renders is left alone and the worker
+    raises nothing; a view still there gets its own renders, never another's; so does the end of the application.
+    The renders wait on an event, and the view's collecting timer is fired as it would fire: no sleep."""
+
+    def collect(self, view, main):
+        """Every render of ``view`` taken, as its timer takes them, once each worker out has ended."""
+        while view._rendering:
+            for thread in threading.enumerate():
+                if thread.name == "mouse-render":
+                    thread.join(10)
+                    self.assertFalse(thread.is_alive())
+            self.assertEqual(view._done.qsize(), 1)  # an ended worker has left its render, for its own view alone
+            self.assertTrue(view._collect.isActive())  # it runs while a render is out
+            view._collect.timeout.emit()
+        self.assertEqual(threading.get_ident(), main)
 
     def test_a_view_deleted_while_it_renders_gets_nothing_and_nothing_is_raised(self):
+        import shiboken6
         from PySide6.QtCore import QPointF
         from PySide6.QtGui import QImage
         from mxoptions.ui import mouse_render
         go, started, raised, stored = threading.Event(), queue.Queue(), [], []
         picture = QImage(4, 4, QImage.Format.Format_ARGB32_Premultiplied)
         store_render = pages.MouseView._store_render
+        main = threading.get_ident()
 
         def keep(view, key, *rest):
-            stored.append((view, key))
+            stored.append((view, key, threading.get_ident() == main))
             store_render(view, key, *rest)
 
         def render(_camera):
@@ -2114,22 +2130,129 @@ class StudioRenders(unittest.TestCase):
                     view.show()
                     view._settle.timeout.emit()  # the size has settled: as the timer would, without its 160 ms
                 workers = [started.get(timeout=10) for _ in range(2)]  # one render each, both waiting
+                kept._collect.timeout.emit()  # nothing to take yet: it keeps looking
+                self.assertEqual((stored, kept._collect.isActive()), ([], True))
                 gone(doomed)
                 go.set()
                 for worker in workers:
                     worker.join(10)
                     self.assertFalse(worker.is_alive())
-                for _ in range(8):
-                    APP.processEvents()
+                self.collect(kept, main)  # all of its angles, one after another
                 self.assertIn(kept._key(kept._to_view), kept._renders)  # the view still there got its render
+                self.assertFalse(kept._wanted)
             finally:
                 go.set()
-                gone(kept)
+                for view in (doomed, kept):  # either, if a failure came first: none is left to render in a later test
+                    if shiboken6.isValid(view):
+                        gone(view)
                 for thread in threading.enumerate():  # the renders after the first: all finished before the patches go
                     if thread.name == "mouse-render":
                         thread.join(10)
         self.assertEqual([f"{args.exc_type.__name__}: {args.exc_value}" for args in raised], [])
-        self.assertEqual({(view is kept, key[1:3]) for view, key in stored}, {(True, (700, 600))})
+        self.assertEqual({(view is kept, key[1:3], on_main) for view, key, on_main in stored}, {(True, (700, 600), True)})
+
+    def test_a_render_that_fails_leaves_the_plain_model(self):
+        from mxoptions.ui import mouse_render
+        main = threading.get_ident()
+
+        def render(_camera):
+            raise ValueError("no studio here")
+
+        with (mock.patch.object(mouse_render, "available", return_value=True),
+              mock.patch.object(mouse_render, "render", render)):
+            view = pages.MouseView({"middle": "Middle"})
+            self.addCleanup(gone, view)
+            view.set_style("studio")
+            view.resize(640, 560)
+            view.show()
+            with self.assertLogs("mxoptions.ui.mouse_view", logging.ERROR) as logged:
+                view._settle.timeout.emit()
+                self.collect(view, main)
+        self.assertIn("studio render failed", logged.output[0])
+        self.assertTrue(view._render_broken)  # no retry on every repaint: the plain model from now on
+        self.assertEqual((view._wanted, view._studio(), view._collect.isActive()), ([], False, False))
+
+    def test_the_application_taken_down_while_views_render_raises_nothing(self):
+        """In a program of its own, so the application of the other tests stays. Two views render, held on an event;
+        one is deleted, then the application is taken down: at the end of the program, as when mxoptions quits, or
+        deleted outright. Only then the renders end. Imported before and after the application is made."""
+        root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        for imported in ("before", "after"):
+            for end in ("exit", "delete"):
+                with self.subTest(imported=imported, end=end):
+                    done = subprocess.run([sys.executable, "-c", _TAKEN_DOWN, root, imported, end], capture_output=True,
+                                          text=True, timeout=120, env=dict(os.environ, QT_QPA_PLATFORM="offscreen"))
+                    lines = [line for line in done.stdout.splitlines() if line.startswith("{")]
+                    self.assertEqual(len(lines), 1, done.stdout + done.stderr)
+                    seen = json.loads(lines[0])
+                    self.assertEqual(seen, {"application": False, "views": [False, False], "callbacks": 0,
+                                            "raised": [], "running": []}, done.stderr)
+                    self.assertEqual(done.returncode, 0, done.stderr)
+
+
+# The program of test_the_application_taken_down_while_views_render_raises_nothing. Its release hook is registered
+# before PySide6 is imported, so at the program's end it runs after PySide's own (last in, first out): after Qt has
+# deleted the application and every object of it, as for a render still out when mxoptions quits.
+_TAKEN_DOWN = r"""
+import atexit, json, queue, sys, threading
+root, imported, end = sys.argv[1:4]
+sys.path.insert(0, root)
+go, started, raised, callbacks = threading.Event(), queue.Queue(), [], []
+threading.excepthook = raised.append
+
+def release():
+    import shiboken6
+    from PySide6.QtWidgets import QApplication
+    seen = {"application": QApplication.instance() is not None, "views": [shiboken6.isValid(v) for v in views]}
+    before = len(callbacks)
+    go.set()
+    for worker in workers:
+        worker.join(30)
+    seen.update(callbacks=len(callbacks) - before, raised=[f"{a.exc_type.__name__}: {a.exc_value}" for a in raised],
+                running=[t.name for t in threading.enumerate() if t.name == "mouse-render"])
+    print(json.dumps(seen), flush=True)
+
+if end == "exit":
+    atexit.register(release)
+from unittest import mock
+if imported == "before":
+    from mxoptions.ui import mouse_render, mouse_view
+from PySide6.QtCore import QEvent, QPointF
+from PySide6.QtGui import QImage
+from PySide6.QtWidgets import QApplication
+app = QApplication([])
+if imported == "after":  # as mxoptions does
+    from mxoptions.ui import mouse_render, mouse_view
+
+def render(_camera):
+    started.put(threading.current_thread())
+    go.wait(30)
+    return QImage(4, 4, QImage.Format.Format_ARGB32_Premultiplied), QPointF()
+
+store_render = mouse_view.MouseView._store_render
+def keep(view, *rest):
+    callbacks.append(view)
+    store_render(view, *rest)
+
+for patch in (mock.patch.object(mouse_render, "available", return_value=True),
+              mock.patch.object(mouse_render, "render", render),
+              mock.patch.object(mouse_render, "shadow", return_value=QImage()),
+              mock.patch.object(mouse_view.MouseView, "_store_render", keep)):
+    patch.start()
+views = [mouse_view.MouseView({"middle": "Middle"}) for _ in range(2)]
+for view in views:
+    view.set_style("studio")
+    view.resize(640, 560)
+    view.show()
+    view._settle.timeout.emit()
+workers = [started.get(timeout=10) for _ in views]
+views[0].deleteLater()
+app.sendPostedEvents(views[0], QEvent.Type.DeferredDelete)
+if end == "delete":
+    import shiboken6
+    shiboken6.delete(app)
+    release()
+"""
 
 
 class _Told(_Engine):
@@ -2446,6 +2569,107 @@ class SuggestedSettings(unittest.TestCase):
                         window.hide()
                         window.deleteLater()
                         APP.sendPostedEvents(window, QEvent.Type.DeferredDelete)
+                    worker_start.assert_not_called()
+        finally:
+            APP.setFont(old_font)
+            APP.setStyle(old_style)
+            APP.setStyleSheet(old_sheet)
+            APP.setPalette(old_palette)
+
+    def test_every_app_chooser_shows_the_longest_app_id_whole_beside_whole_buttons(self):
+        """An app's ID is one word of up to MAX_APP_ID letters, and the hint of the chosen app names it. The hint breaks
+        it over lines: the buttons beside keep their full width, the window its size, the line its width, and all of
+        the hint is drawn. On each page with an app chooser, at each window width, for all apps, an app and the
+        longest ID; letters as wide as this font's and a tenth wider, as in DejaVu Sans."""
+        import math
+        from PySide6.QtCore import QEvent, QPoint
+        from PySide6.QtGui import QAccessible, QFont, QFontMetrics, QImage, QRegion
+        from PySide6.QtWidgets import QWidget
+        from mxoptions import i18n
+        from mxoptions.ui import theme
+        from mxoptions.ui.main_window import MainWindow
+        from mxoptions.ui.widgets import hint_label
+
+        longest = "org." + "a" * (config.MAX_APP_ID - 4)
+        old_style, old_sheet, old_palette, old_font = APP.style().objectName(), APP.styleSheet(), APP.palette(), APP.font()
+        self.addCleanup(i18n.setup, "en")
+        try:
+            APP.setStyle("Fusion")
+            for spacing, language in ((100, "en"), (100, "uk"), (110, "en"), (110, "uk")):
+                font = QFont(old_font)
+                font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, spacing)
+                APP.setFont(font)
+                theme.apply(APP)
+                i18n.setup(language)
+                store = self.make_store()
+                for app in (KATE, longest):
+                    self.assertTrue(store.add_mouse_profile(app))  # the store takes the longest ID as any other
+                with (mock.patch.object(pages.FirmwareQuery, "start"),
+                      mock.patch.object(pages.MouseView, "_prerender"),
+                      mock.patch.object(threading.Thread, "start") as worker_start):
+                    window = MainWindow(store, hide_on_close=False)
+                    try:
+                        window.show()
+                        hosts = [page for page in map(window.stack.widget, range(window.stack.count()))
+                                 if isinstance(getattr(page, "apps", None), pages.AppChooser)]
+                        self.assertEqual(len(hosts), 3)  # Buttons, Ring, Point and scroll
+                        for host, width in ((host, width) for host in hosts for width in (1180, 1200, 1280)):
+                            window.stack.setCurrentWidget(host)
+                            window.resize(width, 780)
+                            chooser = host.apps
+                            widths = {}
+                            for app in (None, KATE, longest):
+                                with self.subTest(language=language, spacing=spacing, page=type(host).__name__,
+                                                  width=width, app=app and app[:8]):
+                                    store.set_mouse_app(app)
+                                    for _ in range(8):
+                                        APP.processEvents()
+                                    hint = chooser.hint
+                                    widths[app] = (chooser.width(), hint.width())
+                                    self.assertEqual(window.width(), width)
+                                    buttons = [chooser.add_app, chooser.remove_app]
+                                    if chooser.suggest is not None and app is not None:
+                                        buttons.append(chooser.suggest)
+                                    shown = [chooser.apps, hint, *buttons]
+                                    for widget in shown:
+                                        self.assertTrue(widget.isVisible())
+                                        self.assertTrue(chooser.rect().contains(widget.geometry()))
+                                    for index, widget in enumerate(shown):
+                                        for other in shown[index + 1:]:
+                                            self.assertFalse(widget.geometry().intersects(other.geometry()))
+                                    for button in buttons:
+                                        self.assertGreaterEqual(button.width(), button.sizeHint().width(), button.text())
+                                    self.assertTrue(chooser.apps.accessibleName())
+                                    if app is None:
+                                        continue
+                                    self.assertIn(app, hint.text())
+                                    self.assertIn(app, QAccessible.queryAccessibleInterface(hint).text(QAccessible.Text.Name))
+                                    ink = QImage(hint.size(), QImage.Format.Format_ARGB32_Premultiplied)
+                                    ink.fill(0)
+                                    hint.render(ink, QPoint(), QRegion(), QWidget.RenderFlag(0))
+                                    if app == KATE:  # its words all fit: drawn exactly as any hint
+                                        plain = hint_label(hint.text())
+                                        plain.setParent(hint.parentWidget())
+                                        plain.setGeometry(hint.geometry())
+                                        drawn = QImage(ink.size(), ink.format())
+                                        drawn.fill(0)
+                                        plain.render(drawn, QPoint(), QRegion(), QWidget.RenderFlag(0))
+                                        plain.deleteLater()
+                                        self.assertTrue(ink == drawn, "drawn unlike any other hint")
+                                        continue
+                                    # All of the hint has room: no line can hold more than the hint is wide.
+                                    metrics = QFontMetrics(hint.font())
+                                    lines = math.ceil(metrics.horizontalAdvance(hint.text()) / hint.width())
+                                    self.assertGreaterEqual(hint.height(), lines * metrics.height())
+                                    # ... and is drawn: from its first line to its last.
+                                    bits, row, blank = ink.constBits(), ink.bytesPerLine(), bytes(ink.bytesPerLine())
+                                    rows = [y for y in range(ink.height()) if bits[y * row:(y + 1) * row] != blank]
+                                    self.assertGreaterEqual(rows[-1] - rows[0], (lines - 1) * metrics.height())
+                            self.assertEqual(widths[longest], widths[KATE])  # the longest ID moves nothing aside
+                            self.assertEqual(widths[None][0], widths[KATE][0])
+                    finally:
+                        store._save_timer.stop()
+                        gone(window)
                     worker_start.assert_not_called()
         finally:
             APP.setFont(old_font)
