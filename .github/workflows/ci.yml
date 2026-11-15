@@ -1,0 +1,52 @@
+# Checks every pull request and every commit on main. It deploys nothing: no secrets, read-only token,
+# no release or publish step. Release files are uploaded as a workflow artifact only.
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+jobs:
+  gate:
+    name: gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The documented setup, word for word: Ubuntu's own Python and the packages SHIP.md lists.
+      - run: sh ops/ship/prereqs.sh && sh ops/ship/prereqs.sh --check
+      - run: sh ops/ship/env.sh /usr/bin/python3 "$RUNNER_TEMP/venv"
+      - run: sh ops/ship/gate.sh "$RUNNER_TEMP/venv/bin/python"
+  journeys:
+    name: journeys
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The documented setup, word for word: Ubuntu's own Python and the packages SHIP.md lists.
+      - run: sh ops/ship/prereqs.sh && sh ops/ship/prereqs.sh --check
+      - run: sh ops/ship/env.sh /usr/bin/python3 "$RUNNER_TEMP/venv"
+      - name: release files
+        run: sh ops/ship/build.sh "$RUNNER_TEMP/venv/bin/python" "$RUNNER_TEMP/release"
+      - name: journeys from source
+        run: sh ops/ship/journeys.sh "$RUNNER_TEMP/venv/bin/python"
+      - name: journeys from the built wheel
+        run: |
+          /usr/bin/python3 -m venv "$RUNNER_TEMP/wheel"
+          "$RUNNER_TEMP/wheel/bin/python" -m pip install -q -c ops/ship/constraints.txt "$RUNNER_TEMP"/release/*.whl
+          MXOPTIONS_BIN="$RUNNER_TEMP/wheel/bin/mxoptions" sh ops/ship/journeys.sh "$RUNNER_TEMP/wheel/bin/python"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ github.sha }}
+          path: ${{ runner.temp }}/release
+          if-no-files-found: error
+          retention-days: 90

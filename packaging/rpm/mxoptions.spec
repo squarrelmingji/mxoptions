@@ -67,6 +67,7 @@ udevadm trigger --sysname-match=uinput >/dev/null 2>&1 || :
 %{_datadir}/applications/mxoptions.desktop
 %{_datadir}/icons/hicolor/scalable/apps/mxoptions.svg
 %{_udevrulesdir}/70-mxoptions.rules
+%{_prefix}/lib/udev/mxoptions-hidpp-check.py
 
 %changelog
 * Wed Oct 14 2026 nictonus <nictonus@users.noreply.github.com> - 0.10.0-1
