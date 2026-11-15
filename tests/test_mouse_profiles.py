@@ -17,7 +17,7 @@ from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtCore import QObject, Qt, Signal  # noqa: E402
+from PySide6.QtCore import QEvent, QObject, Qt, Signal  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
@@ -1018,6 +1018,14 @@ class FakeFront(QObject):
         self.wanted.append((who, on))
 
 
+def gone(page):
+    """Hidden and deleted at once, not at some event loop of a later test: nothing of the page is left to answer timers
+    there, so none of its studio renders starts after its test."""
+    page.hide()
+    page.deleteLater()
+    APP.sendPostedEvents(page, QEvent.Type.DeferredDelete)
+
+
 class Pages(unittest.TestCase):
     """The Buttons and Ring pages: whose settings they show, and one app's buttons and ring made and changed."""
 
@@ -1030,7 +1038,7 @@ class Pages(unittest.TestCase):
 
     def page(self, kind, store):
         page = kind(store)
-        self.addCleanup(page.deleteLater)
+        self.addCleanup(gone, page)
         page.resize(1100, 700)
         page.show()
         return page
@@ -1863,7 +1871,7 @@ class ThumbWheelPage(unittest.TestCase):
 
     def page(self, store, kind=pages.PointScrollPage):
         page = kind(store)
-        self.addCleanup(page.deleteLater)
+        self.addCleanup(gone, page)
         page.resize(1100, 700)
         page.show()
         return page
@@ -2071,6 +2079,59 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class StudioRenders(unittest.TestCase):
+    """The studio picture of the mouse is rendered on a worker thread: a view deleted while it renders is left alone
+    and the worker raises nothing; a view still there gets its own renders, never another's. The renders wait on an
+    event; no sleep."""
+
+    def test_a_view_deleted_while_it_renders_gets_nothing_and_nothing_is_raised(self):
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QImage
+        from mxoptions.ui import mouse_render
+        go, started, raised, stored = threading.Event(), queue.Queue(), [], []
+        picture = QImage(4, 4, QImage.Format.Format_ARGB32_Premultiplied)
+        store_render = pages.MouseView._store_render
+
+        def keep(view, key, *rest):
+            stored.append((view, key))
+            store_render(view, key, *rest)
+
+        def render(_camera):
+            started.put(threading.current_thread())
+            go.wait(10)
+            return picture, QPointF()
+
+        with (mock.patch.object(mouse_render, "available", return_value=True),
+              mock.patch.object(mouse_render, "render", render),
+              mock.patch.object(mouse_render, "shadow", return_value=picture),
+              mock.patch.object(pages.MouseView, "_store_render", autospec=True, side_effect=keep),
+              mock.patch.object(threading, "excepthook", raised.append)):  # what a worker raises, kept to be seen here
+            doomed, kept = pages.MouseView({"middle": "Middle"}), pages.MouseView({"middle": "Middle"})
+            try:
+                for view, size in ((doomed, (640, 560)), (kept, (700, 600))):
+                    view.set_style("studio")
+                    view.resize(*size)
+                    view.show()
+                    view._settle.timeout.emit()  # the size has settled: as the timer would, without its 160 ms
+                workers = [started.get(timeout=10) for _ in range(2)]  # one render each, both waiting
+                gone(doomed)
+                go.set()
+                for worker in workers:
+                    worker.join(10)
+                    self.assertFalse(worker.is_alive())
+                for _ in range(8):
+                    APP.processEvents()
+                self.assertIn(kept._key(kept._to_view), kept._renders)  # the view still there got its render
+            finally:
+                go.set()
+                gone(kept)
+                for thread in threading.enumerate():  # the renders after the first: all finished before the patches go
+                    if thread.name == "mouse-render":
+                        thread.join(10)
+        self.assertEqual([f"{args.exc_type.__name__}: {args.exc_value}" for args in raised], [])
+        self.assertEqual({(view is kept, key[1:3]) for view, key in stored}, {(True, (700, 600))})
+
+
 class _Told(_Engine):
     """Stands in for the engine behind a Store and keeps every copy of the settings it is given."""
 
@@ -2096,7 +2157,7 @@ class SuggestedSettings(unittest.TestCase):
 
     def page(self, store):
         page = pages.ButtonsPage(store)
-        self.addCleanup(page.deleteLater)
+        self.addCleanup(gone, page)
         page.resize(1100, 700)
         page.show()
         return page
@@ -2322,16 +2383,21 @@ class SuggestedSettings(unittest.TestCase):
 
     def test_app_controls_fit_inside_settings_window(self):
         from PySide6.QtCore import QEvent, QPoint, QRect
+        from PySide6.QtGui import QFont
         from mxoptions import i18n
         from mxoptions.ui import theme
         from mxoptions.ui.main_window import MainWindow
 
-        old_style, old_sheet, old_palette = APP.style().objectName(), APP.styleSheet(), APP.palette()
+        old_style, old_sheet, old_palette, old_font = APP.style().objectName(), APP.styleSheet(), APP.palette(), APP.font()
         self.addCleanup(i18n.setup, "en")
         try:
             APP.setStyle("Fusion")
-            theme.apply(APP)
-            for language in ("en", "uk"):
+            # 110: letters a tenth wider than this font's, as other fonts are (DejaVu Sans), with the same window size
+            for spacing, language in ((100, "en"), (100, "uk"), (110, "en"), (110, "uk")):
+                font = QFont(old_font)
+                font.setLetterSpacing(QFont.SpacingType.PercentageSpacing, spacing)
+                APP.setFont(font)
+                theme.apply(APP)
                 i18n.setup(language)
                 store = self.make_store()
                 self.assertTrue(store.add_mouse_profile(KATE))
@@ -2343,7 +2409,7 @@ class SuggestedSettings(unittest.TestCase):
                     try:
                         window.show()
                         for width in (1180, 1200, 1280):
-                            with self.subTest(language=language, width=width):
+                            with self.subTest(language=language, width=width, spacing=spacing):
                                 window.resize(width, 780)
                                 store.set_mouse_app(None)
                                 for _ in range(8):
@@ -2382,6 +2448,7 @@ class SuggestedSettings(unittest.TestCase):
                         APP.sendPostedEvents(window, QEvent.Type.DeferredDelete)
                     worker_start.assert_not_called()
         finally:
+            APP.setFont(old_font)
             APP.setStyle(old_style)
             APP.setStyleSheet(old_sheet)
             APP.setPalette(old_palette)

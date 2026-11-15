@@ -20,7 +20,7 @@ from PySide6.QtWidgets import QAbstractButton, QApplication  # noqa: E402
 from mxoptions import actions, api, config, engine, i18n_uk  # noqa: E402
 from mxoptions.ui import action_picker, editors, keyboard_page, pages, ring, ring_page  # noqa: E402
 from mxoptions.ui.store import Store  # noqa: E402
-from tests.test_mouse_profiles import FakeFront, _Engine, drain, front, make, no_configure_writes, profile, set_config  # noqa: E402
+from tests.test_mouse_profiles import FakeFront, _Engine, drain, front, gone, make, no_configure_writes, profile, set_config  # noqa: E402
 
 APP = QApplication.instance() or QApplication([])
 BACK, FORWARD, PANEL = config.BUTTONS["back"], config.BUTTONS["forward"], config.BUTTONS["panel"]
@@ -1099,7 +1099,7 @@ class SpotlightPicker(unittest.TestCase):
         store._save_timer.timeout.disconnect()
         store.front = FakeFront()
         page = pages.ButtonsPage(store)
-        self.addCleanup(page.deleteLater)
+        self.addCleanup(gone, page)
         page.resize(1100, 700)
         page.show()
         page.view.select("back")

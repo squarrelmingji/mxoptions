@@ -3,7 +3,7 @@
 import logging
 import threading
 
-from PySide6.QtCore import QEasingCurve, QPointF, QRectF, Qt, QTimer, QVariantAnimation, Signal
+from PySide6.QtCore import QEasingCurve, QObject, QPointF, QRectF, Qt, QTimer, QVariantAnimation, Signal
 from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QButtonGroup, QPushButton, QVBoxLayout, QWidget
 
@@ -56,9 +56,17 @@ class Chip(QPushButton):
         self.hovered.emit(False)
 
 
+class _Delivery(QObject):
+    """Carries a finished studio render from its worker thread to its view. It belongs to no view and is never
+    deleted, so a worker always has something to emit on; Qt drops the call to a view deleted meanwhile."""
+    rendered = Signal(object, object, object, object, object)  # view, key, image, top-left, shadow
+
+
+_delivery = _Delivery()
+
+
 class MouseView(QWidget):
     selected = Signal(str)
-    _rendered = Signal(object, object, object, object)  # key, image, top-left, shadow (from the render thread)
 
     def __init__(self, titles, parent=None):
         """``titles`` maps button key -> caption; only those keys get a callout."""
@@ -86,7 +94,7 @@ class MouseView(QWidget):
         self._wanted = []    # keys still to render, most urgent first
         self._rendering = False
         self._render_broken = False
-        self._rendered.connect(self._store_render)
+        _delivery.rendered.connect(self._delivered)
         self._settle = QTimer(self, singleShot=True, interval=160)
         self._settle.timeout.connect(self._prerender)
         self._chips = {}
@@ -278,9 +286,13 @@ class MouseView(QWidget):
             except Exception:  # never leave the queue stuck
                 log.exception("studio render failed; using the plain model instead")
                 image = corner = shadow = None
-            self._rendered.emit(key, image, corner, shadow)
+            _delivery.rendered.emit(self, key, image, corner, shadow)
 
         threading.Thread(target=job, name="mouse-render", daemon=True).start()
+
+    def _delivered(self, view, key, image, corner, shadow):
+        if view is self:
+            self._store_render(key, image, corner, shadow)
 
     def _store_render(self, key, image, corner, shadow):
         self._rendering = False

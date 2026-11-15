@@ -128,6 +128,7 @@ class AppChooser(QWidget):
         line.setSpacing(8)
         text = QLabel(label)
         self.apps = QComboBox()
+        self.apps.setObjectName("appChoice")  # the part of the line that gives way when it is short: see theme
         self.apps.setAccessibleName(label)
         text.setBuddy(self.apps)
         self.add_app = QPushButton(_("Add app"))
