@@ -280,6 +280,32 @@ class KeysPageLayout(unittest.TestCase):
         place = QRect(last.mapTo(viewport, QPoint()), last.size())
         self.assertTrue(viewport.rect().contains(place))
 
+    def test_a_focused_key_stays_in_view_when_the_keys_are_laid_out_again(self):
+        """The keys laid out again (here: another program takes one): the key that had the focus keeps it, given back
+        only once it is where it now goes, so that the page scrolls to it there (on a desktop the focus moves at once;
+        here it is checked where the focus is given)."""
+        self.page.resize(1100, 700)
+        keys = [key(0x00C7, pos=1)] + [key(0x0F01 + i) for i in range(20)]
+        self.show(keys)
+        self.page.activateWindow()
+        self.assertTrue(QTest.qWaitForWindowActive(self.page))
+        self.page.strip.caps["0x0f14"].setFocus()
+        settle()
+        given = []
+        original = keyboard_page.KeyCap.setFocus
+
+        def set_focus(cap, *args):
+            given.append((cap.accessibleName(), cap.geometry()))
+            return original(cap, *args)
+        keys = [key(0x0F01, reason="foreign") if k["cid"] == 0x0F01 else k for k in keys]
+        with mock.patch.object(keyboard_page.KeyCap, "setFocus", set_focus):
+            self.show(keys)
+        last = self.page.strip.caps["0x0f14"]
+        self.assertEqual(given, [("Key 0x0f14", last.geometry())])  # where it ended up, not where a new button starts
+        self.assertTrue(last.hasFocus())
+        viewport = self.page.scroll.viewport()
+        self.assertTrue(viewport.rect().contains(QRect(last.mapTo(viewport, QPoint()), last.size())))
+
     def test_a_changed_key_is_marked(self):
         self.store.set_key("0x0f01", {"type": "keys", "keys": ["KEY_LEFTCTRL", "KEY_C"]})
         self.show([key(0x0F01), key(0x0F02)])

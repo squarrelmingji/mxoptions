@@ -377,6 +377,7 @@ class KeyStrip(QWidget):
         on_board, others, kept = self._sections()
         ordered = on_board + others + kept
         ids = [key["id"] for key in ordered]
+        focused = None
         if ids != list(self.caps):  # other keys or another order: new caps, in the new order (the Tab order follows)
             focused = next((key_id for key_id, cap in self.caps.items() if cap.hasFocus()), None)
             for cap in self.caps.values():
@@ -389,8 +390,6 @@ class KeyStrip(QWidget):
                 cap.hovered.connect(lambda inside, key_id=key["id"]: self._set_hover(key_id if inside else None))
                 cap.focused.connect(lambda cap=cap: self.focused.emit(cap))
                 cap.show()
-            if focused in self.caps:
-                self.caps[focused].setFocus()
         for key in ordered:
             cap = self.caps[key["id"]]
             cap.overlay = key["id"] in self._slot_of
@@ -400,6 +399,11 @@ class KeyStrip(QWidget):
         self._place()
         self.updateGeometry()
         self.update()
+        if focused in self.caps:  # the key that had the focus keeps it, where it now is (scrolled into view)
+            holder = self.parentWidget()
+            if holder is not None and holder.layout() is not None:
+                holder.layout().activate()
+            self.caps[focused].setFocus()
 
     def _sections(self):
         """The keys on the picture (row by row, left to right), the other keys that can be changed, and those left
