@@ -4,7 +4,9 @@ window while it is."""
 
 import copy
 import os
+import sys
 import threading
+import traceback
 import unittest
 from unittest import mock
 
@@ -14,6 +16,7 @@ from PySide6.QtCore import QEvent, QPoint, QRect, Qt  # noqa: E402
 from PySide6.QtGui import QFont  # noqa: E402
 from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication, QLabel  # noqa: E402
+import shiboken6  # noqa: E402
 
 import tests.support  # noqa: F401,E402
 from mxoptions import config, i18n, i18n_uk  # noqa: E402
@@ -228,10 +231,13 @@ class InTheWindow(unittest.TestCase):
 class ClosingWhileAsking(unittest.TestCase):
     def test_a_window_closed_while_fwupd_is_asked_leaves_nothing_behind(self):
         store = make_store()
-        release, errors = threading.Event(), []
+        release, errors, slot_errors = threading.Event(), [], []
         old_hook = threading.excepthook
         threading.excepthook = lambda args: errors.append(args.exc_value)
         self.addCleanup(setattr, threading, "excepthook", old_hook)
+        old_sys_hook = sys.excepthook  # where an exception in a Qt slot goes
+        sys.excepthook = lambda kind, value, trace: slot_errors.append((value, traceback.extract_tb(trace)))
+        self.addCleanup(setattr, sys, "excepthook", old_sys_hook)
         started = []
         real_thread = threading.Thread
 
@@ -254,7 +260,9 @@ class ClosingWhileAsking(unittest.TestCase):
             other = pages.FirmwareQuery()  # one of its own, as another page has
             other.start("MX Master 4", False)
             self.assertGreaterEqual(len(started), 2)
+            controller = win.keyboard_page
             gone(win)
+            self.assertFalse(shiboken6.isValid(controller))  # the keyboard's settings went with the window
             other.deleteLater()
             APP.sendPostedEvents(None, QEvent.Type.DeferredDelete)
             release.set()
@@ -265,6 +273,10 @@ class ClosingWhileAsking(unittest.TestCase):
             store.update_state(dict(store.state, keyboard=keyboard(MX_MECHANICAL, ["fn"], HOSTS, "MX Keys S")))
             store.changed.emit()
         self.assertEqual(errors, [])
+        # nothing of the keyboard's pages ran after they went (the Flow page's own leftover is another matter)
+        ours = [value for value, trace in slot_errors
+                if any(frame.filename.endswith(("keyboard_page.py", "keyboard_drawing.py")) for frame in trace)]
+        self.assertEqual(ours, [])
 
 
 class EasySwitchFit(unittest.TestCase):
