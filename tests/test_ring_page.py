@@ -126,17 +126,39 @@ class Page(unittest.TestCase):
         self.editing()
         self.assertEqual((page._path, page._index), ([], 2))  # the folder chosen, not opened
         self.assertEqual(self.store.cfg, before)
-        # A real double click: its first press started editing (the ring moves aside for the editor), and the double
-        # click event that follows lands on the folder within the double-click time: still only chosen
+        # A real double click on the blurred ring: Qt sends press (it starts editing), release, then the double click
+        # with no press of its own: the folder is only chosen
         page.set_customizing(False)
-        page._enter(2, touched=True)
-        settle()
-        folder = point_of(preview, 2)
-        QTest.mouseDClick(preview, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, folder)
-        self.assertEqual(page._path, [])
-        page._entered_at = None  # editing for a while: a double click opens it
-        QTest.mouseDClick(preview, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, folder)
+        preview.bubble_clicked.emit(2)
+        preview.bubble_opened.emit(2)
+        self.assertEqual((page._path, page._index), ([], 2))
+        preview.bubble_clicked.emit(2)  # a double click while editing: opens it
+        preview.bubble_opened.emit(2)
         self.assertEqual(page._path, [2])
+        page._go_up()
+        page.set_customizing(False)
+        preview.bubble_clicked.emit(2)  # the press that started editing, then a later double click: opens it
+        preview.bubble_clicked.emit(2)
+        preview.bubble_opened.emit(2)
+        self.assertEqual(page._path, [2])
+        page._go_up()
+        for end in ("done", "escape", "settings", "hide"):  # the entry press forgotten once editing ends
+            with self.subTest(end=end):
+                page.set_customizing(False)
+                preview.bubble_clicked.emit(2)
+                if end == "done":
+                    page.done.click()
+                elif end == "escape":
+                    QTest.keyClick(page.editor.name, Qt.Key.Key_Escape)
+                elif end == "settings":
+                    page.settings_tab.click()
+                else:
+                    page.hide()
+                    page.show()
+                page.customize.click()
+                preview.bubble_opened.emit(2)
+                self.assertEqual(page._path, [2])
+                page._go_up()
         page._go_up()
         QTest.mouseClick(preview, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point_of(preview, 3))
         self.assertEqual(len(self.store.cfg["ring"]["bubbles"]), 4)  # while editing: as always
