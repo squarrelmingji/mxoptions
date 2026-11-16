@@ -129,6 +129,17 @@ class Page(unittest.TestCase):
         QTest.mouseClick(preview, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point_of(preview, 3))
         self.assertEqual(len(self.store.cfg["ring"]["bubbles"]), 4)  # while editing: as always
 
+    def test_another_bubble_clicked_shows_its_name_though_the_name_field_has_the_focus(self):
+        page, preview = self.page, self.page.preview
+        page.customize.click()
+        self.assertIs(APP.focusWidget(), page.editor.name)
+        self.assertEqual(page.editor.name.text(), "a")
+        QTest.mouseClick(preview, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point_of(preview, 1))
+        self.assertEqual(page.editor.name.text(), "b")
+        QTest.keyClicks(page.editor.name, "X")
+        self.assertEqual([b["label"] for b in self.store.cfg["ring"]["bubbles"]][:2], ["a", "bX"])
+        self.assertEqual(page.editor.name.text(), "bX")  # what is typed stays, while the same bubble is shown
+
     def test_settings_tab_ends_editing_and_holds_the_ring_s_settings(self):
         page = self.page
         page.set_customizing(True)

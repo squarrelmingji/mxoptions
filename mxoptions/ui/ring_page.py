@@ -240,13 +240,14 @@ class BubbleEditor(QFrame):
         if self._bubble is not None:
             self.icon_picker.popup_at(self.icon, self._bubble.get("icon", ""))
 
-    def show_bubble(self, bubble, index, count, may_be_folder):
+    def show_bubble(self, bubble, index, count, may_be_folder, fresh=True):
+        """``fresh``: another bubble than the one shown before; else the name being typed stays as it is."""
         self._bubble = bubble
         folder = ring.is_folder(bubble)
         self.title.setText(_("Bubble {}").format(index + 1))
         automatic = ring.bubble_label({**bubble, "label": ""})
         self.name.setPlaceholderText(automatic)
-        if not self.name.hasFocus() and self.name.text() != bubble.get("label", ""):
+        if (fresh or not self.name.hasFocus()) and self.name.text() != bubble.get("label", ""):
             self.name.setText(bubble.get("label", ""))
         self.icon.set_icon_spec(ring.bubble_icon(bubble), ring.bubble_label(bubble))
         self.colors.set_value(bubble.get("color", ""))
@@ -272,6 +273,7 @@ class RingPage(QWidget):
         self._path = []   # indices of the folders opened in the preview
         self._index = 0
         self._customizing = False  # the ring sharp and its editor out (Options+'s "Customize ring")
+        self._shown = None  # (app, folder path, index) of the bubble the editor shows
         page = QVBoxLayout(self)
         page.setContentsMargins(0, 0, 0, 0)
         page.setSpacing(0)
@@ -699,9 +701,12 @@ class RingPage(QWidget):
         self.opens_with.setVisible(profile is None)
         self.editor.setEnabled(editable and self._index >= 0)
         if self._index >= 0:
+            shown = (profile["app"] if profile else None, tuple(self._path), self._index)
             self.editor.show_bubble(
-                level[self._index], self._index, len(level), may_be_folder=len(self._path) + 1 < config.MAX_RING_DEPTH
+                level[self._index], self._index, len(level), may_be_folder=len(self._path) + 1 < config.MAX_RING_DEPTH,
+                fresh=shown != self._shown,
             )
+            self._shown = shown
             self.editor.delete.setEnabled(bool(self._path) or len(level) > 1)
         self.size.set_value(cfg["ring"]["size"])
         self.button.set_value(next((key for key in config.GESTURE_BUTTONS if cfg["buttons"][key].get("type") == "ring"), None))
