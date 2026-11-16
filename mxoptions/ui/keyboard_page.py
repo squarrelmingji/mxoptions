@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
 
 from .. import APP_NAME, actions, config, device, firmware, keyboard
 from ..i18n import _
-from . import icons, keyboard_drawing, mouse_view, theme
+from . import icons, keyboard_drawing, theme
 from .action_picker import ActionPicker
 from .pages import FirmwareQuery, ScrollPage, _header
 from .widgets import BatteryIcon, Card, Row, Segmented, SliderRow, Switch, hint_label, ui_scale
@@ -131,11 +131,11 @@ TIMER_ROWS = (
      "How long the backlight stays on after you type, while the keyboard is charging over USB."),
 )
 TIMER_STOPS = (5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200)  # s
-# px: the callouts of the keys on the F-row (the size of the mouse's), the other keys, those left as they are
-CALLOUT_W, CALLOUT_H = 150, mouse_view.CHIP_H
+# px: the keys with no place on the picture, those left as they are; the gaps; the tag over the key in question
 CAP_MIN_W, CAP_H = 136, 46
 KEPT_MIN_W, KEPT_H = 120, 36
-CAP_GAP, GROUP_H, BOARD_GAP = 9, 28, 18  # px: between caps, a section's caption, around the keyboard
+CAP_GAP, GROUP_H, BOARD_GAP = 9, 28, 18
+TAG_H = 30
 CHARGING = (device.BATTERY_CHARGING, device.BATTERY_ALMOST_FULL, device.BATTERY_SLOW_CHARGE)
 
 
@@ -238,11 +238,13 @@ class KeyCap(QAbstractButton):
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.key, self.value, self.changed, self._inside = key, "", False, False
+        self.overlay = False  # laid over the key on the picture, which shows it: only the focus is drawn
 
     def show_key(self, key, value, changed=False):
         self.key, self.value, self.changed = key, value, changed
         self.setAccessibleName(key_title(key))
         self.setAccessibleDescription(value)
+        self.setToolTip(f"{key_title(key)}: {value}" if value else key_title(key))
         self.update()
 
     def enterEvent(self, event):
@@ -272,6 +274,12 @@ class KeyCap(QAbstractButton):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         key, rect = self.key, QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        if self.overlay:
+            if self.hasFocus():  # where the keyboard is, on the key itself
+                painter.setPen(QPen(QColor(theme.ACCENT), 1.4, Qt.PenStyle.DashLine))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRoundedRect(rect.adjusted(-1, -1, 1, 1), 5, 5)
+            return
         kept, chosen = key_kept(key), self.isChecked()
         if chosen:
             pen = QPen(QColor(theme.ACCENT_INK), 2)
@@ -334,13 +342,13 @@ class KeyCap(QAbstractButton):
 
 
 class KeyStrip(QWidget):
-    """The keyboard, laid out like the Buttons page of the mouse: a callout for each key on the F-row above a picture
-    of the keyboard, the line from the one being edited to its key; under the picture the other keys that can be
-    changed, then those left as they are. A key is marked on the picture only where its place is known
-    (keyboard_drawing.slots); a click there picks it as its callout does."""
+    """The keyboard, drawn as Logi Options+ draws it: every key with its legend, those whose action can be set here
+    outlined where they sit, the one in question with a tag over it saying what it does. Each such key is a button
+    laid over the picture (Tab, the arrows and Space work on them, screen readers name them). Keys with no known place
+    on the picture (keyboard_drawing.slots) are listed under it, then those left as they are."""
 
     selected = Signal(str)
-    focused = Signal(QWidget)  # a key's callout got the keyboard focus: the page scrolls it into view
+    focused = Signal(QWidget)  # a key got the keyboard focus: the page scrolls it into view
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -350,7 +358,6 @@ class KeyStrip(QWidget):
         self._name = None
         self._layout_name = keyboard_drawing.layout_for(None)
         self._slot_of = {}
-        self._anchors = {}  # key id -> where its line ends, as last drawn
         self.caps = {}  # key id -> KeyCap, in the order of the sections (the Tab order follows)
         self.other_label = QLabel(_("Other keys").upper(), self)
         self.kept_label = QLabel(_("Left as they are").upper(), self)  # by the keyboard or another program
@@ -365,13 +372,15 @@ class KeyStrip(QWidget):
     def set_keys(self, keys, name=None):
         self._name = name
         self._layout_name = keyboard_drawing.layout_for(name)
-        self._slot_of = keyboard_drawing.slots(keys, self._layout_name)
+        self._slot_of = keyboard_drawing.slots(keys, self._layout_name, name)
         self._keys = list(keys)
-        ordered = [key for section in self._sections() for key in section]
+        on_board, others, kept = self._sections()
+        ordered = on_board + others + kept
         ids = [key["id"] for key in ordered]
         if ids != list(self.caps):  # other keys or another order: new caps, in the new order (the Tab order follows)
             focused = next((key_id for key_id, cap in self.caps.items() if cap.hasFocus()), None)
             for cap in self.caps.values():
+                cap.hide()  # gone at once, not when Qt gets round to deleting it
                 cap.deleteLater()
             self.caps = {}
             for key in ordered:
@@ -383,22 +392,25 @@ class KeyStrip(QWidget):
             if focused in self.caps:
                 self.caps[focused].setFocus()
         for key in ordered:
-            self._show(self.caps[key["id"]], key)
-            self.caps[key["id"]].setChecked(key["id"] == self._selected)
+            cap = self.caps[key["id"]]
+            cap.overlay = key["id"] in self._slot_of
+            self._show(cap, key)
+            cap.setChecked(key["id"] == self._selected)
+        self.setMinimumHeight(self.heightForWidth(self.width()))  # other keys, another picture: another height
         self._place()
         self.updateGeometry()
         self.update()
 
     def _sections(self):
-        """The keys of each section, top to bottom: callouts (keys on the F-row, left to right), the other keys that
-        can be changed, those left as they are."""
+        """The keys on the picture (row by row, left to right), the other keys that can be changed, and those left
+        as they are that have no place on the picture."""
         ordered = key_sort(self._keys)
-        x = {slot: place.left() for slot, place in keyboard_drawing.board(self._layout_name) if slot}
-        on_row = lambda key: self._slot_of.get(key["id"], "").startswith("f")  # noqa: E731
-        callouts = sorted((key for key in ordered if on_row(key) and not key_kept(key)),
-                          key=lambda key: x[self._slot_of[key["id"]]])
-        others = [key for key in ordered if not key_kept(key) and not on_row(key)]
-        return callouts, others, [key for key in ordered if key_kept(key)]
+        place = {slot: (rect.top(), rect.left()) for slot, rect, _legend in keyboard_drawing.board(self._layout_name)
+                 if slot}
+        on_board = sorted((key for key in ordered if key["id"] in self._slot_of),
+                          key=lambda key: place[self._slot_of[key["id"]]])
+        rest = [key for key in ordered if key["id"] not in self._slot_of]
+        return on_board, [key for key in rest if not key_kept(key)], [key for key in rest if key_kept(key)]
 
     def _show(self, cap, key):
         value, changed = self._values.get(key["id"], ("", False))
@@ -409,7 +421,7 @@ class KeyStrip(QWidget):
         cap = self.caps.get(key_id)
         if cap is not None:
             self._show(cap, cap.key)
-            self.update()  # the key's mark on the picture
+            self.update()  # the key on the picture, and its tag
 
     def select(self, key_id):
         self._selected = key_id
@@ -435,25 +447,14 @@ class KeyStrip(QWidget):
     def _layout(self, width):
         """Where everything goes at ``width``: key id -> cap rect, the area of the picture, the caption of each lower
         section (label -> its top, or None), and the height all of it takes."""
-        callouts, others, kept = self._sections()
+        _on_board, others, kept = self._sections()
         scale = ui_scale()
-        places, captions, top = {}, {self.other_label: None, self.kept_label: None}, 0.0
-
-        def grid(keys, least, height):
-            nonlocal top
-            columns, cap = self._grid(len(keys), width, least)
-            for index, key in enumerate(keys):
-                row, column = divmod(index, columns)
-                places[key["id"]] = QRectF(column * (cap + CAP_GAP), top + row * (height + CAP_GAP), cap, height)
-            top += -(-len(keys) // columns) * (height + CAP_GAP) - CAP_GAP
-
-        if callouts:
-            grid(callouts, CALLOUT_W * scale, CALLOUT_H)
-            top += BOARD_GAP
+        captions = {self.other_label: None, self.kept_label: None}
         board_width = keyboard_drawing.LAYOUTS[self._layout_name] + 0.8
-        unit = min(width / board_width, 34.0)
-        board = QRectF(0, top, width, unit * (keyboard_drawing.ROWS + 0.8))
-        top += board.height()
+        unit = min(width / board_width, keyboard_drawing.MAX_UNIT)
+        board = QRectF(0, TAG_H + 8, width, unit * (keyboard_drawing.ROWS + 0.8))
+        places = keyboard_drawing.key_rects(board, self._layout_name, self._slot_of)
+        top = board.bottom()
         for label, keys, least, height in ((self.other_label, others, CAP_MIN_W, CAP_H),
                                            (self.kept_label, kept, KEPT_MIN_W, KEPT_H)):
             if not keys:
@@ -461,7 +462,11 @@ class KeyStrip(QWidget):
             top += BOARD_GAP
             captions[label] = top
             top += GROUP_H
-            grid(keys, least * scale, height)
+            columns, cap = self._grid(len(keys), width, least * scale)
+            for index, key in enumerate(keys):
+                row, column = divmod(index, columns)
+                places[key["id"]] = QRectF(column * (cap + CAP_GAP), top + row * (height + CAP_GAP), cap, height)
+            top += -(-len(keys) // columns) * (height + CAP_GAP) - CAP_GAP
         return places, board, captions, top + 2
 
     def _place(self):
@@ -480,11 +485,11 @@ class KeyStrip(QWidget):
         return int(self._layout(width)[3])
 
     def sizeHint(self):
-        width = 3 * (int(CALLOUT_W * ui_scale()) + CAP_GAP)
+        width = 720
         return QSize(width, self.heightForWidth(width))
 
     def minimumSizeHint(self):
-        return QSize(int(CALLOUT_W * ui_scale()), 0)
+        return QSize(int(CAP_MIN_W * ui_scale()), 0)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -496,52 +501,50 @@ class KeyStrip(QWidget):
     def _board(self):
         return self._layout(self.width())[1]
 
-    def mouseMoveEvent(self, event):
-        key_id = keyboard_drawing.key_at(self._board(), self._layout_name, self._slot_of, event.position())
-        self.setCursor(Qt.CursorShape.PointingHandCursor if key_id else Qt.CursorShape.ArrowCursor)
-        self._set_hover(key_id)
+    def mouseMoveEvent(self, event):  # over the picture, between the keys laid over it
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self._set_hover(None)
 
     def leaveEvent(self, event):
         super().leaveEvent(event)
         self._set_hover(None)
 
-    def mousePressEvent(self, event):
-        key_id = keyboard_drawing.key_at(self._board(), self._layout_name, self._slot_of, event.position())
-        if key_id in self.caps and event.button() == Qt.MouseButton.LeftButton:
-            self.select(key_id)
-            self.caps[key_id].setFocus(Qt.FocusReason.MouseFocusReason)  # the keyboard goes on from this key
+    def _tag(self, painter, key_id, text, strong):
+        """A tag over the key ``key_id`` on the picture, as Options+ shows the action of the key in question."""
+        cap = self.caps.get(key_id)
+        if cap is None or not cap.overlay or not text:
+            return
+        rect = QRectF(cap.geometry())
+        font = QFont(painter.font())
+        font.setWeight(QFont.Weight.DemiBold if strong else QFont.Weight.Normal)
+        painter.setFont(font)
+        metrics = QFontMetrics(font)
+        text = metrics.elidedText(text, Qt.TextElideMode.ElideRight, int(self.width() - 24))
+        width = metrics.horizontalAdvance(text) + 24
+        tag = QRectF(0, rect.top() - TAG_H - 4, width, TAG_H)
+        tag.moveLeft(min(max(0.0, rect.center().x() - width / 2), self.width() - width))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(theme.ACCENT if strong else theme.BUBBLE))
+        if not strong:
+            painter.setPen(QPen(QColor(theme.BUBBLE_BORDER), 1))
+        painter.drawRoundedRect(tag, 6, 6)
+        painter.setPen(QColor(theme.ACCENT_TEXT if strong else theme.TEXT))
+        painter.drawText(tag, Qt.AlignmentFlag.AlignCenter, text)
 
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        board = self._board()
-        keys = {key["id"]: key for key in self._keys}
         changed = {key_id for key_id, (_text, on) in self._values.items() if on}
         kept = {key["id"] for key in self._keys if key_kept(key)}
-        self._anchors = keyboard_drawing.paint(painter, board, self._layout_name, self._slot_of, keys, self._selected,
-                                               self._hover, changed, kept)
-        # the line from the callout of the key in question to its key, under the callouts as on the mouse's page
-        for key_id in dict.fromkeys((self._hover, self._selected)):
-            cap, end = self.caps.get(key_id), self._anchors.get(key_id)
-            if cap is None or end is None:
+        names = {key["id"]: KEY_ICONS.get(key["cid"], "") for key in self._keys}
+        keyboard_drawing.paint(painter, self._board(), self._layout_name, self._slot_of, self._selected, self._hover,
+                               changed, kept, names)
+        for key_id, strong in ((self._hover, False), (self._selected, True)):
+            if key_id is None or (not strong and key_id == self._selected):
                 continue
-            active = key_id == self._selected
-            rect = QRectF(cap.geometry())
-            above = rect.bottom() < board.top()
-            start = QPointF(rect.center().x(), rect.bottom() if above else rect.top())
-            elbow = QPointF(start.x(), board.top() - BOARD_GAP / 2 if above else board.bottom() + BOARD_GAP / 2)
-            color = QColor(theme.ACCENT_INK if active else theme.MUTED)
-            painter.setPen(QPen(color, 1.7 if active else 1.0))
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-            path = QPainterPath(start)
-            path.lineTo(elbow)
-            path.lineTo(QPointF(end.x(), elbow.y()))
-            path.lineTo(end)
-            painter.drawPath(path)
-            painter.setPen(QPen(QColor(theme.BG), 1.2))
-            painter.setBrush(color)
-            radius = 4.2 if active else 3.2
-            painter.drawEllipse(end, radius, radius)
+            cap = self.caps.get(key_id)
+            if cap is not None:  # what it does once set to something of its own, else what the key is
+                self._tag(painter, key_id, cap.value if cap.changed else key_title(cap.key), strong)
 
 
 class KeysPage(QWidget):
@@ -592,6 +595,18 @@ class KeysPage(QWidget):
         self.strip.setAccessibleName(_("Keys"))
         area = self.scroll = QScrollArea()
         area.setWidgetResizable(True)
+        # Room for the scroll bar always: the picture is as wide as the page, so a bar coming and going would change
+        # the page's height and bring the bar back and forth. Its handle shows only while there is something to scroll.
+        area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
+        bar = area.verticalScrollBar()
+        bar.setObjectName("quietBar")
+
+        def idle(_low, high):
+            bar.setProperty("idle", high == 0)
+            bar.style().unpolish(bar)
+            bar.style().polish(bar)
+        bar.rangeChanged.connect(idle)
+        idle(0, 0)
         area.setFrameShape(QScrollArea.Shape.NoFrame)
         area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         holder = QWidget()

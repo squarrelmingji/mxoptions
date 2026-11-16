@@ -2,6 +2,7 @@
 which setting, the headings of a key's actions, and the window with the keyboard's pages at its smallest size."""
 
 import copy
+import itertools
 import os
 import threading
 import unittest
@@ -95,12 +96,12 @@ class Drawing(unittest.TestCase):
 
     def test_the_f_key_said_and_known_ids_give_places_nothing_else(self):
         keys = [key(0x00C7, pos=1), key(0x00E9, pos=12), key(0x00E4, pos=13), key(0x00E5, pos=16),
-                key(0x0F01), key(0x010C), key(0x0116), key(0x0118)]
-        full = keyboard_drawing.slots(keys, "full")
+                key(0x0F01), key(0x010C), key(0x0116), key(0x0118), key(0x00E8)]
+        full = keyboard_drawing.slots(keys, "full", "Synthetic keyboard")
         self.assertEqual(full, {"0x00c7": "f1", "0x00e9": "f12", "0x010c": "tab", "0x0116": "insert", "0x0118": "home"})
         compact = keyboard_drawing.slots(keys, "compact")  # a Mini: Home, End and the pages down the side, no Insert
         self.assertEqual(compact, {"0x00c7": "f1", "0x00e9": "f12", "0x010c": "tab", "0x0118": "home"})
-        on_mini = {slot for slot, _rect in keyboard_drawing.board("compact")}
+        on_mini = {slot for slot, _rect, _legend in keyboard_drawing.board("compact")}
         self.assertTrue({"home", "end", "pgup", "pgdn", "delete"} <= on_mini)
         self.assertNotIn("insert", on_mini)
 
@@ -112,23 +113,43 @@ class Drawing(unittest.TestCase):
         keys[1] = key(0x0F01, protected=True, pos=3)
         self.assertEqual(keyboard_drawing.slots(keys, "full"), expected)
 
-    def test_every_placed_key_is_found_where_its_line_ends(self):
+    def test_an_mx_mechanical_is_drawn_as_options_plus_draws_it(self):
+        unsaid = [dict(k, pos=0) for k in MX_MECHANICAL]  # no key says its F-key: the F-row Options+ shows
+        slot_of = keyboard_drawing.slots(unsaid, "full", "MX Mechanical")
+        self.assertEqual([slot_of[config.key_id(cid)] for cid in keyboard_drawing.F_ROWS["MX Mechanical"]],
+                         [f"f{n}" for n in range(1, 13)])
+        self.assertEqual({slot_of[config.key_id(cid)] for cid in (0x00E8, 0x00E9, 0x00D1, 0x00D2, 0x00D3, 0x000A,
+                                                                    0x006E, 0x00D4, 0x006F, 0x0034)},
+                         {"vol_down", "vol_up", "es1", "es2", "es3", "np1", "np2", "np3", "np4", "fn"})
+        self.assertEqual(slot_of, keyboard_drawing.slots(list(reversed(unsaid)), "full", "MX Mechanical"))
+        other = keyboard_drawing.slots(unsaid, "full", "Some full-size keyboard")  # no picture of it: no such places
+        self.assertFalse({"f1", "vol_down", "es1", "np1", "fn"} & set(other.values()))
+        mini = keyboard_drawing.slots(unsaid, "compact", "MX Mechanical")
+        self.assertFalse({"vol_down", "es1", "np1"} & set(mini.values()))
+
+    def test_a_key_saying_its_f_key_turns_the_model_s_f_row_off(self):
+        keys = [key(0x00C7), key(0x0200, pos=1)]
+        for order in (keys, list(reversed(keys)), [key(0x00C7, protected=True), key(0x0200, pos=1)]):
+            self.assertEqual(keyboard_drawing.slots(order, "full", "MX Mechanical"), {"0x0200": "f1"})
+
+    def test_every_placed_key_is_found_where_it_is_drawn(self):
         image = QImage(900, 300, QImage.Format.Format_ARGB32)
         for layout in keyboard_drawing.LAYOUTS:
             with self.subTest(layout=layout):
-                slot_of = keyboard_drawing.slots(MX_MECHANICAL, layout)
+                slot_of = keyboard_drawing.slots(MX_MECHANICAL, layout, "MX Mechanical")
                 self.assertGreaterEqual(len(slot_of), 20)
                 area = QRectF(0, 0, 900, 300)
                 painter = QPainter(image)
-                anchors = keyboard_drawing.paint(painter, area, layout, slot_of,
-                                                 {k["id"]: k for k in MX_MECHANICAL}, kept={"0x00d1"})
+                rects = keyboard_drawing.paint(painter, area, layout, slot_of, kept={"0x00d1"})
                 painter.end()
                 board, _unit = keyboard_drawing.fit(area, layout)
-                self.assertEqual(set(anchors), set(slot_of))
-                for key_id, point in anchors.items():
-                    self.assertTrue(board.adjusted(-1, -1, 1, 1).contains(point), key_id)
-                    inside = point + QPointF(0, 3) if slot_of[key_id].startswith("f") else point
-                    self.assertEqual(keyboard_drawing.key_at(area, layout, slot_of, inside), key_id)
+                self.assertEqual(rects, keyboard_drawing.key_rects(area, layout, slot_of))
+                self.assertEqual(set(rects), set(slot_of))
+                for key_id, rect in rects.items():
+                    self.assertTrue(board.contains(rect), key_id)
+                    self.assertEqual(keyboard_drawing.key_at(area, layout, slot_of, rect.center()), key_id)
+                for one, other in itertools.combinations(rects.values(), 2):
+                    self.assertFalse(one.intersects(other))
 
 
 class KeysPageLayout(unittest.TestCase):
@@ -154,33 +175,49 @@ class KeysPageLayout(unittest.TestCase):
         self.show([key(0x00D1, protected=True), key(0x0F01), key(0x00C8)])
         self.assertEqual(self.page._key["id"], "0x00c8")  # in the order shown: Screen brightness up before 0x0f01
 
-    def test_f_row_callouts_above_the_picture_the_rest_under_it(self):
+    def test_keys_on_the_picture_are_buttons_over_their_keys_the_rest_under_it(self):
         self.show([key(0x00E0, pos=3), key(0x00C7, pos=1), key(0x0F01), key(0x010C), key(0x00D1, protected=True)])
         strip = self.page.strip
         board = strip._board()
+        rects = keyboard_drawing.key_rects(board, strip._layout_name, strip._slot_of)
+        for key_id in ("0x00c7", "0x00e0", "0x010c"):  # laid over their keys, drawing only the focus
+            cap = strip.caps[key_id]
+            self.assertTrue(cap.overlay, key_id)
+            self.assertEqual(cap.geometry(), rects[key_id].toRect())
+        for key_id in ("0x0f01", "0x00d1"):  # no place known: under the picture
+            self.assertFalse(strip.caps[key_id].overlay)
+            self.assertGreater(strip.caps[key_id].y(), board.bottom(), key_id)
+        self.assertGreater(strip.caps["0x00d1"].y(), strip.caps["0x0f01"].geometry().bottom())
+        self.assertTrue(strip.other_label.isVisible() and strip.kept_label.isVisible())
         rect = strip.rect()
         for cap in strip.caps.values():
             self.assertTrue(rect.contains(cap.geometry()), cap.accessibleName())
-        callouts = [strip.caps["0x00c7"], strip.caps["0x00e0"]]
-        self.assertLess(callouts[0].x(), callouts[1].x())  # left to right, as their keys
-        self.assertTrue(all(cap.geometry().bottom() < board.top() for cap in callouts))
-        for key_id in ("0x0f01", "0x010c", "0x00d1"):
-            self.assertGreater(strip.caps[key_id].y(), board.bottom(), key_id)
-        self.assertGreater(strip.caps["0x00d1"].y(), strip.caps["0x010c"].geometry().bottom())
-        self.assertTrue(strip.other_label.isVisible() and strip.kept_label.isVisible())
         self.assertEqual(list(strip.caps), ["0x00c7", "0x00e0", "0x010c", "0x0f01", "0x00d1"])  # the Tab order
+
+    def test_the_key_in_question_has_a_tag_over_it(self):
+        self.store.set_key("0x00e0", {"type": "keys", "keys": ["KEY_LEFTCTRL", "KEY_C"]})
+        self.show([key(0x00C7, pos=1), key(0x00E0, pos=3)])
+        strip = self.page.strip
+        tags = []
+        original = keyboard_page.KeyStrip._tag
+        with mock.patch.object(keyboard_page.KeyStrip, "_tag", lambda self, painter, key_id, text, strong:
+                               tags.append((key_id, text, strong)) or original(self, painter, key_id, text, strong)):
+            strip.select("0x00e0")
+            strip._set_hover("0x00c7")
+            strip.grab()
+        self.assertIn(("0x00e0", strip.caps["0x00e0"].value, True), tags)  # what it does, once changed
+        self.assertIn(("0x00c7", "Screen brightness down", False), tags)  # the name of the key the pointer is on
 
     def test_a_click_on_a_key_of_the_picture_picks_it_and_the_keyboard_goes_on_from_there(self):
         self.show([key(0x00C7, pos=1), key(0x00C8, pos=2), key(0x010C)])
         strip = self.page.strip
-        settle()
-        anchors = strip._anchors
-        self.assertEqual(set(anchors), {"0x00c7", "0x00c8", "0x010c"})
-        target = anchors["0x00c8"] + QPointF(0, 6)  # inside the key, under its top edge
-        QTest.mouseClick(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, target.toPoint())
+        self.page.activateWindow()
+        self.assertTrue(QTest.qWaitForWindowActive(self.page))
+        cap = strip.caps["0x00c8"]
+        QTest.mouseClick(cap, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, cap.rect().center())
         self.assertEqual(self.page._key["id"], "0x00c8")
-        self.assertTrue(strip.caps["0x00c8"].hasFocus())
-        QTest.keyClick(strip.caps["0x00c8"], Qt.Key.Key_Left)
+        cap.setFocus()
+        QTest.keyClick(cap, Qt.Key.Key_Left)
         self.assertEqual(self.page._key["id"], "0x00c7")
         QTest.mouseClick(strip, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier,
                          QPoint(2, int(strip._board().bottom()) - 2))  # the case, no key: nothing changes
@@ -203,20 +240,22 @@ class KeysPageLayout(unittest.TestCase):
         QTest.keyClick(APP.focusWidget(), Qt.Key.Key_Backtab)
         self.assertIs(APP.focusWidget(), strip.caps["0x010c"])
 
-    def test_the_arrows_go_across_rows_and_sections(self):
-        self.show([key(cid, pos=n) for n, cid in enumerate((0x00C7, 0x00C8, 0x00E2, 0x00E3, 0x0103, 0x0108), 1)]
-                  + [key(0x010C)])
+    def test_the_arrows_go_from_key_to_key_on_the_picture_and_under_it(self):
+        self.show([key(0x00C7, pos=1), key(0x00C8, pos=2), key(0x010C), key(0x0F01)])
         strip = self.page.strip
-        first, last = strip.caps["0x00c7"], strip.caps["0x0108"]
-        self.assertGreater(last.y(), first.y())  # the callouts take more than one row here
+        first = strip.caps["0x00c7"]
         first.setFocus()
-        QTest.keyClick(first, Qt.Key.Key_Down)
-        below = next(key_id for key_id, cap in strip.caps.items() if cap.hasFocus())
-        self.assertGreater(strip.caps[below].y(), first.y())
-        self.assertEqual(self.page._key["id"], below)
-        for _ in range(4):
+        QTest.keyClick(first, Qt.Key.Key_Right)
+        self.assertEqual(self.page._key["id"], "0x00c8")  # along the F-row
+        seen = ["0x00c8"]
+        for _ in range(3):  # down the picture, and on to the keys under it
             QTest.keyClick(APP.focusWidget(), Qt.Key.Key_Down)
-        self.assertEqual(self.page._key["id"], "0x010c")  # on into the keys under the picture
+            now = self.page._key["id"]
+            self.assertGreater(strip.caps[now].y(), strip.caps[seen[-1]].y() - 1, now)
+            seen.append(now)
+        self.assertEqual(seen[-1], "0x0f01")
+        QTest.keyClick(APP.focusWidget(), Qt.Key.Key_Up)
+        self.assertTrue(strip.caps[self.page._key["id"]].overlay)  # back up onto the picture
 
     def test_a_mini_gets_the_compact_picture_with_the_same_keys(self):
         keys = [key(0x00C7, pos=1), key(0x0116), key(0x0118)]
