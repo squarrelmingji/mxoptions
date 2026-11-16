@@ -1,12 +1,13 @@
 """Settings page for the Actions Ring: the bubble preview and the editor for one bubble."""
 
 import copy
+import time
 
 from PySide6.QtCore import QPoint, QSize, Qt, Signal
 from PySide6.QtGui import QPainter
 from PySide6.QtWidgets import (
     QButtonGroup, QFileDialog, QFrame, QGraphicsBlurEffect, QGridLayout, QHBoxLayout, QInputDialog, QLabel, QLineEdit,
-    QMenu, QMessageBox, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
+    QApplication, QMenu, QMessageBox, QPushButton, QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from .. import APP_NAME, actions, config
@@ -274,6 +275,7 @@ class RingPage(QWidget):
         self._index = 0
         self._customizing = False  # the ring sharp and its editor out (Options+'s "Customize ring")
         self._shown = None  # (app, folder path, index) of the bubble the editor shows
+        self._entered_at = None  # time.monotonic of a touch of the blurred ring that started editing
         page = QVBoxLayout(self)
         page.setContentsMargins(0, 0, 0, 0)
         page.setSpacing(0)
@@ -393,8 +395,8 @@ class RingPage(QWidget):
         page.addLayout(body, 1)
 
         # Out of editing, a touch of the ring only starts it (choosing the bubble touched); in it, as always
-        self.preview.bubble_clicked.connect(lambda i: self._select(i) if self._customizing else self._enter(i))
-        self.preview.bubble_opened.connect(lambda i: self._open(i) if self._customizing else self._enter(i))
+        self.preview.bubble_clicked.connect(lambda i: self._select(i) if self._customizing else self._enter(i, touched=True))
+        self.preview.bubble_opened.connect(self._opened)
         self.preview.add_clicked.connect(lambda: self._add() if self._customizing else self._enter())
         self.preview.center_clicked.connect(lambda: self._go_up() if self._customizing else self._enter())
         self.editor.changed.connect(self._field_changed)
@@ -445,12 +447,22 @@ class RingPage(QWidget):
         elif focus and was and not self._customizing:
             self.customize.setFocus()
 
-    def _enter(self, index=None):
+    def _enter(self, index=None, touched=False):
         """Start editing from the ring (a bubble touched: that one chosen). Nothing of the ring changes."""
+        self._entered_at = time.monotonic() if touched else None
         if index is not None:
             self._index = index
         self._refresh()  # first: the editor's name field keeps its text while it has the focus
         self.set_customizing(True)
+
+    def _opened(self, index):
+        """A double click on a folder: opens it while editing, unless its first click is what started editing (a
+        double click arrives after the press that made the click)."""
+        entered, self._entered_at = self._entered_at, None
+        if not self._customizing:
+            self._enter(index)
+        elif entered is None or time.monotonic() - entered > QApplication.doubleClickInterval() / 1000:
+            self._open(index)
 
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape and self._customizing:  # popups and menus get theirs first

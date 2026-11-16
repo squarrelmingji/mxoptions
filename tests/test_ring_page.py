@@ -124,8 +124,20 @@ class Page(unittest.TestCase):
         page.set_customizing(False)
         QTest.mouseDClick(preview, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point_of(preview, 2))
         self.editing()
-        self.assertEqual(page._path, [])  # the folder chosen, not opened
+        self.assertEqual((page._path, page._index), ([], 2))  # the folder chosen, not opened
         self.assertEqual(self.store.cfg, before)
+        # A real double click: its first press started editing (the ring moves aside for the editor), and the double
+        # click event that follows lands on the folder within the double-click time: still only chosen
+        page.set_customizing(False)
+        page._enter(2, touched=True)
+        settle()
+        folder = point_of(preview, 2)
+        QTest.mouseDClick(preview, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, folder)
+        self.assertEqual(page._path, [])
+        page._entered_at = None  # editing for a while: a double click opens it
+        QTest.mouseDClick(preview, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, folder)
+        self.assertEqual(page._path, [2])
+        page._go_up()
         QTest.mouseClick(preview, Qt.MouseButton.LeftButton, Qt.KeyboardModifier.NoModifier, point_of(preview, 3))
         self.assertEqual(len(self.store.cfg["ring"]["bubbles"]), 4)  # while editing: as always
 
