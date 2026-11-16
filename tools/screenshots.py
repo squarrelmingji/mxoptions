@@ -42,12 +42,15 @@ STATE = {
 
 # A made-up keyboard for --keyboard, with the control ids of a real MX keyboard's top row; it keeps the Easy-Switch
 # keys and Fn.
+KEYBOARD_POS = {0x00C7: 1, 0x00C8: 2, 0x00E0: 3, 0x0103: 5, 0x0108: 6, 0x010A: 7, 0x011C: 8, 0x00E5: 10}  # F-keys
 KEYBOARD = {
     "connected": True, "known": True, "name": "MX Mechanical", "battery": (64, 0), "current_host": 0,
     "hosts": [{"paired": True, "name": "workstation"}, {"paired": True, "name": "laptop"}, {"paired": False, "name": ""}],
     "keys": [{"id": f"0x{cid:04x}", "cid": cid, "tid": cid, "protected": cid in (0x00D1, 0x00D2, 0x00D3, 0x0034),
-              "active": cid in (0x00E0, 0x010A, 0x00E5), "native_reason": "protected" if cid in (0x00D1, 0x00D2, 0x00D3, 0x0034) else None}
-             for cid in (0x00D1, 0x00D2, 0x00D3, 0x0034, 0x00C7, 0x00C8, 0x00E0, 0x0103, 0x0108, 0x010A, 0x011C, 0x00E5)],
+              "active": cid in (0x00E0, 0x010A, 0x00E5), "native_reason": "protected" if cid in (0x00D1, 0x00D2, 0x00D3, 0x0034) else None,
+              "pos": KEYBOARD_POS.get(cid, 0)}
+             for cid in (0x00D1, 0x00D2, 0x00D3, 0x0034, 0x00C7, 0x00C8, 0x00E0, 0x0103, 0x0108, 0x010A, 0x011C, 0x00E5,
+                         0x010C, 0x010D)],
     "reason": None, "firmware": "12.3.45", "settings": ["fn", "backlight", "platform", "disable", "locks"],
     "controls": {
         "disable": {"value": ["insert"], "keys": ["caps_lock", "num_lock", "scroll_lock", "insert", "super"],
