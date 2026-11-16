@@ -105,7 +105,7 @@ class MouseView(QWidget):
             self._group.addButton(chip)
             self._chips[key] = chip
         if not self._chips:  # no titles: the picture alone (the home page), all of the width its own
-            self.setMinimumSize(160, 160)
+            self.setMinimumSize(200, 200)
 
     def keys(self):
         return list(self._chips)
@@ -251,7 +251,8 @@ class MouseView(QWidget):
         left = self._left()
         width = self.width() - left - 8
         # 150 x 150 mm comfortably contains the model from every camera angle used
-        scale = max(1.5, min(4.2, width / 150.0, (self.height() - 16) / 150.0))
+        # never below 1.5 beside the callouts; the picture alone (home page) shrinks with its room, all of it in view
+        scale = max(1.5 if self._chips else 0.5, min(4.2, width / 150.0, (self.height() - 16) / 150.0))
         origin = QPointF(left + width / 2, self.height() / 2 + 4 * scale)
         return mouse_model.Camera(view[0], view[1], scale, origin)
 

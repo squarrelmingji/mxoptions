@@ -16,7 +16,7 @@ from PySide6.QtWidgets import QApplication  # noqa: E402
 
 import tests.support  # noqa: F401,E402
 from mxoptions import device, engine  # noqa: E402
-from mxoptions.ui import home_page, icons, mouse_model, mouse_photo  # noqa: E402
+from mxoptions.ui import home_page, icons, mouse_model, mouse_photo, mouse_render  # noqa: E402
 from mxoptions.ui.home_page import HomePage, badge_text, greeting  # noqa: E402
 from mxoptions.ui.mouse_view import MODEL_GAP, MouseView, chip_width  # noqa: E402
 from tests.test_keyboard_tabs import gone, make_store, settle, window  # noqa: E402
@@ -220,7 +220,23 @@ class Picture(unittest.TestCase):
             self.assertEqual(camera.origin, QPointF(left + (width - left - 8) / 2, camera.origin.y()))
             self.assertEqual(alone._stage().left(), 0)
             self.assertEqual(alone._left(), 0)
-        self.assertEqual((alone.minimumWidth(), alone.minimumHeight()), (160, 160))
+        self.assertEqual((alone.minimumWidth(), alone.minimumHeight()), (200, 200))
+
+    @unittest.skipUnless(mouse_render.available(), "the studio model's bounds need its renderer")
+    def test_the_whole_mouse_is_in_view_on_the_home_page(self):
+        for size in ((1180, 700), (1280, 780), (1600, 1000)):
+            with self.subTest(size=size):
+                store = make_store()
+                store.update_state(mouse(kb=kb()))
+                win = window(store)
+                self.addCleanup(gone, win)
+                win.resize(*size)
+                settle()
+                view = win.home_page.mouse_view
+                left, top, right, bottom = mouse_render._bounds(
+                    view._camera(mouse_model.VIEWS[None]), mouse_render._fine_geometry(), 0)
+                self.assertTrue(0 <= left and right <= view.width() and 0 <= top and bottom <= view.height(),
+                                (size, (left, top, right, bottom), view.size()))
 
 
 class State(unittest.TestCase):
