@@ -28,7 +28,7 @@ def _child(result_path):
     from mxoptions.ui import main_window, ring, sounds, tray_icon
 
     seen = {"errors": [], "icons": [], "messages": [], "tooltip": None, "finished": False, "status": None, "flow": [],
-            "opened": [], "gc_enabled": None, "gc_threads": []}
+            "opened": [], "gc_enabled": None, "gc_threads": [], "gc_at_flow": None}
     import gc
     import time
     gc.callbacks.append(lambda phase, _info: phase == "start" and seen["gc_threads"].append(threading.current_thread().name))
@@ -152,7 +152,8 @@ def _child(result_path):
         together = False
 
         def __init__(self, *_args):
-            pass
+            if seen["gc_at_flow"] is None:  # the Flow service starts its worker here: the guard must be on already
+                seen["gc_at_flow"] = gc.isenabled()
 
         def toggle_together(self):
             self.together = not self.together
@@ -335,6 +336,7 @@ class Tray(unittest.TestCase):
     def test_cycles_are_collected_on_the_gui_thread_only(self):
         seen = self.result()
         self.assertIs(seen["gc_enabled"], False, self.output)
+        self.assertIs(seen["gc_at_flow"], False, self.output)
         self.assertTrue(seen["gc_threads"], self.output)
         self.assertEqual(set(seen["gc_threads"]), {"MainThread"}, self.output)
 

@@ -251,6 +251,14 @@ def main(argv=None):
     server.setSocketOptions(QLocalServer.SocketOption.UserAccessOption)  # this user's programs only
     server.listen(_socket_name())
 
+    # Python's cyclic collector runs on whichever thread happens to allocate (the engine's, the keyboard's, Flow's,
+    # a worker's); a Qt object it frees there is torn down off its own thread, which Qt does not allow. So cycles are
+    # collected here only, on the GUI thread, now and then: from before the first of those threads starts.
+    gc.disable()
+    collector = QTimer(app)
+    collector.timeout.connect(gc.collect)
+    collector.start(int(GC_PERIOD * 1000))
+
     bridge = Bridge()
     engine = Engine(cfg, bridge, seed=first_run)
     sounds = WheelSounds(app)
@@ -435,13 +443,6 @@ def main(argv=None):
     wakeup.start(250)
     wakeup.timeout.connect(lambda: None)
 
-    # Python's cyclic collector runs on whichever thread happens to allocate (the engine's, the keyboard's, a
-    # worker's); a Qt object it frees there is torn down off its own thread, which Qt does not allow. So cycles are
-    # collected here only, on the GUI thread, now and then.
-    gc.disable()
-    collector = QTimer(app)
-    collector.timeout.connect(gc.collect)
-    collector.start(int(GC_PERIOD * 1000))
     engine.start()
     if not args.background:
         window.show()
