@@ -132,7 +132,13 @@ class Fetch(NoNetwork):
 
     def test_release_pages(self):
         self.assertEqual(updates.release_page(PAGE), PAGE)
-        for url in ("http://github.com/squarrelmingji/mxoptions/releases/tag/v1.0.0",
+        for url in ("https://github.com/squarrelmingji/mxoptions/releases/%2e%2e/%2e%2e/%2e%2e/attacker/repo/releases/tag/v9.0.0",
+                    "https://github.com/squarrelmingji/mxoptions/releases/../../../attacker/repo/releases/tag/v9.0.0",
+                    "https://github.com/squarrelmingji/mxoptions/releases/tag/v9.0.0?x=1",
+                    "https://github.com/squarrelmingji/mxoptions/releases/tag/v9.0.0#x",
+                    "https://github.com/squarrelmingji/mxoptions/releases/tag/v9.0.0/../../x",
+                    "https://github.com:bad/squarrelmingji/mxoptions/releases/tag/v9.0.0",
+                    "http://github.com/squarrelmingji/mxoptions/releases/tag/v1.0.0",
                     "https://github.com/nictonus/mxoptions/releases/tag/v1.0.0",
                     "https://github.com/squarrelmingji/mxoptions/pulls", "https://a@github.com/squarrelmingji/mxoptions/releases/x",
                     "javascript:alert(1)", None, 5):
@@ -166,10 +172,10 @@ class HowToUpdate(NoNetwork):
     def test_commands(self):
         with mock.patch.object(updates.sys, "executable", "/usr/bin/python3"):
             self.assertEqual(updates.update_commands("deb", "0.11.0b1"),
-                             "sudo apt install ./mxoptions_0.11.0~b1-1_all.deb\nsystemctl --user restart mxoptions.service")
+                             "sudo apt install ./mxoptions_0.11.0~b1-1_all.deb && \\\nsystemctl --user restart mxoptions.service")
             self.assertEqual(updates.update_commands("user", "0.11.0"),
-                             "tar xf mxoptions-0.11.0.tar.gz\ncd mxoptions-0.11.0\nmake install-user PYTHON=/usr/bin/python3\n"
-                             "systemctl --user restart mxoptions.service")
+                             "tar xf mxoptions-0.11.0.tar.gz && \\\ncd mxoptions-0.11.0 && \\\n"
+                             "make install-user PYTHON=/usr/bin/python3 && \\\nsystemctl --user restart mxoptions.service")
         self.assertEqual(updates.update_commands("other", "0.11.0"), "")
         self.assertEqual(updates.update_commands("user", "0.11.0; rm -rf ~"), "")
 
@@ -177,9 +183,25 @@ class HowToUpdate(NoNetwork):
         for path in ("/opt/Python Env/bin/python3", "/opt/$HOME/python3", "/opt/a'b/python3", "/opt/a\\b/python3"):
             with self.subTest(path), mock.patch.object(updates.sys, "executable", path):
                 commands = updates.update_commands("user", "0.11.0")
-                self.assertIn("make install-user\n", commands)
+                self.assertIn("make install-user && ", commands)
                 self.assertNotIn(path, commands)
                 self.assertIn(path, updates.update_text("user", "0.11.0"))
+
+    def test_a_failed_step_stops_the_rest(self):
+        bin_dir = tempfile.mkdtemp()
+        self.addCleanup(lambda: os.system(f"rm -rf '{bin_dir}'"))
+        for name, code in (("tar", 1), ("sudo", 1), ("make", 0), ("systemctl", 0)):
+            with open(os.path.join(bin_dir, name), "w") as f:
+                f.write(f"#!/bin/sh\necho {name} >> '{bin_dir}/ran'\nexit {code}\n")
+            os.chmod(os.path.join(bin_dir, name), 0o755)
+        for kind in ("user", "deb"):
+            with self.subTest(kind=kind), mock.patch.object(updates.sys, "executable", "/usr/bin/python3"):
+                os.system(f"rm -f '{bin_dir}/ran'")
+                commands = updates.update_commands(kind, "0.11.0")
+                import subprocess
+                subprocess.run(["/bin/sh", "-c", commands], cwd=bin_dir, env={"PATH": bin_dir}, capture_output=True)
+                with open(os.path.join(bin_dir, "ran")) as f:
+                    self.assertEqual(f.read().split(), ["tar" if kind == "user" else "sudo"])  # nothing after it
 
     def test_commands_are_the_same_in_every_language(self):
         from mxoptions import i18n
@@ -233,6 +255,18 @@ class State(NoNetwork):
         for junk in ("{", "[]", json.dumps({"other": 1})):
             self.write(junk)
             self.assertEqual(updates.load_state(), {"checked_at": None, "notified": "", "release": None})
+
+    def test_values_that_would_raise_never_stop_the_start(self):
+        for saved in ('{"checked_at": 1' + "0" * 400 + '}', '{"checked_at": 1e400}',
+                      json.dumps({"release": {"version": "9.0.0", "tag": "v9.0.0", "page": "https://github.com:bad/x"}}),
+                      json.dumps({"notified": "1" * 5000 + ".0.0"}),
+                      json.dumps({"release": {"version": "1" * 5000 + ".0.0", "tag": "v" + "1" * 5000 + ".0.0", "page": PAGE}}),
+                      "[" * 100000 + "]" * 100000):
+            with self.subTest(saved=saved[:40]):
+                self.write(saved[:updates.MAX_STATE])
+                state = updates.load_state(2000.0)
+                self.assertIsNone(state["release"])
+                self.assertIsNone(state["checked_at"])
 
     def test_a_fifo_or_a_huge_file_is_ignored_without_blocking(self):
         os.mkfifo(self.path())
@@ -291,6 +325,7 @@ class Checks(NoNetwork):
         patcher.start()
         self.addCleanup(patcher.stop)
         checker = updates_ui.Checker(store, clock=lambda: now)
+        checker.start()
         self.addCleanup(checker.deleteLater)
         self.results = []
         checker.result.connect(self.results.append)
@@ -311,6 +346,24 @@ class Checks(NoNetwork):
         self.assertEqual(len(self.calls), 1)
         self.assertEqual([r["state"] for r in self.results], ["checking", "available"])
         self.assertEqual(updates.load_state(100000.0)["checked_at"], 100000.0)
+
+    def test_a_cut_off_reply_ends_the_check_and_the_next_one_works(self):
+        import http.client
+        answers = [http.client.IncompleteRead(b"{"), {"version": "9.0.0", "tag": "v9.0.0", "page": PAGE}]
+
+        def fetch():
+            answer = answers.pop(0)
+            if isinstance(answer, BaseException):
+                raise answer
+            return answer
+        checker = self.checker()
+        with mock.patch.object(updates, "fetch_latest", fetch):
+            checker.check_now()
+            self.wait(checker)
+            self.assertEqual(self.results[-1]["state"], "failed")
+            checker.check_now()
+            self.wait(checker)
+        self.assertEqual(self.results[-1]["state"], "available")
 
     def test_failures_and_no_release(self):
         for answer, state in ((updates.NoRelease("none"), "none"), (OSError("offline"), "failed"), (ValueError("x"), "failed")):
@@ -348,6 +401,27 @@ class Checks(NoNetwork):
         checker.check_now()
         self.wait(checker)
         self.assertEqual(len(self.calls), 1)
+
+
+class Lifetime(NoNetwork):
+    def test_a_page_s_checker_never_checks_by_itself_and_goes_with_its_store(self):
+        import gc
+        import threading
+        from PySide6.QtCore import QEvent, qInstallMessageHandler
+        store = make_store()
+        checker = updates_ui.checker_for(store)
+        self.assertFalse(checker._timer.isActive())  # made by a page: never checks on its own
+        messages = []
+        old = qInstallMessageHandler(lambda _kind, _context, text: messages.append(text))
+        self.addCleanup(qInstallMessageHandler, old)
+        store.deleteLater()
+        APP.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        del store, checker
+        collector = threading.Thread(target=gc.collect)
+        collector.start()
+        collector.join()
+        APP.processEvents()
+        self.assertEqual([m for m in messages if "another thread" in m], [])
 
 
 class Card(NoNetwork):

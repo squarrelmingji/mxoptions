@@ -30,7 +30,9 @@ MAX_STATE = 64 * 1024    # bytes of update.json read at most
 STATE_FILE = "update.json"
 PERIOD = 24 * 3600.0     # s between two automatic checks
 
-_VERSION = re.compile(r"v?(\d+)\.(\d+)\.(\d+)(?:(a|b|rc)(\d+)|\.post(\d+))?\Z")
+_VERSION = re.compile(r"v?(\d{1,6})\.(\d{1,6})\.(\d{1,6})(?:(a|b|rc)(\d{1,6})|\.post(\d{1,6}))?\Z")
+# the one shape of a release page offered or opened: no other path, no query, nothing encoded
+_PAGE = re.compile(r"/squarrelmingji/mxoptions/releases/tag/v\d{1,6}\.\d{1,6}\.\d{1,6}((a|b|rc)\d{1,6}|\.post\d{1,6})?\Z")
 _SAFE_PATH = re.compile(r"/[A-Za-z0-9._+/-]+\Z")  # a path that needs no quoting for the shell nor make
 
 
@@ -65,17 +67,23 @@ def debian_version(version):
 # -- what GitHub says ------------------------------------------------------------------------------------------------
 
 def _allowed(url):
-    parts = urllib.parse.urlsplit(url)
-    return (parts.scheme == "https" and parts.hostname in ALLOWED_HOSTS and parts.username is None
-            and parts.password is None and parts.port is None)
+    try:
+        parts = urllib.parse.urlsplit(url)
+        return (parts.scheme == "https" and parts.hostname in ALLOWED_HOSTS and parts.username is None
+                and parts.password is None and parts.port is None)
+    except (ValueError, TypeError, AttributeError):  # a port that is no number, and the like
+        return False
 
 
 def release_page(url):
-    """``url`` if it is a release page of this fork on github.com, else None."""
-    if not isinstance(url, str) or not _allowed(url):
+    """``url`` if it is exactly a release page of this fork on github.com (https://github.com/squarrelmingji/
+    mxoptions/releases/tag/v<version>), else None."""
+    if not isinstance(url, str) or len(url) > 200 or not _allowed(url):
         return None
     parts = urllib.parse.urlsplit(url)
-    return url if parts.hostname == "github.com" and parts.path.startswith(f"/{REPO}/releases/") else None
+    if parts.hostname != "github.com" or parts.query or parts.fragment or not _PAGE.match(parts.path):
+        return None
+    return url
 
 
 def tag_page(tag):
@@ -116,7 +124,7 @@ def fetch_latest(timeout=15.0):
         raise ValueError("reply too large")
     try:
         reply = json.loads(data)
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):
         raise ValueError("reply is not JSON") from None
     tag = reply.get("tag_name") if isinstance(reply, dict) else None
     if not isinstance(tag, str) or not tag.startswith("v") or parse_version(tag[1:]) is None:
@@ -164,12 +172,12 @@ def update_commands(kind, version):
     if parse_version(version) is None:
         return ""
     restart = "systemctl --user restart mxoptions.service"
-    if kind == "deb":
-        return f"sudo apt install ./mxoptions_{debian_version(version)}_all.deb\n{restart}"
+    if kind == "deb":  # each step only when the one before it worked
+        return f"sudo apt install ./mxoptions_{debian_version(version)}_all.deb && \\\n{restart}"
     if kind == "user":
         python = _python()
         make = f"make install-user PYTHON={python}" if python else "make install-user"
-        return f"tar xf mxoptions-{version}.tar.gz\ncd mxoptions-{version}\n{make}\n{restart}"
+        return f"tar xf mxoptions-{version}.tar.gz && \\\ncd mxoptions-{version} && \\\n{make} && \\\n{restart}"
     return ""
 
 
@@ -220,8 +228,11 @@ def _data_dir_fd():
 
 
 def _fresh_time(value, now):
-    return (isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
-            and value <= now + 24 * 3600)
+    try:
+        return (isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value))
+                and value <= now + 24 * 3600)
+    except (OverflowError, ValueError, TypeError):
+        return False
 
 
 def load_state(now=None):
@@ -248,15 +259,18 @@ def load_state(now=None):
         os.close(fd)
     try:
         saved = json.loads(data)
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):  # deep nesting as well
         return state
     if not isinstance(saved, dict) or not set(saved) <= {"checked_at", "notified", "release"}:
         return state
-    if _fresh_time(saved.get("checked_at"), now):
-        state["checked_at"] = float(saved["checked_at"])
-    if isinstance(saved.get("notified"), str) and parse_version(saved["notified"]) is not None:
-        state["notified"] = saved["notified"]
-    state["release"] = valid_release(saved.get("release"))
+    try:  # whatever is in the file, nothing of it may stop the program
+        if _fresh_time(saved.get("checked_at"), now):
+            state["checked_at"] = float(saved["checked_at"])
+        if isinstance(saved.get("notified"), str) and parse_version(saved["notified"]) is not None:
+            state["notified"] = saved["notified"]
+        state["release"] = valid_release(saved.get("release"))
+    except (ValueError, OverflowError, TypeError, RecursionError):
+        return {"checked_at": None, "notified": "", "release": None}
     return state
 
 

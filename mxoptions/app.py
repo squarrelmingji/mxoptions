@@ -256,7 +256,7 @@ def main(argv=None):
     store = Store(cfg, engine, sounds)
     store.flow = flow_service.FlowService(store, app)
     from .ui import updates as update_check
-    update_check.checker_for(store)
+    update_check.checker_for(store).start()  # the daily check: only the program itself runs it
     store.front = front.Front(engine, app)
     bridge.state.connect(store.update_state)
     bridge.seeded.connect(lambda seeded: store.replace(seeded, push=False))
