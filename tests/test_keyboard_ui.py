@@ -477,15 +477,17 @@ class KeyboardPhoto(unittest.TestCase):
         self.assertIs(APP.focusWidget(), page.restore)
 
     def test_one_picture_failing_keeps_the_other(self):
-        def fetch(url):
-            if "mini" not in url:
-                raise OSError("no network")
-            return self.fetch(url)
-        with mock.patch.object(mouse_photo, "fetch", fetch):
-            with self.assertRaises(OSError):
-                keyboard_photo.download()
-        self.assertFalse(keyboard_photo.available("MX Mechanical"))
-        self.assertTrue(keyboard_photo.available("MX Mechanical Mini"))
+        for error in (OSError("no network"), http.client.IncompleteRead(b"x", 10)):
+            def fetch(url, error=error):
+                if "mini" not in url:
+                    raise error
+                return self.fetch(url)
+            with mock.patch.object(mouse_photo, "fetch", fetch):
+                with self.assertRaises(type(error)):
+                    keyboard_photo.download()
+            self.assertFalse(keyboard_photo.available("MX Mechanical"))
+            self.assertTrue(keyboard_photo.available("MX Mechanical Mini"))
+            os.remove(keyboard_photo.photo_path("MX Mechanical Mini"))
 
     def test_a_broken_transfer_ends_the_download_too(self):
         store = make_store()
@@ -591,6 +593,13 @@ class KeyboardPhoto(unittest.TestCase):
             self.assertEqual(picture.heightForWidth(800), int(keyboard_photo.fit(800, 0, "MX Mechanical").height()))
             self.assertFalse(picture.grab().isNull())
         self.assertIs(page.backlight_picture._lit, False)
+        drawn = []
+        with mock.patch.object(keyboard_photo, "paint", lambda painter, rect, *args, **kwargs: drawn.append(rect)):
+            for width in (800, 1900):  # wide enough for the largest photo, laid out lower: as high as there is room
+                page.backlight_picture.resize(width, 194)
+                page.backlight_picture.grab()
+                self.assertLessEqual(drawn[-1].height(), 194.001, width)
+                self.assertTrue(QRectF(page.backlight_picture.rect()).contains(drawn[-1]), width)
         self.assertEqual(set(page.easy_picture.slots()), {"0x00d1", "0x00d2", "0x00d3"})  # its Easy-Switch keys marked
         size = keyboard_photo.fit(400, 0, "MX Mechanical").size()
         grey = [keyboard_photo._picture("MX Mechanical", size, 1, lit).pixelColor(200, 60).value()

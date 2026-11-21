@@ -47,7 +47,7 @@ def available(name):
 
 def shown(name, picture):
     """Whether the picture of ``name`` is shown instead of the drawing: fetched, and ``picture`` (the setting
-    keyboard.picture) is "photo"."""
+    app.keyboard_picture) is "photo"."""
     return picture == "photo" and available(name)
 
 
@@ -58,14 +58,14 @@ def offered(name):
 
 def download():
     """Fetch the pictures from logitech.com, cut the keyboard out of them and store them, each on its own: one failing
-    keeps none of the others from being stored. Raises the first error, OSError (which covers network errors) or
-    ValueError if what comes back is not the picture expected. Runs off the GUI thread: fetched() follows on it."""
+    keeps none of the others from being stored. Raises the first error: OSError (which covers network errors),
+    ValueError if what comes back is not the picture expected, http.client.IncompleteRead for a broken transfer. Runs off the GUI thread: fetched() follows on it."""
     os.makedirs(PHOTO_DIR, exist_ok=True)
     errors = []
     for name in PHOTOS:
         try:
             _download(name)
-        except (OSError, ValueError) as e:
+        except Exception as e:  # http.client.IncompleteRead is no OSError
             errors.append(e)
     if errors:
         raise errors[0]

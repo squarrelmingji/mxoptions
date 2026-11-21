@@ -929,7 +929,7 @@ class KeyboardPicture(QWidget):
         if self._photo:
             rect = keyboard_photo.fit(self.width(), 0, self._name)
             if rect.height() > self.height():  # laid out lower than heightForWidth() asks: as high as there is room
-                rect = keyboard_photo.fit(self.width() * self.height() / rect.height(), 0, self._name)
+                rect = keyboard_photo.fit(rect.width() * self.height() / rect.height(), 0, self._name)
             rect.moveCenter(QRectF(self.rect()).center())
             keyboard_photo.paint(painter, rect, self._name, self.slots(), self._current, lit=self._lit)
         else:
