@@ -355,7 +355,7 @@ class Keyboard(unittest.TestCase):
         for section in ("nonsense", ["list"], {"keys": "nonsense"}, {"keys": ["0x00c7"]}):
             with self.subTest(section=section):
                 self.assertEqual(config.clean({"keyboard": section})["keyboard"],
-                                 {"keys": {}, "profiles": [], "notices": False, "lock_notices": False, "fn_notices": False, "picture": "photo"})
+                                 {"keys": {}, "profiles": [], "notices": False, "lock_notices": False, "fn_notices": False})
 
     def test_malformed_desktop_fields_are_dropped_without_raising(self):
         for value in ([], {}, None, True, 4):
@@ -405,8 +405,7 @@ class Keyboard(unittest.TestCase):
         stored["pointer"]["dpi"] = 1800
         stored["wheel"]["threshold"] = 30
         loaded, saved = self.load(stored)
-        self.assertEqual(loaded["keyboard"], {"keys": {}, "profiles": [], "notices": False, "lock_notices": False, "fn_notices": False,
-                                              "picture": "photo"})
+        self.assertEqual(loaded["keyboard"], {"keys": {}, "profiles": [], "notices": False, "lock_notices": False, "fn_notices": False})
         for section in config.DEFAULTS:
             if section != "keyboard":
                 self.assertEqual(loaded[section], config.clean(stored)[section])
@@ -493,8 +492,7 @@ class Profiles(unittest.TestCase):
         stored = copy.deepcopy(config.DEFAULTS)
         stored["keyboard"] = {"keys": {"0x0f01": self.COPY}}  # what the build before wrote: version 6, no profiles
         loaded, saved = self.load(stored)
-        self.assertEqual(loaded["keyboard"], {"keys": {"0x0f01": self.COPY}, "profiles": [], "notices": False, "lock_notices": False, "fn_notices": False,
-                                              "picture": "photo"})
+        self.assertEqual(loaded["keyboard"], {"keys": {"0x0f01": self.COPY}, "profiles": [], "notices": False, "lock_notices": False, "fn_notices": False})
         self.assertEqual(saved, stored)  # the same version: not written back
 
     def test_profiles_survive_the_build_before(self):

@@ -431,11 +431,11 @@ class Settings(unittest.TestCase):
             store.set_key("0x0f05", COPY)
             store.restore_keyboard()
             self.assertEqual(store.cfg["keyboard"], {"keys": {}, "profiles": [], "notices": notices,
-                                                     "lock_notices": locks, "fn_notices": fn, "picture": "photo"})
+                                                     "lock_notices": locks, "fn_notices": fn})
             self.assertEqual(config.clean(copy.deepcopy(store.cfg)), store.cfg)
         store.restore_defaults()  # all the settings back as they were at first: every notice off, on purpose
         self.assertEqual(store.cfg["keyboard"], {"keys": {}, "profiles": [], "notices": False, "lock_notices": False,
-                                                 "fn_notices": False, "picture": "photo"})
+                                                 "fn_notices": False})
 
 
 class FakeFront(QObject):
@@ -553,7 +553,7 @@ class Page(unittest.TestCase):
         with mock.patch.object(keyboard_page.QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Yes):
             page._reset()
         self.assertEqual(store.cfg["keyboard"], {"keys": {}, "profiles": [], "notices": True, "lock_notices": True,
-                                                 "fn_notices": False, "picture": "photo"})  # notices stay
+                                                 "fn_notices": False})  # notices stay
         self.assertEqual(config.clean(copy.deepcopy(store.cfg)), store.cfg)
         for notices, locks, fn in itertools.product((False, True), repeat=3):
             choice = {"notices": notices, "lock_notices": locks, "fn_notices": fn}
@@ -562,7 +562,7 @@ class Page(unittest.TestCase):
             store.set_key("0x0f01", COPY)
             with mock.patch.object(keyboard_page.QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Yes):
                 page._reset()
-            self.assertEqual(store.cfg["keyboard"], dict(choice, keys={}, profiles=[], picture="photo"))
+            self.assertEqual(store.cfg["keyboard"], dict(choice, keys={}, profiles=[]))
             self.assertEqual((page.notices.isChecked(), page.lock_notices.isChecked(), page.fn_notices.isChecked()),
                              (notices, locks, fn))  # the switches follow, and changed nothing themselves
 

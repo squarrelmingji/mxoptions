@@ -128,7 +128,7 @@ class Downloader(QObject):
             try:
                 self._job()
                 error = ""
-            except (OSError, ValueError) as e:
+            except Exception as e:  # anything (http.client.IncompleteRead too) must end the job
                 log.warning("could not fetch the %s pictures: %s", self._what, e)
                 error = str(e) or type(e).__name__
             self.running = False

@@ -8,7 +8,7 @@ picture."""
 
 import os
 
-from PySide6.QtCore import QRect, QRectF, QSize, Qt
+from PySide6.QtCore import QObject, QRect, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen
 
 from .. import paths
@@ -57,26 +57,51 @@ def offered(name):
 
 
 def download():
-    """Fetch the pictures from logitech.com, cut the keyboard out of them and store them. Raises OSError (which covers
-    network errors) or ValueError if what comes back is not the picture expected."""
+    """Fetch the pictures from logitech.com, cut the keyboard out of them and store them, each on its own: one failing
+    keeps none of the others from being stored. Raises the first error, OSError (which covers network errors) or
+    ValueError if what comes back is not the picture expected. Runs off the GUI thread: fetched() follows on it."""
     os.makedirs(PHOTO_DIR, exist_ok=True)
-    for name, (_file, url, size, crop, _origin, _unit, _layout) in PHOTOS.items():
-        data = mouse_photo.fetch(url)
-        image = QImage.fromData(data)
-        # another size of the same picture is fine; another picture (another shape) would put the keys elsewhere
-        if (image.isNull() or not image.hasAlphaChannel() or image.width() < size[0] // 2
-                or abs(image.width() / image.height() - size[0] / size[1]) > 0.01):
-            raise ValueError(f"unexpected picture for {name}")
-        scale = image.width() / size[0]
-        part = QRect(*(round(value * scale) for value in crop))
-        picture = image.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied).copy(part).scaled(
-            crop[2], crop[3], Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
-        path = photo_path(name)
-        if not picture.save(path + ".tmp", "PNG"):
-            raise OSError(f"could not write {path}")
-        os.replace(path + ".tmp", path)
+    errors = []
+    for name in PHOTOS:
+        try:
+            _download(name)
+        except (OSError, ValueError) as e:
+            errors.append(e)
+    if errors:
+        raise errors[0]
+
+
+def _download(name):
+    _file, url, size, crop, _origin, _unit, _layout = PHOTOS[name]
+    data = mouse_photo.fetch(url)
+    image = QImage.fromData(data)
+    # another size of the same picture is fine; another picture (another shape) would put the keys elsewhere
+    if (image.isNull() or not image.hasAlphaChannel() or image.width() < size[0] // 2
+            or abs(image.width() / image.height() - size[0] / size[1]) > 0.01):
+        raise ValueError(f"unexpected picture for {name}")
+    scale = image.width() / size[0]
+    part = QRect(*(round(value * scale) for value in crop))
+    picture = image.convertToFormat(QImage.Format.Format_ARGB32_Premultiplied).copy(part).scaled(
+        crop[2], crop[3], Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+    path = photo_path(name)
+    if not picture.save(path + ".tmp", "PNG"):
+        raise OSError(f"could not write {path}")
+    os.replace(path + ".tmp", path)
+
+
+class _Notice(QObject):
+    fetched = Signal()  # new pictures on disk: every page showing the keyboard draws it again
+
+
+notice = _Notice()
+
+
+def fetched():
+    """After download(), on the GUI thread (the caches are only touched there): forget the old pictures, tell the
+    pages."""
     _images.clear()
     _scaled.clear()
+    notice.fetched.emit()
 
 
 def Downloader(parent=None):

@@ -2,6 +2,7 @@
 which setting, the headings of a key's actions, and the window with the keyboard's pages at its smallest size."""
 
 import copy
+import http.client
 import itertools
 import os
 import tempfile
@@ -20,7 +21,8 @@ from PySide6.QtWidgets import QAbstractButton, QApplication, QComboBox, QLabel, 
 
 import tests.support  # noqa: F401,E402
 from mxoptions import config, i18n, i18n_uk  # noqa: E402
-from mxoptions.ui import action_picker, icons, keyboard_drawing, keyboard_page, keyboard_photo, mouse_photo, pages, theme  # noqa: E402,E501
+from mxoptions.ui import action_picker, home_page, icons, keyboard_drawing, keyboard_page  # noqa: E402
+from mxoptions.ui import keyboard_photo, mouse_photo, pages, theme  # noqa: E402
 from mxoptions.ui.store import Store  # noqa: E402
 
 APP = QApplication.instance() or QApplication([])
@@ -474,6 +476,35 @@ class KeyboardPhoto(unittest.TestCase):
         QTest.keyClick(APP.focusWidget(), Qt.Key.Key_Tab)
         self.assertIs(APP.focusWidget(), page.restore)
 
+    def test_one_picture_failing_keeps_the_other(self):
+        def fetch(url):
+            if "mini" not in url:
+                raise OSError("no network")
+            return self.fetch(url)
+        with mock.patch.object(mouse_photo, "fetch", fetch):
+            with self.assertRaises(OSError):
+                keyboard_photo.download()
+        self.assertFalse(keyboard_photo.available("MX Mechanical"))
+        self.assertTrue(keyboard_photo.available("MX Mechanical Mini"))
+
+    def test_a_broken_transfer_ends_the_download_too(self):
+        store = make_store()
+        page = keyboard_page.KeysPage(store)
+        self.addCleanup(page.deleteLater)
+        store.update_state(dict(store.state, keyboard=keyboard([key(0x010C)], name="MX Mechanical")))
+        done = threading.Event()
+        page.photos.finished.connect(lambda _error: done.set())
+
+        def cut(url):
+            raise http.client.IncompleteRead(b"x", 10)  # not an OSError
+        with mock.patch.object(mouse_photo, "fetch", cut):
+            page.photo_button.click()
+            self.assertTrue(wait_for(done.is_set))
+        settle()
+        self.assertIn("IncompleteRead", page.photo_text.text())
+        self.assertFalse(page.photos.running)
+        self.assertTrue(page.photo_button.isEnabled())
+
     def test_a_failed_download_says_why_and_keeps_the_drawing(self):
         store = make_store()
         page = keyboard_page.KeysPage(store)
@@ -493,9 +524,9 @@ class KeyboardPhoto(unittest.TestCase):
         self.assertTrue(page.photo_button.isEnabled())
 
     def test_the_picture_setting_keeps_to_photo_or_drawing(self):
-        self.assertEqual(config.DEFAULTS["keyboard"]["picture"], "photo")
+        self.assertEqual(config.DEFAULTS["app"]["keyboard_picture"], "photo")
         for value, kept in (("photo", "photo"), ("drawing", "drawing"), ("studio", "photo"), (None, "photo"), (1, "photo")):
-            self.assertEqual(config.clean({"keyboard": {"picture": value}})["keyboard"]["picture"], kept, value)
+            self.assertEqual(config.clean({"app": {"keyboard_picture": value}})["app"]["keyboard_picture"], kept, value)
 
     def test_the_drawing_comes_back_when_the_setting_asks_for_it(self):
         store = make_store()
@@ -504,21 +535,21 @@ class KeyboardPhoto(unittest.TestCase):
         page.resize(1100, 700)
         page.show()
         store.update_state(dict(store.state, keyboard=keyboard([key(0x00C7, pos=1), key(0x010C)], name="MX Mechanical")))
-        store.set("keyboard", "picture", "drawing")
+        store.set("app", "keyboard_picture", "drawing")
         settle()
         self.assertFalse(page.photo_offer.isVisible())  # the drawing asked for: no photo offered
-        store.set("keyboard", "picture", "photo")
+        store.set("app", "keyboard_picture", "photo")
         settle()
         self.assertTrue(page.photo_offer.isVisible())
         with mock.patch.object(mouse_photo, "fetch", self.fetch):
             keyboard_photo.download()
-        store.set("keyboard", "picture", "drawing")
+        store.set("app", "keyboard_picture", "drawing")
         settle()
         self.assertIsNone(page.strip._photo)
         self.assertFalse(page.photo_offer.isVisible())
         drawn = keyboard_drawing.key_rects(page.strip._board(), "full", page.strip._slot_of)
         self.assertEqual(page.strip.caps["0x010c"].geometry(), drawn["0x010c"].toRect())
-        store.set("keyboard", "picture", "photo")
+        store.set("app", "keyboard_picture", "photo")
         settle()
         self.assertEqual(page.strip._photo, "MX Mechanical")
         self.assertFalse(page.photo_offer.isVisible())
@@ -526,7 +557,7 @@ class KeyboardPhoto(unittest.TestCase):
         self.addCleanup(settings.deleteLater)
         settings.keyboard_picture.selected.emit("drawing")  # the row in Settings, Appearance
         settle()
-        self.assertEqual(store.cfg["keyboard"]["picture"], "drawing")
+        self.assertEqual(store.cfg["app"]["keyboard_picture"], "drawing")
         self.assertIsNone(page.strip._photo)
 
     def test_backlighting_and_easy_switch_show_the_photo_lit_or_not(self):
@@ -543,12 +574,18 @@ class KeyboardPhoto(unittest.TestCase):
         found["controls"] = {"backlight": {"value": {"on": False}}}
         store.update_state(dict(store.state, keyboard=found))
         settle()
-        pictures = (page.backlight_picture, page.easy_picture)
+        home = home_page.HomePage(store)
+        self.addCleanup(home.deleteLater)
+        pictures = (page.backlight_picture, page.easy_picture, home.keyboard_picture)
         self.assertFalse(any(picture._photo for picture in pictures))  # not fetched yet: the drawing
+        keys_page = keyboard_page.KeysPage(store)  # fetched there while these pages stay open
+        self.addCleanup(keys_page.deleteLater)
+        done = threading.Event()
+        keys_page.photos.finished.connect(lambda _error: done.set())
         with mock.patch.object(mouse_photo, "fetch", self.fetch):
-            keyboard_photo.download()
-        for name in ("backlight", "easy_switch"):  # fetched on the Keys page meanwhile: there once a tab shows
-            page.sections[name].shown.emit()
+            keys_page.photo_button.click()
+            self.assertTrue(wait_for(done.is_set))
+        settle()
         for picture in pictures:
             self.assertTrue(picture._photo)
             self.assertEqual(picture.heightForWidth(800), int(keyboard_photo.fit(800, 0, "MX Mechanical").height()))
@@ -560,7 +597,7 @@ class KeyboardPhoto(unittest.TestCase):
                 for lit in (False, None, True)]
         self.assertLess(grey[0], grey[1])  # off: darker
         self.assertLess(grey[1], grey[2])  # on: brighter
-        store.set("keyboard", "picture", "drawing")
+        store.set("app", "keyboard_picture", "drawing")
         settle()
         self.assertFalse(any(picture._photo for picture in pictures))
 

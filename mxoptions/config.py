@@ -260,7 +260,7 @@ RING_PRESETS = [
         "clipboard", "terminal", "files", "lock", "calculator", "krunner", "night_light")),
 ]
 MODEL_STYLES = ("photo", "studio", "lowpoly", "outline", "wire")
-KEYBOARD_PICTURES = ("photo", "drawing")
+KEYBOARD_PICTURES = ("photo", "drawing")  # "photo": Logitech's picture once downloaded (ui/keyboard_photo)
 TRAY_ICONS = ("outline", "solid", "master", "battery", "logo")  # see ui/tray_icon.py
 MOUSE_COLORS = ("graphite", "pale-grey", "black")
 GESTURE_BUTTONS = ("gesture", "panel")  # the two thumb buttons whose roles can be swapped
@@ -346,6 +346,7 @@ DEFAULTS = {
         "move_reverse": False,  # pan and zoom other way round
     },
     "app": {"language": "auto", "theme": "graphite", "accent": "#2fd6a7", "model": "photo", "mouse_color": "graphite",
+            "keyboard_picture": "photo",  # KEYBOARD_PICTURES
             "tray_icon": "outline",  # the look of the icon in the system tray
             "api": True,  # let other programs talk to the app over D-Bus
             "update_check": True},  # once a day, ask GitHub whether a newer release is out (updates.py)
@@ -377,8 +378,7 @@ DEFAULTS = {
     # (NATIVE: what the key always does); a key a profile does not list does what "keys" says. "notices": say on
     # screen what the keyboard reports it changed (its brightness), never what made it change. "lock_notices": the
     # same when it reports a lock key (Caps Lock, Num Lock, Scroll Lock) on or off; "fn_notices": for its Fn lock.
-    "keyboard": {"keys": {}, "profiles": [], "notices": False, "lock_notices": False, "fn_notices": False,
-                 "picture": "photo"},  # "photo": Logitech's picture once downloaded (ui/keyboard_photo), or "drawing"
+    "keyboard": {"keys": {}, "profiles": [], "notices": False, "lock_notices": False, "fn_notices": False},
     # The mouse in single apps: "profiles": [{"app", "name", "buttons", "ring"}], first one for app in front wins.
     # "buttons": key -> action over "buttons" (NATIVE: button's own function); a button not listed does what
     # "buttons" says. "ring": bubbles of its own, or None for the ring of all apps. Everything else stays global.
@@ -891,6 +891,8 @@ def _sanitize(cfg):
         cfg["app"]["tray_icon"] = DEFAULTS["app"]["tray_icon"]
     if cfg["app"].get("mouse_color") not in MOUSE_COLORS:
         cfg["app"]["mouse_color"] = DEFAULTS["app"]["mouse_color"]
+    if cfg["app"].get("keyboard_picture") not in KEYBOARD_PICTURES:
+        cfg["app"]["keyboard_picture"] = DEFAULTS["app"]["keyboard_picture"]
     cfg["app"].pop("gesture_distance", None)
     if cfg["gestures"].get("trigger") not in gestures.TRIGGERS:
         cfg["gestures"]["trigger"] = DEFAULTS["gestures"]["trigger"]
@@ -973,8 +975,6 @@ def _sanitize(cfg):
     cfg["keyboard"]["notices"] = cfg["keyboard"].get("notices") is True
     cfg["keyboard"]["lock_notices"] = cfg["keyboard"].get("lock_notices") is True
     cfg["keyboard"]["fn_notices"] = cfg["keyboard"].get("fn_notices") is True
-    if cfg["keyboard"].get("picture") not in KEYBOARD_PICTURES:
-        cfg["keyboard"]["picture"] = DEFAULTS["keyboard"]["picture"]
     cfg["mouse"]["profiles"] = _mouse_profiles(cfg["mouse"].get("profiles"))
     cfg["mouse"]["thumbwheel"] = _mouse_thumbwheel(cfg["mouse"].get("thumbwheel"), cfg["mouse"]["profiles"])
     cfg["mouse"]["thumbwheel_keys"] = _mouse_thumbwheel_keys(cfg["mouse"].get("thumbwheel_keys"),

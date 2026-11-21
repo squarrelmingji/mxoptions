@@ -659,6 +659,7 @@ class KeysPage(QWidget):
         left.addWidget(self.photo_offer)
         self.photos = keyboard_photo.Downloader(self)
         self.photos.finished.connect(self._photo_downloaded)
+        keyboard_photo.notice.fetched.connect(self._show_keys)
         self._photo_error = ""
         self._photo = False  # the strip shows the photo
         self.empty = hint_label(_("Turn the keyboard on to see its keys here. Its receiver can be the one of the mouse."))
@@ -784,11 +785,11 @@ class KeysPage(QWidget):
 
     def _photo_downloaded(self, error):
         self._photo_error = error
-        self._show_keys()  # the photo instead of the drawing, once there
+        keyboard_photo.fetched()  # every page draws the photo instead of the drawing, once there
         self._show_offer()
 
     def _show_offer(self):
-        self.photo_offer.setVisible(bool(self._keys) and self.store.cfg["keyboard"]["picture"] == "photo"
+        self.photo_offer.setVisible(bool(self._keys) and self.store.cfg["app"]["keyboard_picture"] == "photo"
                                     and keyboard_photo.offered(self._name))
         self.photo_button.setEnabled(not self.photos.running)
         if self.photos.running:
@@ -810,7 +811,7 @@ class KeysPage(QWidget):
             self.strip.set_value(key["id"], actions.describe(action), action != actions.DEFAULT)
 
     def _photo_shown(self):
-        return keyboard_photo.shown(self._name, self.store.cfg["keyboard"]["picture"])
+        return keyboard_photo.shown(self._name, self.store.cfg["app"]["keyboard_picture"])
 
     def _show_keys(self):
         """Lay out the keys again; new caps get their place in the Tab order: the app line, the keys, Restore."""
@@ -1109,15 +1110,15 @@ class KeyboardPage(QWidget):
         store.state_changed.connect(self._state)
         store.changed.connect(self._show_notice_switches)
         store.changed.connect(self._show_pictures)
-        for name in ("backlight", "easy_switch"):  # a photo fetched on the Keys page meanwhile
-            self.sections[name].shown.connect(self._show_pictures)
+        keyboard_photo.notice.fetched.connect(self._show_pictures)
         self._state(store.state)
 
     def _show_pictures(self):
         found = self.store.state.get("keyboard") or {}
         name = found.get("name")
         for picture in (self.backlight_picture, self.easy_picture):
-            picture.set_keyboard(found.get("keys") or [], name, keyboard_photo.shown(name, self.store.cfg["keyboard"]["picture"]))
+            picture.set_keyboard(found.get("keys") or [], name,
+                                 keyboard_photo.shown(name, self.store.cfg["app"]["keyboard_picture"]))
 
     def _show_notice_switches(self):
         """The notice switches as the settings have them; showing them changes nothing."""

@@ -163,6 +163,7 @@ class HomePage(QWidget):
         self.title.setText(greeting(time.localtime().tm_hour))
         store.state_changed.connect(self._refresh)
         store.changed.connect(self._refresh)
+        keyboard_photo.notice.fetched.connect(self._refresh)
         self._refresh()
 
     def _refresh(self, *_args):
@@ -174,10 +175,9 @@ class HomePage(QWidget):
         self.keyboard.setVisible(found is not None or bool(cfg["keyboard"]["keys"]))  # as the sidebar's keyboard
         name = found["name"] if found else None
         self.keyboard_picture.set_keyboard(found.get("keys", []) if found else [], name,
-                                           keyboard_photo.shown(name, cfg["keyboard"]["picture"]))
+                                           keyboard_photo.shown(name, cfg["app"]["keyboard_picture"]))
         self.keyboard.set_device(found)
 
     def showEvent(self, event):
         super().showEvent(event)
         self.title.setText(greeting(time.localtime().tm_hour))
-        self._refresh()  # a photo of the keyboard fetched meanwhile
