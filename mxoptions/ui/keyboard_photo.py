@@ -59,7 +59,8 @@ def offered(name):
 def download():
     """Fetch the pictures from logitech.com, cut the keyboard out of them and store them, each on its own: one failing
     keeps none of the others from being stored. Raises the first error: OSError (which covers network errors),
-    ValueError if what comes back is not the picture expected, http.client.IncompleteRead for a broken transfer. Runs off the GUI thread: fetched() follows on it."""
+    ValueError if what comes back is not the picture expected, http.client.IncompleteRead for a broken transfer.
+    Runs off the GUI thread: fetched() follows on it."""
     os.makedirs(PHOTO_DIR, exist_ok=True)
     errors = []
     for name in PHOTOS:
