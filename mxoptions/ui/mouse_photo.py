@@ -81,15 +81,19 @@ def available():
     return os.path.exists(photo_path(COLORS[0]))
 
 
+def fetch(url):
+    """The bytes at ``url``. Raises OSError."""
+    request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"})
+    with urllib.request.urlopen(request, timeout=40) as reply:
+        return reply.read()
+
+
 def download():
     """Fetch the pictures from logitech.com, cut the mouse out of them and store them. Raises OSError
     (which covers network errors) or ValueError if what comes back is not the picture expected."""
     os.makedirs(PHOTO_DIR, exist_ok=True)
     for color in COLORS:
-        request = urllib.request.Request(SOURCE.format(color=color), headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"})
-        with urllib.request.urlopen(request, timeout=40) as reply:
-            data = reply.read()
-        image = QImage.fromData(data)
+        image = QImage.fromData(fetch(SOURCE.format(color=color)))
         if image.isNull() or image.width() < 800 or not image.hasAlphaChannel():
             raise ValueError(f"unexpected picture for {color}")
         left, top, width, height = CROP
@@ -106,13 +110,14 @@ def download():
 
 
 class Downloader(QObject):
-    """Runs download() off the GUI thread; ``finished`` carries an error message, empty on success."""
+    """Runs ``job`` (download()) off the GUI thread; ``finished`` carries an error message, empty on success."""
 
     finished = Signal(str)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, job=None, what="mouse"):
         super().__init__(parent)
         self.running = False
+        self._job, self._what = job or download, what
 
     def start(self):
         if self.running:
@@ -121,15 +126,15 @@ class Downloader(QObject):
 
         def job():
             try:
-                download()
+                self._job()
                 error = ""
             except (OSError, ValueError) as e:
-                log.warning("could not fetch the mouse pictures: %s", e)
+                log.warning("could not fetch the %s pictures: %s", self._what, e)
                 error = str(e) or type(e).__name__
             self.running = False
             self.finished.emit(error)
 
-        threading.Thread(target=job, name="mouse-pictures", daemon=True).start()
+        threading.Thread(target=job, name=self._what + "-pictures", daemon=True).start()
 
 
 def _image(color):

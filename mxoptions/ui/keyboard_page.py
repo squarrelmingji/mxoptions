@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
 
 from .. import APP_NAME, actions, config, device, firmware, keyboard
 from ..i18n import _
-from . import icons, keyboard_drawing, theme
+from . import icons, keyboard_drawing, keyboard_photo, theme
 from .action_picker import ActionPicker
 from .pages import FirmwareQuery, ScrollPage, _header
 from .widgets import (
@@ -349,7 +349,8 @@ class KeyStrip(QWidget):
     """The keyboard, drawn as Logi Options+ draws it: every key with its legend, those whose action can be set here
     outlined where they sit, the one in question with a tag over it saying what it does. Each such key is a button
     laid over the picture (Tab, the arrows and Space work on them, screen readers name them). Keys with no known place
-    on the picture (keyboard_drawing.slots) are listed under it, then those left as they are."""
+    on the picture (keyboard_drawing.slots) are listed under it, then those left as they are. The picture is
+    Logitech's own of the keyboard once fetched (keyboard_photo), else the drawing."""
 
     selected = Signal(str)
     focused = Signal(QWidget)  # a key got the keyboard focus: the page scrolls it into view
@@ -361,6 +362,7 @@ class KeyStrip(QWidget):
         self._selected = self._hover = None
         self._name = None
         self._layout_name = keyboard_drawing.layout_for(None)
+        self._photo = None  # the name of the keyboard whose photo is shown, None: the drawing
         self._slot_of = {}
         self.caps = {}  # key id -> KeyCap, in the order of the sections (the Tab order follows)
         self.other_label = QLabel(_("Other keys").upper(), self)
@@ -373,9 +375,11 @@ class KeyStrip(QWidget):
 
     # -- keys ---------------------------------------------------------------
 
-    def set_keys(self, keys, name=None):
+    def set_keys(self, keys, name=None, photo=False):
+        """``photo``: Logitech's picture of the keyboard instead of the drawing (keyboard_photo.shown())."""
         self._name = name
         self._layout_name = keyboard_drawing.layout_for(name)
+        self._photo = name if photo else None
         self._slot_of = keyboard_drawing.slots(keys, self._layout_name, name)
         self._keys = list(keys)
         on_board, others, kept = self._sections()
@@ -413,8 +417,11 @@ class KeyStrip(QWidget):
         """The keys on the picture (row by row, left to right), the other keys that can be changed, and those left
         as they are that have no place on the picture."""
         ordered = key_sort(self._keys)
-        place = {slot: (rect.top(), rect.left()) for slot, rect, _legend in keyboard_drawing.board(self._layout_name)
-                 if slot}
+        if self._photo:
+            place = {slot: (rect.top(), rect.left()) for slot, rect in keyboard_photo.grid(self._photo).items()}
+        else:
+            place = {slot: (rect.top(), rect.left()) for slot, rect, _legend in keyboard_drawing.board(self._layout_name)
+                     if slot}
         on_board = sorted((key for key in ordered if key["id"] in self._slot_of),
                           key=lambda key: place[self._slot_of[key["id"]]])
         rest = [key for key in ordered if key["id"] not in self._slot_of]
@@ -458,10 +465,14 @@ class KeyStrip(QWidget):
         _on_board, others, kept = self._sections()
         scale = ui_scale()
         captions = {self.other_label: None, self.kept_label: None}
-        board_width = keyboard_drawing.LAYOUTS[self._layout_name] + 0.8
-        unit = min(width / board_width, keyboard_drawing.MAX_UNIT)
-        board = QRectF(0, TAG_H + 8, width, unit * (keyboard_drawing.ROWS + 0.8))
-        places = keyboard_drawing.key_rects(board, self._layout_name, self._slot_of)
+        if self._photo:
+            board = keyboard_photo.fit(width, TAG_H + 8, self._photo)
+            places = keyboard_photo.key_rects(board, self._photo, self._slot_of)
+        else:
+            board_width = keyboard_drawing.LAYOUTS[self._layout_name] + 0.8
+            unit = min(width / board_width, keyboard_drawing.MAX_UNIT)
+            board = QRectF(0, TAG_H + 8, width, unit * (keyboard_drawing.ROWS + 0.8))
+            places = keyboard_drawing.key_rects(board, self._layout_name, self._slot_of)
         top = board.bottom()
         for label, keys, least, height in ((self.other_label, others, CAP_MIN_W, CAP_H),
                                            (self.kept_label, kept, KEPT_MIN_W, KEPT_H)):
@@ -544,9 +555,13 @@ class KeyStrip(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         changed = {key_id for key_id, (_text, on) in self._values.items() if on}
         kept = {key["id"] for key in self._keys if key_kept(key)}
-        names = {key["id"]: KEY_ICONS.get(key["cid"], "") for key in self._keys}
-        keyboard_drawing.paint(painter, self._board(), self._layout_name, self._slot_of, self._selected, self._hover,
-                               changed, kept, names)
+        if self._photo:  # the photo has the keys' own legends and icons
+            keyboard_photo.paint(painter, self._board(), self._photo, self._slot_of, self._selected, self._hover,
+                                 changed, kept)
+        else:
+            names = {key["id"]: KEY_ICONS.get(key["cid"], "") for key in self._keys}
+            keyboard_drawing.paint(painter, self._board(), self._layout_name, self._slot_of, self._selected,
+                                   self._hover, changed, kept, names)
         for key_id, strong in ((self._hover, False), (self._selected, True)):
             if key_id is None or (not strong and key_id == self._selected):
                 continue
@@ -630,6 +645,22 @@ class KeysPage(QWidget):
         inner.addStretch(1)
         area.setWidget(holder)
         left.addWidget(area, 1)
+        # The picture of the real keyboard belongs to Logitech and is fetched on request, not shipped (as the mouse's).
+        self.photo_offer = QWidget()
+        offer = QHBoxLayout(self.photo_offer)
+        offer.setContentsMargins(0, 0, 0, 0)
+        offer.setSpacing(12)
+        self.photo_text = hint_label("")
+        offer.addWidget(self.photo_text, 1)
+        self.photo_button = QPushButton(_("Download"))
+        self.photo_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.photo_button.clicked.connect(self._download_photo)
+        offer.addWidget(self.photo_button)
+        left.addWidget(self.photo_offer)
+        self.photos = keyboard_photo.Downloader(self)
+        self.photos.finished.connect(self._photo_downloaded)
+        self._photo_error = ""
+        self._photo = False  # the strip shows the photo
         self.empty = hint_label(_("Turn the keyboard on to see its keys here. Its receiver can be the one of the mouse."))
         left.addWidget(self.empty)
         layout.addLayout(left, 1)
@@ -746,11 +777,48 @@ class KeysPage(QWidget):
         elif action is not None:
             self.store.set_key(self._key["id"], action)
 
+    def _download_photo(self):
+        self._photo_error = ""
+        self.photos.start()
+        self._show_offer()
+
+    def _photo_downloaded(self, error):
+        self._photo_error = error
+        self._show_keys()  # the photo instead of the drawing, once there
+        self._show_offer()
+
+    def _show_offer(self):
+        self.photo_offer.setVisible(bool(self._keys) and self.store.cfg["keyboard"]["picture"] == "photo"
+                                    and keyboard_photo.offered(self._name))
+        self.photo_button.setEnabled(not self.photos.running)
+        if self.photos.running:
+            self.photo_text.setText(_("Downloading the pictures…"))
+        elif self._photo_error:
+            self.photo_text.setText(_("Could not download the pictures: {}").format(self._photo_error))
+        else:
+            self.photo_text.setText(_(
+                "Logitech's own picture of this keyboard can be shown here instead of the drawing. It is not included "
+                "with the program: download it from logitech.com (about 1 MB)."))
+
     def _refresh(self):
+        if self._photo_shown() != self._photo:  # the picture setting changed
+            self._show_keys()
+        self._show_offer()
         keys = keyboard.effective_keys(self.store.cfg["keyboard"], self._app)
         for key in self._keys:
             action = keys.get(key["id"], actions.DEFAULT)
             self.strip.set_value(key["id"], actions.describe(action), action != actions.DEFAULT)
+
+    def _photo_shown(self):
+        return keyboard_photo.shown(self._name, self.store.cfg["keyboard"]["picture"])
+
+    def _show_keys(self):
+        """Lay out the keys again; new caps get their place in the Tab order: the app line, the keys, Restore."""
+        self._photo = self._photo_shown()
+        self.strip.set_keys(self._keys, self._name, self._photo)
+        chain = [self.remove_app, *self.strip.caps.values(), self.restore]
+        for before, after in zip(chain, chain[1:]):
+            QWidget.setTabOrder(before, after)
 
     def _state(self, state):
         found = state.get("keyboard") or {}
@@ -762,14 +830,12 @@ class KeysPage(QWidget):
         self.restore.setVisible(bool(keys))
         if keys != self._keys or found.get("name") != self._name:
             self._keys, self._name = keys, found.get("name")
-            self.strip.set_keys(keys, self._name)
-            chain = [self.remove_app, *self.strip.caps.values(), self.restore]  # Tab: the app line, the keys, Restore
-            for before, after in zip(chain, chain[1:]):
-                QWidget.setTabOrder(before, after)
+            self._show_keys()
             self._refresh()
             chosen = first_key(keys, self._key["id"] if self._key else None)
             if chosen is not None:
                 self.strip.select(chosen)
+        self._show_offer()
 
 
 class ChannelTile(QFrame):
@@ -810,11 +876,13 @@ class KeyboardPicture(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._keys, self._name, self._marked, self._current, self._lit, self._opacity = [], None, (), None, None, 1.0
+        self._photo = False  # Logitech's picture instead of the drawing
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
-    def set_keyboard(self, keys, name):
-        if (keys, name) != (self._keys, self._name):
-            self._keys, self._name = list(keys), name
+    def set_keyboard(self, keys, name, photo=False):
+        """``photo``: Logitech's picture of the keyboard instead of the drawing (keyboard_photo.shown())."""
+        if (keys, name, photo) != (self._keys, self._name, self._photo):
+            self._keys, self._name, self._photo = list(keys), name, photo
             self.updateGeometry()
             self.update()
 
@@ -838,6 +906,8 @@ class KeyboardPicture(QWidget):
         return True
 
     def heightForWidth(self, width):
+        if self._photo:
+            return int(keyboard_photo.fit(width, 0, self._name).height())
         unit = min(width / (keyboard_drawing.LAYOUTS[self.layout_name()] + 0.8), keyboard_drawing.MAX_UNIT)
         return int(unit * (keyboard_drawing.ROWS + 0.8))
 
@@ -855,8 +925,15 @@ class KeyboardPicture(QWidget):
     def paintEvent(self, _event):
         painter = QPainter(self)
         painter.setOpacity(self._opacity)
-        keyboard_drawing.paint(painter, QRectF(self.rect()), self.layout_name(), self.slots(), self._current,
-                               lit=self._lit)
+        if self._photo:
+            rect = keyboard_photo.fit(self.width(), 0, self._name)
+            if rect.height() > self.height():  # laid out lower than heightForWidth() asks: as high as there is room
+                rect = keyboard_photo.fit(self.width() * self.height() / rect.height(), 0, self._name)
+            rect.moveCenter(QRectF(self.rect()).center())
+            keyboard_photo.paint(painter, rect, self._name, self.slots(), self._current, lit=self._lit)
+        else:
+            keyboard_drawing.paint(painter, QRectF(self.rect()), self.layout_name(), self.slots(), self._current,
+                                   lit=self._lit)
 
 
 class Section(ScrollPage):
@@ -1031,7 +1108,16 @@ class KeyboardPage(QWidget):
 
         store.state_changed.connect(self._state)
         store.changed.connect(self._show_notice_switches)
+        store.changed.connect(self._show_pictures)
+        for name in ("backlight", "easy_switch"):  # a photo fetched on the Keys page meanwhile
+            self.sections[name].shown.connect(self._show_pictures)
         self._state(store.state)
+
+    def _show_pictures(self):
+        found = self.store.state.get("keyboard") or {}
+        name = found.get("name")
+        for picture in (self.backlight_picture, self.easy_picture):
+            picture.set_keyboard(found.get("keys") or [], name, keyboard_photo.shown(name, self.store.cfg["keyboard"]["picture"]))
 
     def _show_notice_switches(self):
         """The notice switches as the settings have them; showing them changes nothing."""
@@ -1281,9 +1367,8 @@ class KeyboardPage(QWidget):
             self._row_visible(row, name in settings)
         self.backlight_card.setVisible("backlight" in settings)
         self.no_backlight.setVisible("backlight" not in settings)
-        keys, name = found.get("keys") or [], found.get("name")
-        for picture in (self.backlight_picture, self.easy_picture):
-            picture.set_keyboard(keys, name)
+        keys = found.get("keys") or []
+        self._show_pictures()
         value = (((found.get("controls") or {}) if connected else {}).get("backlight") or {}).get("value") or {}
         self.backlight_picture.set_lit(bool(value.get("on")) if "on" in value else None)
         current = found.get("current_host")
