@@ -260,6 +260,7 @@ RING_PRESETS = [
         "clipboard", "terminal", "files", "lock", "calculator", "krunner", "night_light")),
 ]
 MODEL_STYLES = ("photo", "studio", "lowpoly", "outline", "wire")
+KEYBOARD_PICTURES = ("photo", "drawing")  # "photo": Logitech's picture once downloaded (ui/keyboard_photo)
 TRAY_ICONS = ("outline", "solid", "master", "battery", "logo")  # see ui/tray_icon.py
 MOUSE_COLORS = ("graphite", "pale-grey", "black")
 GESTURE_BUTTONS = ("gesture", "panel")  # the two thumb buttons whose roles can be swapped
@@ -345,6 +346,7 @@ DEFAULTS = {
         "move_reverse": False,  # pan and zoom other way round
     },
     "app": {"language": "auto", "theme": "graphite", "accent": "#2fd6a7", "model": "photo", "mouse_color": "graphite",
+            "keyboard_picture": "photo",  # KEYBOARD_PICTURES
             "tray_icon": "outline",  # the look of the icon in the system tray
             "api": True,  # let other programs talk to the app over D-Bus
             "update_check": True},  # once a day, ask GitHub whether a newer release is out (updates.py)
@@ -889,6 +891,8 @@ def _sanitize(cfg):
         cfg["app"]["tray_icon"] = DEFAULTS["app"]["tray_icon"]
     if cfg["app"].get("mouse_color") not in MOUSE_COLORS:
         cfg["app"]["mouse_color"] = DEFAULTS["app"]["mouse_color"]
+    if cfg["app"].get("keyboard_picture") not in KEYBOARD_PICTURES:
+        cfg["app"]["keyboard_picture"] = DEFAULTS["app"]["keyboard_picture"]
     cfg["app"].pop("gesture_distance", None)
     if cfg["gestures"].get("trigger") not in gestures.TRIGGERS:
         cfg["gestures"]["trigger"] = DEFAULTS["gestures"]["trigger"]

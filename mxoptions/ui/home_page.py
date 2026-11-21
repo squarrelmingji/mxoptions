@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
 from .. import device
 from ..i18n import _
 from ..keyboard import LOW_BATTERY
-from . import icons
+from . import icons, keyboard_photo
 from .keyboard_page import CHARGING, KeyboardPicture, battery_text
 from .mouse_view import MouseView
 from .widgets import BatteryIcon
@@ -163,6 +163,7 @@ class HomePage(QWidget):
         self.title.setText(greeting(time.localtime().tm_hour))
         store.state_changed.connect(self._refresh)
         store.changed.connect(self._refresh)
+        keyboard_photo.notice.fetched.connect(self._refresh)
         self._refresh()
 
     def _refresh(self, *_args):
@@ -172,7 +173,9 @@ class HomePage(QWidget):
         self.mouse.set_device(state)
         found = state.get("keyboard")
         self.keyboard.setVisible(found is not None or bool(cfg["keyboard"]["keys"]))  # as the sidebar's keyboard
-        self.keyboard_picture.set_keyboard(found.get("keys", []) if found else [], found["name"] if found else None)
+        name = found["name"] if found else None
+        self.keyboard_picture.set_keyboard(found.get("keys", []) if found else [], name,
+                                           keyboard_photo.shown(name, cfg["app"]["keyboard_picture"]))
         self.keyboard.set_device(found)
 
     def showEvent(self, event):

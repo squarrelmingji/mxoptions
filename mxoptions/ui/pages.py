@@ -1066,6 +1066,11 @@ class DevicePage(ScrollPage):
         self.mouse_color = Segmented([(key, _(label)) for key, label in COLOR_LABELS])
         self.mouse_color.selected.connect(lambda value: self.store.set("app", "mouse_color", value))
         self.mouse_color_row = card.add(Row(_("Mouse colour"), None, self.mouse_color))
+        self.keyboard_picture = Segmented([("photo", _("Photo")), ("drawing", _("Drawing"))])
+        self.keyboard_picture.selected.connect(lambda value: self.store.set("app", "keyboard_picture", value))
+        card.add(Row(_("Keyboard picture"), _(
+            "How the keyboard is shown on its pages. Logitech's photo of an MX Mechanical is downloaded on the Keys "
+            "page first."), self.keyboard_picture))
         self.tray = IconChoice()
         self.tray.selected.connect(lambda value: self.store.set("app", "tray_icon", value))
         self._tray_look = None
@@ -1281,6 +1286,7 @@ class DevicePage(ScrollPage):
         self.model.set_value(app["model"])
         self.mouse_color.set_value(app["mouse_color"])
         self.mouse_color_row.setEnabled(app["model"] == "photo")
+        self.keyboard_picture.set_value(self.store.cfg["app"]["keyboard_picture"])
         if self._tray_look != theme.REVISION:  # the little pictures are drawn in the colours of the theme
             self._tray_look = theme.REVISION
             self.tray.set_options([(value, _(label), tray_icon.preview(value, theme.TEXT)) for value, label in TRAY_LABELS])

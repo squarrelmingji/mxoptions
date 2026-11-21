@@ -420,6 +420,10 @@ STRINGS = {
     "Photo": "Фото",
     "3D": "3D",
     "Mouse colour": "Колір миші",
+    "Keyboard picture": "Зображення клавіатури",
+    "Drawing": "Малюнок",
+    "How the keyboard is shown on its pages. Logitech's photo of an MX Mechanical is downloaded on the Keys page first.":
+        "Як показано клавіатуру на її сторінках. Фото MX Mechanical від Logitech спершу завантажте на сторінці «Клавіші».",
     "Pale grey": "Світло-сіра",
     "Low-poly": "Лоу-полі",
     "Outline": "Контурна",
@@ -753,6 +757,10 @@ STRINGS = {
     "Download": "Завантажити",
     "Downloading the pictures…": "Завантажую картинки…",
     "Could not download the pictures: {}": "Не вдалося завантажити картинки: {}",
+    "Logitech's own picture of this keyboard can be shown here instead of the drawing. It is not included "
+    "with the program: download it from logitech.com (about 1 MB).":
+        "Замість цього малюнка тут можна показувати справжню картинку клавіатури від Logitech. Вона не постачається "
+        "з програмою: завантажте її з logitech.com (близько 1 МБ).",
     "Logitech's own picture of the mouse can be shown here instead of this model. It is not included "
     "with the program: download it from logitech.com (about 2.5 MB).":
         "Замість цієї моделі тут можна показувати справжню картинку миші від Logitech. Вона не постачається "
