@@ -82,7 +82,7 @@ def available():
 
 
 def fetch(url):
-    """The bytes at ``url``. Raises OSError."""
+    """The bytes at ``url``. Raises OSError, or http.client.IncompleteRead for a broken transfer."""
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64)"})
     with urllib.request.urlopen(request, timeout=40) as reply:
         return reply.read()
